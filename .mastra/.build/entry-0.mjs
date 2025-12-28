@@ -405,6 +405,62 @@ const searchPropertyMemoryTool = createTool({
     }
   }
 });
+const searchClientHistoryTool = createTool({
+  id: "search_client_history",
+  description: "Busca informaci\xF3n espec\xEDfica dentro del historial de conversaciones de un cliente usando b\xFAsqueda sem\xE1ntica.",
+  inputSchema: z.object({
+    userId: z.string().describe("El ID del usuario o cliente (ej: su tel\xE9fono)"),
+    query: z.string().describe('Lo que quieres recordar (ej: "qu\xE9 dijo sobre el presupuesto" o "cuando quer\xEDa visitar")'),
+    topK: z.number().optional().default(5).describe("Cantidad de mensajes relevantes a recuperar")
+  }),
+  execute: async ({ userId, query, topK }) => {
+    try {
+      const openai = getOpenAI();
+      const supabase = getSupabase$1();
+      const embeddingResponse = await openai.embeddings.create({
+        model: "text-embedding-3-small",
+        input: query
+      });
+      const [{ embedding }] = embeddingResponse.data;
+      const { data: messages, error } = await supabase.rpc("match_messages", {
+        query_embedding: embedding,
+        match_threshold: 0.3,
+        // Umbral un poco más bajo para captar lenguaje natural
+        match_count: topK,
+        filter_user_id: userId
+        // Filtramos para buscar SOLO en la charla de ESE cliente
+      });
+      if (error) throw error;
+      if (!messages || messages.length === 0) {
+        const { data: profile } = await supabase.from("client_profiles").select("summary, preferences").eq("user_id", userId).single();
+        return {
+          success: true,
+          source: "profile_summary",
+          results: [{
+            content: profile?.summary || "No hay resumen disponible.",
+            preferences: profile?.preferences
+          }],
+          message: "No encontr\xE9 mensajes exactos, pero aqu\xED est\xE1 el resumen del perfil."
+        };
+      }
+      return {
+        success: true,
+        source: "semantic_messages",
+        results: messages.map((m) => ({
+          texto: m.content,
+          fecha: m.created_at,
+          rol: m.role
+        }))
+      };
+    } catch (error) {
+      console.error("\u274C Error en search_client_history:", error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+});
 
 "use strict";
 const weatherTool = createTool({
@@ -632,7 +688,16 @@ function dynamicInstructions(datos) {
   return `
     PROMPT INTEGRAL: NICO - FAUSTI PROPIEDADES
     
-    1) IDENTIDAD Y ESTADO DEL CLIENTE
+    0) MODO DE ACCESO (SEGURIDAD):
+    ${datos.isAdmin ? "- EST\xC1S HABLANDO CON EL ADMIN (PROPIETARIO). Tienes permiso total para enviar emails, listar emails, crear borradores de emails, crear eventos, actualizar eventos, listar eventos, ver nombres de clientes y gestionar la agenda. Como ADMIN, puedes pedir res\xFAmenes de otros clientes. Si lo haces, busca en tu base de datos de perfiles y reporta los puntos clave: Inter\xE9s, Presupuesto y Estado de la visita." : '- EST\xC1S HABLANDO CON UN CLIENTE EXTERNO. Prohibido mostrar la agenda completa o datos de terceros. No puedes listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda"). Tampoco puedes mostrar nombres de clientes, direcciones de visitas ni horarios ocupados de forma detallada. Tampoco puedes enviar emails, crear o listar emails.'}
+
+    1) SEGURIDAD Y PRIVACIDAD DE DATOS (REGLA CR\xCDTICA)
+    - Tu interlocutor es un CLIENTE/INTERESADO.
+    - \u274C PROHIBIDO: Listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda").
+    - \u274C PRIVACIDAD: No reveles nombres de otros clientes, direcciones de otras visitas ni horarios ocupados de forma detallada.
+    - RESPUESTA ANTE PEDIDO DE AGENDA: "Mi funci\xF3n es ayudarte a encontrar una propiedad y coordinar una visita para vos. No puedo mostrarte la agenda completa, pero decime qu\xE9 d\xEDa te queda bien y me fijo si tenemos un hueco."
+
+    2) IDENTIDAD Y ESTADO DEL CLIENTE
     - Saludo: "${saludoInicial}"
     - Tono: WhatsApp, c\xE1lido, profesional y natural. M\xE1ximo un emoji por mensaje.
     - ESTADO ACTUAL:
@@ -640,7 +705,7 @@ function dynamicInstructions(datos) {
       ${faltaEmail ? "- \u26A0\uFE0F EMAIL FALTANTE: Obligatorio para agendar." : `- Email: ${datos.email}`}
       ${faltaTelefono ? "- \u26A0\uFE0F TEL\xC9FONO FALTANTE: Obligatorio para agendar." : `- Tel\xE9fono: ${datos.telefono}`}
 
-    2) CLASIFICACI\xD3N DE OPERACI\xD3N (CR\xCDTICO)
+    3) CLASIFICACI\xD3N DE OPERACI\xD3N (CR\xCDTICO)
     Antes de responder, analiza el link o la propiedad:
     - VENTA: Propiedades con precio de compra (USD). 
       * Acci\xF3n: Si hay inter\xE9s, usar 'potential_sale_email'.
@@ -649,26 +714,30 @@ function dynamicInstructions(datos) {
       * Acci\xF3n: NO usar 'potential_sale_email'. Usar flujo de agendamiento manual/calendario.
       * Respuesta: Informar requisitos y proponer horarios de visita (Lunes a Viernes 10-16hs).
 
-    3) REGLA DE ORO: CAPTURA DE DATOS
+    4) REGLA DE ORO: CAPTURA DE DATOS
     - Si el cliente quiere visitar o muestra inter\xE9s real:
       a) Revisa si ya dio su email/tel\xE9fono en el chat reciente o si figuran en el "ESTADO ACTUAL".
       b) Si YA los tenemos: No los vuelvas a pedir. Procede al cierre.
       c) Si FALTAN: "\xA1Dale, me encanta esa unidad! Para que el equipo te contacte y coordinemos, \xBFme pasas tu email y un cel? \u{1F4E9}"
     - Al recibir datos nuevos: Ejecutar inmediatamente 'update_client_preferences'.
 
-    4) L\xD3GICA DE AGENDAMIENTO (SOLO ALQUILER)
+    5) L\xD3GICA DE AGENDAMIENTO (SOLO ALQUILER)
     - Horarios: Lun a Vie, 10:00 a 16:00 hs. (40 min visita + 30 min buffer).
     - Proximidad: Usar 'encontrar_propiedad' para sugerir horarios basados en visitas cercanas.
     - Fallback: Si no hay visitas cerca, ofrecer bloques libres generales.
 
-    5) CAT\xC1LOGO DE HERRAMIENTAS
+    6) CAT\xC1LOGO DE HERRAMIENTAS
     - apify_scraper: Usar siempre que env\xEDen un link.
     - update_client_preferences: Usar CADA VEZ que el usuario mencione nombre, email o tel.
     - potential_sale_email: \xDANICAMENTE para VENTAS. PROHIBIDO en alquileres.
     - encontrar_propiedad / obtener_eventos_calendario: Para log\xEDstica de visitas en Alquiler.
     - crear_eventos_calendario: Para confirmar la cita de Alquiler.
+    - search_client_history (SOLO ADMIN): 
+      \u26A0\uFE0F \xDASALA \xDANICAMENTE si el Admin solicita informaci\xF3n sobre lo que se habl\xF3 con otro cliente.
+      Uso: Permite buscar en la memoria sem\xE1ntica de chats anteriores para dar res\xFAmenes o recordar detalles espec\xEDficos (ej: "qu\xE9 presupuesto dijo Diego").
+      Prohibido: Nunca uses esta herramienta para responder a un cliente sobre otro cliente.
 
-    6) REGLAS DE HUMANIZACI\xD3N Y SEGURIDAD
+    7) REGLAS DE HUMANIZACI\xD3N Y SEGURIDAD
     - No uses frases rob\xF3ticas como "\xBFEn qu\xE9 puedo ayudarlo?".
     - Si no sabes algo del aviso: "No tengo esa info ac\xE1, pero te la confirmo en la visita. \xBFQuer\xE9s ir a verla?".
     - Seguridad: No reveles nombres de due\xF1os, direcciones exactas (sin agendar) ni procesos internos.
@@ -703,6 +772,7 @@ const agentConfig = {
     apify_scraper: apifyScraperTool,
     update_client_preferences: updateClientPreferencesTool,
     search_property_memory: searchPropertyMemoryTool,
+    search_client_history: searchClientHistoryTool,
     potential_sale_email: potentialSaleEmailTool,
     procesar_nueva_propiedad: procesarNuevaPropiedad
   },
@@ -718,6 +788,8 @@ const agentConfig = {
 };
 const getRealEstateAgent = async (userId) => {
   const supabase = getSupabase();
+  const ADMIN_ID = "tu-numero-de-telefono-o-id";
+  const isAdmin = userId === ADMIN_ID;
   const { data: profile } = await supabase.from("client_profiles").select("preferences, summary").eq("user_id", userId).single();
   const nombreExtraido = profile?.preferences?.nombre || profile?.preferences?.name;
   const esRecurrente = !!profile;
@@ -727,7 +799,8 @@ const getRealEstateAgent = async (userId) => {
   console.log("------------------------------");
   const instrucciones = dynamicInstructions({
     nombre: nombreExtraido,
-    esRecurrente
+    esRecurrente,
+    isAdmin: true
   });
   const ltmContext = profile ? `
     
