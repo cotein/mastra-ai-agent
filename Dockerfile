@@ -1,4 +1,4 @@
-ARG NODE_VERSION=22.0.0
+ARG NODE_VERSION=24.0.0
 
 # --- Etapa 1: Build ---
 FROM node:${NODE_VERSION}-alpine as builder
