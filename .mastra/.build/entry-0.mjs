@@ -407,58 +407,23 @@ const searchPropertyMemoryTool = createTool({
 });
 const searchClientHistoryTool = createTool({
   id: "search_client_history",
-  description: "Busca informaci\xF3n espec\xEDfica dentro del historial de conversaciones de un cliente usando b\xFAsqueda sem\xE1ntica.",
+  description: "Obtiene el resumen y preferencias de un cliente espec\xEDfico para el Admin.",
   inputSchema: z.object({
-    userId: z.string().describe("El ID del usuario o cliente (ej: su tel\xE9fono)"),
-    query: z.string().describe('Lo que quieres recordar (ej: "qu\xE9 dijo sobre el presupuesto" o "cuando quer\xEDa visitar")'),
-    topK: z.number().optional().default(5).describe("Cantidad de mensajes relevantes a recuperar")
+    userId: z.string().describe("El ID o tel\xE9fono del cliente")
   }),
-  execute: async ({ userId, query, topK }) => {
-    try {
-      const openai = getOpenAI();
-      const supabase = getSupabase$1();
-      const embeddingResponse = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: query
-      });
-      const [{ embedding }] = embeddingResponse.data;
-      const { data: messages, error } = await supabase.rpc("match_messages", {
-        query_embedding: embedding,
-        match_threshold: 0.3,
-        // Umbral un poco más bajo para captar lenguaje natural
-        match_count: topK,
-        filter_user_id: userId
-        // Filtramos para buscar SOLO en la charla de ESE cliente
-      });
-      if (error) throw error;
-      if (!messages || messages.length === 0) {
-        const { data: profile } = await supabase.from("client_profiles").select("summary, preferences").eq("user_id", userId).single();
-        return {
-          success: true,
-          source: "profile_summary",
-          results: [{
-            content: profile?.summary || "No hay resumen disponible.",
-            preferences: profile?.preferences
-          }],
-          message: "No encontr\xE9 mensajes exactos, pero aqu\xED est\xE1 el resumen del perfil."
-        };
-      }
-      return {
-        success: true,
-        source: "semantic_messages",
-        results: messages.map((m) => ({
-          texto: m.content,
-          fecha: m.created_at,
-          rol: m.role
-        }))
-      };
-    } catch (error) {
-      console.error("\u274C Error en search_client_history:", error.message);
-      return {
-        success: false,
-        error: error.message
-      };
+  execute: async ({ userId }) => {
+    const supabase = getSupabase$1();
+    const { data: profile, error } = await supabase.from("client_profiles").select("nombre, preferences, summary, last_interaction").eq("user_id", userId).single();
+    if (error || !profile) {
+      return { success: false, message: "No encontr\xE9 a ning\xFAn cliente con ese ID." };
     }
+    return {
+      success: true,
+      nombre: profile.nombre,
+      resumen: profile.summary || "No hay un resumen redactado a\xFAn.",
+      detalles: profile.preferences,
+      ultima_vez: profile.last_interaction
+    };
   }
 });
 
@@ -813,10 +778,6 @@ RECUERDA SOBRE ESTE CLIENTE:
     instructions: instrucciones + ltmContext
   });
 };
-const realEstateAgent = new Agent({
-  ...agentConfig,
-  instructions: dynamicInstructions({ esRecurrente: false })
-});
 
 "use strict";
 const scrapePropertyStep = createStep({
@@ -846,6 +807,7 @@ const nicoBookingWorkflow = createWorkflow({
 if (!global.crypto) {
   global.crypto = require$$0;
 }
+const realEstateAgent = await getRealEstateAgent("placeholder-system");
 const storage = process.env.POSTGRES_URL ? new PostgresStore({
   id: "pg-store",
   connectionString: process.env.POSTGRES_URL

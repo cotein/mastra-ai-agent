@@ -69,71 +69,31 @@ export const searchPropertyMemoryTool = createTool({
  */
 export const searchClientHistoryTool = createTool({
   id: 'search_client_history',
-  description: 'Busca información específica dentro del historial de conversaciones de un cliente usando búsqueda semántica.',
+  description: 'Obtiene el resumen y preferencias de un cliente específico para el Admin.',
   inputSchema: z.object({
-    userId: z.string().describe('El ID del usuario o cliente (ej: su teléfono)'),
-    query: z.string().describe('Lo que quieres recordar (ej: "qué dijo sobre el presupuesto" o "cuando quería visitar")'),
-    topK: z.number().optional().default(5).describe('Cantidad de mensajes relevantes a recuperar'),
+    userId: z.string().describe('El ID o teléfono del cliente'),
   }),
-  execute: async ({ userId, query, topK }) => {
-    try {
-      const openai = getOpenAI();
-      const supabase = getSupabase();
+  execute: async ({ userId }) => {
+    const supabase = getSupabase();
 
-      // 1. Generamos el embedding de la pregunta del Admin
-      const embeddingResponse = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: query,
-      });
+    // En lugar de buscar en mensajes (que no tienen user_id), 
+    // buscamos en el perfil que Nico actualiza constantemente.
+    const { data: profile, error } = await supabase
+      .from('client_profiles')
+      .select('nombre, preferences, summary, last_interaction')
+      .eq('user_id', userId)
+      .single();
 
-      const [{ embedding }] = embeddingResponse.data;
-
-      // 2. Buscamos en la base de datos de mensajes
-      // Nota: Esta función RPC 'match_messages' debe existir en tu Supabase
-      const { data: messages, error } = await supabase.rpc('match_messages', {
-        query_embedding: embedding,
-        match_threshold: 0.3, // Umbral un poco más bajo para captar lenguaje natural
-        match_count: topK,
-        filter_user_id: userId // Filtramos para buscar SOLO en la charla de ESE cliente
-      });
-
-      if (error) throw error;
-
-      // 3. Si no hay mensajes vectorizados, intentamos buscar el resumen en el perfil
-      if (!messages || messages.length === 0) {
-        const { data: profile } = await supabase
-          .from('client_profiles')
-          .select('summary, preferences')
-          .eq('user_id', userId)
-          .single();
-
-        return {
-          success: true,
-          source: 'profile_summary',
-          results: [{
-            content: profile?.summary || 'No hay resumen disponible.',
-            preferences: profile?.preferences
-          }],
-          message: "No encontré mensajes exactos, pero aquí está el resumen del perfil."
-        };
-      }
-
-      return {
-        success: true,
-        source: 'semantic_messages',
-        results: messages.map((m: any) => ({
-          texto: m.content,
-          fecha: m.created_at,
-          rol: m.role
-        }))
-      };
-
-    } catch (error: any) {
-      console.error('❌ Error en search_client_history:', error.message);
-      return {
-        success: false,
-        error: error.message
-      };
+    if (error || !profile) {
+      return { success: false, message: "No encontré a ningún cliente con ese ID." };
     }
+
+    return {
+      success: true,
+      nombre: profile.nombre,
+      resumen: profile.summary || "No hay un resumen redactado aún.",
+      detalles: profile.preferences,
+      ultima_vez: profile.last_interaction
+    };
   },
 });

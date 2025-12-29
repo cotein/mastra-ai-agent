@@ -133,7 +133,7 @@ export const getRealEstateAgent = async (userId: string) => {
   });
 };
 
-export const realEstateAgent = new Agent({
+/* export const realEstateAgent = new Agent({
   ...agentConfig,
   instructions: dynamicInstructions({ esRecurrente: false }),
-});
+}); */

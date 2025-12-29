@@ -5,14 +5,15 @@ import { Agent, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStream
 import { Memory as Memory$1 } from '@mastra/memory';
 import { ToolCallFilter, TokenLimiter } from '@mastra/core/processors';
 import { PostgresStore } from '@mastra/pg';
-import { propiedadMasCercanaTool } from './tools/4a22549e-ccfb-4e02-bf34-01828d06869a.mjs';
-import { calendarManagerTools } from './tools/09723d31-134a-4fe1-be2d-7c7d832dce47.mjs';
-import { gmailManagerTools } from './tools/9ffa017f-cf3f-437e-8410-a69819c90c60.mjs';
-import { apifyScraperTool } from './tools/af1e3007-0631-4643-818c-793180fe7a59.mjs';
-import { updateClientPreferencesTool } from './tools/32761e0d-e4ed-44d1-935b-d9947a76c1e2.mjs';
-import { searchClientHistoryTool, searchPropertyMemoryTool } from './tools/8929261e-0326-4716-9150-0f7fd6b596a9.mjs';
+import { propiedadMasCercanaTool } from './tools/0ac6e59f-6a02-4007-a099-991413aacdfd.mjs';
+import { calendarManagerTools } from './tools/decd1576-7d4d-48a6-92d7-e90827d6cf7e.mjs';
+import { gmailManagerTools } from './tools/44f8d09e-0a22-480a-bca5-7c68b8602573.mjs';
+import { apifyScraperTool } from './tools/116a5866-657d-445c-a624-547f54316f08.mjs';
+import { updateClientPreferencesTool } from './tools/44d460d9-2f1d-4f83-b8fa-97070d7ff7a6.mjs';
+import { searchClientHistoryTool, searchPropertyMemoryTool } from './tools/c964f0c7-7339-47d8-98fc-824cf25f5124.mjs';
+import { createClient } from '@supabase/supabase-js';
 import { p as procesarNuevaPropiedad, i as ingestionWorkflow } from './procesa-nueva-propiedad.mjs';
-import { potentialSaleEmailTool } from './tools/b6109289-b55b-4e55-8efd-aa2a37fb2dd1.mjs';
+import { potentialSaleEmailTool } from './tools/a8f1f729-606e-4005-98bd-f4b255e4c96c.mjs';
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import z$1, { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
@@ -44,7 +45,6 @@ import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
 import 'axios';
 import 'googleapis';
-import '@supabase/supabase-js';
 import 'openai';
 
 function dynamicInstructions(datos) {
@@ -70,7 +70,7 @@ function dynamicInstructions(datos) {
     PROMPT INTEGRAL: NICO - FAUSTI PROPIEDADES
     
     0) MODO DE ACCESO (SEGURIDAD):
-    ${datos.isAdmin ? "- EST\xC1S HABLANDO CON EL ADMIN (PROPIETARIO). Tienes permiso total para enviar emails, listar emails, crear borradores de emails, crear eventos, actualizar eventos, listar eventos, ver nombres de clientes y gestionar la agenda. Como ADMIN, puedes pedir res\xFAmenes de otros clientes. Si lo haces, busca en tu base de datos de perfiles y reporta los puntos clave: Inter\xE9s, Presupuesto y Estado de la visita." : '- EST\xC1S HABLANDO CON UN CLIENTE EXTERNO. Prohibido mostrar la agenda completa o datos de terceros. No puedes listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda"). Tampoco puedes mostrar nombres de clientes, direcciones de visitas ni horarios ocupados de forma detallada. Tampoco puedes enviar emails, crear o listar emails.'}
+    ${"- EST\xC1S HABLANDO CON EL ADMIN (PROPIETARIO). Tienes permiso total para enviar emails, listar emails, crear borradores de emails, crear eventos, actualizar eventos, listar eventos, ver nombres de clientes y gestionar la agenda. Como ADMIN, puedes pedir res\xFAmenes de otros clientes. Si lo haces, busca en tu base de datos de perfiles y reporta los puntos clave: Inter\xE9s, Presupuesto y Estado de la visita." }
 
     1) SEGURIDAD Y PRIVACIDAD DE DATOS (REGLA CR\xCDTICA)
     - Tu interlocutor es un CLIENTE/INTERESADO.
@@ -128,6 +128,10 @@ function dynamicInstructions(datos) {
   `;
 }
 
+const getSupabase = () => createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
+);
 const storage$1 = new PostgresStore({
   id: "postgres-store",
   connectionString: process.env.SUPABASE_POSTGRES_URL,
@@ -162,10 +166,27 @@ const agentConfig = {
     new TokenLimiter(2e3)
   ]
 };
-const realEstateAgent = new Agent({
-  ...agentConfig,
-  instructions: dynamicInstructions({ })
-});
+const getRealEstateAgent = async (userId) => {
+  const supabase = getSupabase();
+  const { data: profile } = await supabase.from("client_profiles").select("preferences, summary").eq("user_id", userId).single();
+  const nombreExtraido = profile?.preferences?.nombre || profile?.preferences?.name;
+  console.log("--- DEBUG SUPABASE PROFILE ---");
+  console.log("User ID buscado:", userId);
+  console.log("Data cruda de Supabase:", profile);
+  console.log("------------------------------");
+  const instrucciones = dynamicInstructions({
+    nombre: nombreExtraido});
+  const ltmContext = profile ? `
+    
+RECUERDA SOBRE ESTE CLIENTE:
+    - Preferencias: ${JSON.stringify(profile.preferences)}
+    - Resumen: ${profile.summary || "Sin historial previo"}
+  ` : "";
+  return new Agent({
+    ...agentConfig,
+    instructions: instrucciones + ltmContext
+  });
+};
 
 const scrapePropertyStep = createStep({
   id: "scrape-property",
@@ -192,6 +213,7 @@ const nicoBookingWorkflow = createWorkflow({
 if (!global.crypto) {
   global.crypto = require$$0;
 }
+const realEstateAgent = await getRealEstateAgent("placeholder-system");
 const storage = process.env.POSTGRES_URL ? new PostgresStore({
   id: "pg-store",
   connectionString: process.env.POSTGRES_URL

@@ -1,0 +1,16 @@
+services:
+  mastra-agent:
+    build: .
+    ports:
+      - "4111:4111"
+    environment:
+      - NODE_ENV=production
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOCATIONIQ_API_KEY=${LOCATIONIQ_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_POSTGRES_URL=${SUPABASE_POSTGRES_URL}
+      # Add other keys from .env-example as needed
+    env_file:
+      - .env
+    restart: unless-stopped

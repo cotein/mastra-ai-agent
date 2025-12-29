@@ -1,6 +1,6 @@
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { z } from 'zod';
-import { apifyScraperTool } from './tools/af1e3007-0631-4643-818c-793180fe7a59.mjs';
+import { apifyScraperTool } from './tools/116a5866-657d-445c-a624-547f54316f08.mjs';
 import { createTool } from '@mastra/core/tools';
 
 const scrapeStep = createStep({
