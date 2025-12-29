@@ -1,58 +1,37 @@
 ARG NODE_VERSION=22.0.0
 
-# Build stage
+# --- Etapa 1: Build ---
 FROM node:${NODE_VERSION}-alpine as builder
-
 WORKDIR /app
 
-# Install dependencies for building
-# We need to copy package files first for caching
+# Instalamos todas las dependencias (necesarias para el build)
 COPY package*.json ./
-
-# Install all dependencies (including devDependencies for build)
 RUN npm install
 
-# Copy source code
+# Copiamos el código y construimos
 COPY . .
-
-# Build the application
-# This typically generates artifacts in .mastra
 RUN npm run build
 
-# Production stage
+# --- Etapa 2: Runner ---
 FROM node:${NODE_VERSION}-alpine as runner
-
 WORKDIR /app
 
 ENV NODE_ENV=production
 
-# Copy package files again for production dependencies
+# Copiamos los archivos de paquetes
 COPY package*.json ./
 
-# Install only production dependencies
+# TIP: Instalamos dependencias incluyendo las necesarias para ejecutar el CLI de Mastra
+# Si tienes problemas de módulos no encontrados, quita el --only=production
 RUN npm install --only=production
 
-# Copy built artifacts from builder stage based on standard Mastra output
+# COPIA CRUCIAL: Copiamos la carpeta de salida generada por Mastra
 COPY --from=builder /app/.mastra ./.mastra
-COPY --from=builder /app/src ./src
+# También es recomendable copiar los node_modules desde builder si tienes espacio, 
+# para evitar inconsistencias, pero npm install --only=production suele bastar.
 
-# Expose the default Mastra port
+# Exponer puerto (Mastra suele usar 4111)
 EXPOSE 4111
 
-# Start the application
-CMD ["npm", "run", "dev"]
-# Using 'npm run dev' as 'mastra start' might need specific setup, 
-# but per package.json 'dev' runs 'mastra dev'. 
-# Ideally for production 'mastra start' is better if 'mastra build' was successful.
-# Let's try to align with the plan: 
-# The plan said "runner" executes "mastra start".
-# Let's adjust CMD to be 'npm start' if we add a start script, or directly 'npx mastra start'.
-# Checking package.json again via memory:
-# "scripts": { "build": "mastra build", "dev": "...", "test": "..." }
-# I should probably add a "start" script or use npx mastra start.
-# Let's stick to 'npx mastra start' for production if build artifacts exist.
-# However, the user might want to run in dev mode per 'dev' script which has polyfill.
-# If I use Node 22, I don't need polyfill.
-# Let's try to use 'npx mastra start' for a true production build.
-
+# Usamos npx para asegurar que usamos el binario local de la carpeta .mastra
 CMD ["npx", "mastra", "start"]
