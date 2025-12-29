@@ -1,23 +1,15 @@
 {
-  "name": "my-first-agent",
+  "name": "fausti-agent",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "NODE_OPTIONS=\"--require ${PWD}/src/polyfill.js\" mastra dev",
-    "build": "mastra build"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "devDependencies": {
-    "@types/node": "^25.0.3",
-    "mastra": "^1.0.0-beta.11",
-    "typescript": "^5.9.3"
+    "build": "mastra build",
+    "start": "mastra start" 
   },
   "dependencies": {
+    "mastra": "^1.0.0-beta.11",
     "@ai-sdk/openai": "^3.0.1",
     "@mastra/core": "^1.0.0-beta.14",
     "@mastra/memory": "^1.0.0-beta.6",
@@ -27,8 +19,11 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "googleapis": "^169.0.0",
-    "nodenv": "^0.1.0",
     "openai": "^6.15.0",
     "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
   }
 }
