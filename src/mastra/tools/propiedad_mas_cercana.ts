@@ -9,7 +9,7 @@ export const propiedadMasCercanaTool = createTool({
   description: 'Calcula la distancia entre una dirección nueva y las visitas agendadas en el calendario para optimizar la logística.',
   inputSchema: z.object({
     nueva_direccion: z.string().describe('La dirección de la propiedad que se quiere evaluar'),
-    eventos_calendario: z.array(z.any()).describe('Lista de eventos obtenidos del calendario'),
+    eventos_calendario: z.array(z.string()).describe('Lista de nombres de eventos'),
   }),
   execute: async (context) => {
     const { nueva_direccion, eventos_calendario } = context;
