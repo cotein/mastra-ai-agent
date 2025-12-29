@@ -14,3 +14,9 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    networks:
+      - dmit_network
+
+networks:
+  dmit_network:
+    external: true
