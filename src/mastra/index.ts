@@ -4,10 +4,12 @@ if (!global.crypto) {
     global.crypto = require('crypto');
 }
 import { Mastra } from "@mastra/core";
-import { realEstateAgent } from "./agents/real-estate-agent";
+import { getRealEstateAgent } from "./agents/real-estate-agent";
 import { PostgresStore } from "@mastra/pg";
 import { nicoBookingWorkflow } from './workflows/booking';
 import { ingestionWorkflow } from './workflows/ingesta';
+
+const realEstateAgent = await getRealEstateAgent('placeholder-system');
 
 // Determinar el storage
 const storage = process.env.POSTGRES_URL 
