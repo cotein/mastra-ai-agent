@@ -36,7 +36,7 @@ export const mastra = new Mastra({
   server: {
     port: 4111,
     apiRoutes: [
-      registerApiRoute('chat', {
+      registerApiRoute('/chat', {
         method: 'POST',
         handler: async (c: any) => {
           try {
