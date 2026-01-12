@@ -100,7 +100,64 @@ export const mastra = new Mastra({
             }
 
 
-            // 2. STREAMING Y LÓGICA DE AGENTE
+            // DETECCIÓN MANYCHAT (O si el cliente pide explicitly mode=json)
+            const isManychat = !!body.custom_fields; 
+
+            // =================================================================================
+            // MODO MANYCHAT (NO-STREAM)
+            // =================================================================================
+            if (isManychat) {
+                console.log("🤖 MODO MANYCHAT DETECTADO: Usando generate() en lugar de stream()");
+                
+                // 1. Scraping (Sincrono)
+                if (linksEncontrados && linksEncontrados.length > 0) {
+                     const url = linksEncontrados[0].trim();
+                     finalContextData.link = url;
+                     if (currentThreadId) await ThreadContextService.clearThreadMessages(currentThreadId);
+
+                     try {
+                        const workflow = mastra.getWorkflow('propertyWorkflow');
+                        const run = await workflow.createRun();
+                        console.log(`🚀 (Manychat) Iniciando Workflow para: ${url}`);
+                        const result = await run.start({ inputData: { url } });
+
+                        if (result.status === 'success' && result.result) {
+                             const outputLogica = result.result;
+                             if (outputLogica.operacionTipo) {
+                                 propertyOperationType = outputLogica.operacionTipo;
+                                 finalContextData.operacionTipo = outputLogica.operacionTipo;
+                                 finalContextData.propertyAddress = outputLogica.address;
+                                 console.log("🚀 (Manychat) Tipo OP detectado:", propertyOperationType);
+                             }
+                        }
+                     } catch (err) {
+                         console.error("❌ (Manychat) Workflow error:", err);
+                     }
+                }
+
+                // 2. Generación Agente
+                const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase() as OperacionTipo);
+                const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
+                
+                console.log("📝 Generating sync response...");
+                const response = await agent.generate(message, {
+                    threadId: currentThreadId,
+                    resourceId: userId, 
+                });
+
+                console.log("✅ Respuesta generada:", response.text);
+                
+                // Estructura JSON que Manychat espera (mapped to custom field 'response')
+                // Ojo: Manychat mapping debe ser configurado para leer "response_text" o similar.
+                return c.json({ 
+                    response_text: response.text,
+                    status: "success"
+                });
+            }
+
+            // =================================================================================
+            // MODO STREAM (DEFAULT PARA WEB / PLAYGROUND)
+            // =================================================================================
             return stream(c, async (streamInstance) => {
 
                 console.log(`⏱️ [${new Date().toISOString()}] Inicio Stream Handler`);
