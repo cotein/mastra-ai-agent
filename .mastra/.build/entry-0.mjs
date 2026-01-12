@@ -1189,11 +1189,12 @@ const mastra = new Mastra({
   },
   server: {
     port: 4111,
-    apiRoutes: [registerApiRoute("chat", {
+    apiRoutes: [registerApiRoute("/chat", {
       method: "POST",
       handler: async (c) => {
         try {
           const body = await c.req.json();
+          console.log("\u{1F4E8} RAW BODY RECIBIDO:", JSON.stringify(body, null, 2));
           const {
             message,
             threadId,

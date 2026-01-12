@@ -7,14 +7,14 @@ import { openai as openai$1 } from '@ai-sdk/openai';
 import { PgVector, PostgresStore } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
-import { calendarManagerTools } from './tools/e0912319-a3a8-4fe3-b7a9-f6f8dd56f1c9.mjs';
-import { gmailManagerTools } from './tools/ebad063a-20eb-4e15-a088-0c1fd1dd83f7.mjs';
-import { potentialSaleEmailTool } from './tools/3ddcead0-67a9-43d7-9800-eedc749aa4d6.mjs';
-import { realEstatePropertyFormatterTool } from './tools/401a7ffb-0408-4a9a-9f6e-05af50906be0.mjs';
+import { calendarManagerTools } from './tools/490e7c3c-7ec4-4c27-8c47-2a54f4f1ce1b.mjs';
+import { gmailManagerTools } from './tools/937d1ddb-f6e7-46f2-bc37-cd9ddd4d91fe.mjs';
+import { potentialSaleEmailTool } from './tools/093f3af4-28ba-4d34-8c10-bc08b1fbe04f.mjs';
+import { realEstatePropertyFormatterTool } from './tools/866236a8-5743-4a17-8f3c-fce6b7631f38.mjs';
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import z$1, { z, ZodOptional, ZodNullable, ZodArray, ZodRecord, ZodObject, ZodFirstPartyTypeKind } from 'zod';
-import { apifyScraperTool } from './tools/6b2fa7e8-3b54-4331-9b06-1b1b6d6ac961.mjs';
-import { propertyDataProcessorTool } from './tools/1af88e44-a7bd-4ab8-8ae8-ba475a71fecd.mjs';
+import { apifyScraperTool } from './tools/ccfaa10c-8692-4519-90f2-d83a47062601.mjs';
+import { propertyDataProcessorTool } from './tools/d1c711ed-10e4-4340-9b03-eccaf9c2563f.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
@@ -1748,11 +1748,12 @@ const mastra = new Mastra({
   },
   server: {
     port: 4111,
-    apiRoutes: [registerApiRoute("chat", {
+    apiRoutes: [registerApiRoute("/chat", {
       method: "POST",
       handler: async (c) => {
         try {
           const body = await c.req.json();
+          console.log("\u{1F4E8} RAW BODY RECIBIDO:", JSON.stringify(body, null, 2));
           const {
             message,
             threadId,
