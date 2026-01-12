@@ -42,8 +42,10 @@ export const mastra = new Mastra({
           try {
             const body = await c.req.json();
             console.log("📨 RAW BODY RECIBIDO:", JSON.stringify(body, null, 2)); // <--- ESTO IMPRIMIRÁ TODO LO QUE LLEGA
-            const { message, threadId, userId, clientData } = body;
-            
+            let message = body.custom_fields.endResponse;
+            let threadId = body.id;
+            let userId = body.id;
+            let clientData = {}
             // --- 🛑 ZONA DE DEBUGGING 🛑 ---
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
             console.log("1. ThreadID recibido:", threadId);
