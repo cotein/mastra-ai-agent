@@ -10,7 +10,7 @@ import { response_mock } from "../tools/response";
 const scrapeStep = createStep({
   id: "scrapeStep",
   inputSchema: z.object({
-    url: z.url(),
+    url: z.string().url(),
   }),
   outputSchema: z.object({
     success: z.boolean(),
