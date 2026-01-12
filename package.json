@@ -22,9 +22,9 @@
     "express": "^5.2.1",
     "googleapis": "^169.0.0",
     "h3": "^1.15.4",
-    "mastra": "^1.0.0-beta.19",
+    "mastra": "^1.0.0-beta.14",
     "openai": "^6.15.0",
-    "zod": "^4.2.1"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",
