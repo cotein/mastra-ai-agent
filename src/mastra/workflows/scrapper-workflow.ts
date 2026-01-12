@@ -3,9 +3,7 @@ import { z } from "zod";
 import { apifyScraperTool } from "../tools/extraer_datos_propiedad_url";
 import { realEstatePropertyFormatterTool } from "../tools/real-estate-property-formatter";
 import { sleep } from "../../helpers/sleep";
-import { OperacionTipo } from "./../../types";
 import {propertyDataProcessorTool} from "../tools/property-data-processor";
-import { response_mock } from "../tools/response";
 // 1. Paso de Scrapeo (Simulado o Real)
 const scrapeStep = createStep({
   id: "scrapeStep",

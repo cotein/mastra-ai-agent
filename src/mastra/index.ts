@@ -51,8 +51,9 @@ export const mastra = new Mastra({
             console.log("3. ¿Tiene llaves?", clientData ? Object.keys(clientData) : "Es Null/Undefined");
             // ------------------------------
 
-            if (!threadId) {
-              return c.json({ error: "ThreadID is required" }, 400);
+            // Relaxed check: Manychat might not send threadId
+            if (!threadId && !userId) {
+              return c.json({ error: "Either ThreadID or UserID is required" }, 400);
             }
 
             const currentThreadId = threadId || `chat_${userId}`;
@@ -100,6 +101,8 @@ export const mastra = new Mastra({
             // 2. STREAMING Y LÓGICA DE AGENTE
             return stream(c, async (streamInstance) => {
 
+                console.log(`⏱️ [${new Date().toISOString()}] Inicio Stream Handler`);
+            
                 // --- BLOQUE DE SCRAPING / WORKFLOW ---
                 if (linksEncontrados && linksEncontrados.length > 0) {
                   const url = linksEncontrados[0].trim();
