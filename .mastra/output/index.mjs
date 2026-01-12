@@ -1,328 +1,166 @@
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/evals/scoreTraces';
-import require$$0 from 'crypto';
 import { Mastra } from '@mastra/core';
+import { registerApiRoute, MastraServerBase } from '@mastra/core/server';
 import { Agent, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList } from '@mastra/core/agent';
 import { Memory as Memory$1 } from '@mastra/memory';
-import { ToolCallFilter, TokenLimiter } from '@mastra/core/processors';
-import { PostgresStore } from '@mastra/pg';
-import { propiedadMasCercanaTool } from './tools/4c35744b-c587-479a-b0e3-a0b0473d3c49.mjs';
-import { calendarManagerTools } from './tools/d0438b38-8ec4-4361-a35d-0ca4d0acf57f.mjs';
-import { gmailManagerTools } from './tools/1fbe6050-8459-4ef7-8b13-79e2680f26ea.mjs';
-import { apifyScraperTool } from './tools/2ff81e07-e212-4dc6-a4fb-44d1392ae7bc.mjs';
-import { updateClientPreferencesTool } from './tools/f43c6f53-5028-414c-b2dc-7062ea8f8dfb.mjs';
-import { searchClientHistoryTool, searchPropertyMemoryTool } from './tools/84bb9af8-0224-481b-984e-a7dded2d882e.mjs';
-import { createClient } from '@supabase/supabase-js';
-import { p as procesarNuevaPropiedad, i as ingestionWorkflow } from './procesa-nueva-propiedad.mjs';
-import { potentialSaleEmailTool } from './tools/61e3a9d7-f9e1-4eaf-8b88-30818df64a60.mjs';
+import { openai as openai$1 } from '@ai-sdk/openai';
+import { PgVector, PostgresStore } from '@mastra/pg';
+import { Pool } from 'pg';
+import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
+import { calendarManagerTools } from './tools/e0912319-a3a8-4fe3-b7a9-f6f8dd56f1c9.mjs';
+import { gmailManagerTools } from './tools/ebad063a-20eb-4e15-a088-0c1fd1dd83f7.mjs';
+import { potentialSaleEmailTool } from './tools/3ddcead0-67a9-43d7-9800-eedc749aa4d6.mjs';
+import { realEstatePropertyFormatterTool } from './tools/401a7ffb-0408-4a9a-9f6e-05af50906be0.mjs';
 import { createWorkflow, createStep } from '@mastra/core/workflows';
-import z$1, { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
+import z$1, { z, ZodOptional, ZodNullable, ZodArray, ZodRecord, ZodObject, ZodFirstPartyTypeKind } from 'zod';
+import { apifyScraperTool } from './tools/6b2fa7e8-3b54-4331-9b06-1b1b6d6ac961.mjs';
+import { propertyDataProcessorTool } from './tools/1af88e44-a7bd-4ab8-8ae8-ba475a71fecd.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
-import { join as join$1 } from 'path/posix';
+import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
 import { createServer } from 'http';
 import { Http2ServerRequest } from 'http2';
 import { Readable, Writable } from 'stream';
-import { existsSync, readFileSync, createReadStream, lstatSync } from 'fs';
-import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
+import crypto$1 from 'crypto';
+import { readFileSync, existsSync, createReadStream, lstatSync } from 'fs';
 import { isVercelTool, createTool, Tool } from '@mastra/core/tools';
 import { zodToJsonSchema as zodToJsonSchema$1 } from '@mastra/core/utils/zod-to-json';
 import { MastraError, ErrorDomain, ErrorCategory } from '@mastra/core/error';
 import { generateEmptyFromSchema } from '@mastra/core/utils';
+import { listScoresResponseSchema } from '@mastra/core/evals';
+import { listTracesResponseSchema, tracesFilterSchema, paginationArgsSchema, tracesOrderBySchema, getTraceResponseSchema, getTraceArgsSchema, scoreTracesResponseSchema, scoreTracesRequestSchema, spanIdsSchema, dateRangeSchema } from '@mastra/core/storage';
 import { MastraA2AError } from '@mastra/core/a2a';
 import { TransformStream as TransformStream$1, ReadableStream as ReadableStream$1 } from 'stream/web';
 import * as z42 from 'zod/v4';
 import { z as z$2 } from 'zod/v4';
 import { ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod/v3';
-import { MastraMemory } from '@mastra/core/memory';
+import { MastraMemory, removeWorkingMemoryTags, extractWorkingMemoryContent } from '@mastra/core/memory';
 import { spawn as spawn$1, execFile as execFile$1, exec as exec$1 } from 'child_process';
 import { createRequire } from 'module';
 import util, { promisify } from 'util';
 import { ModelRouterLanguageModel, PROVIDER_REGISTRY } from '@mastra/core/llm';
 import { tmpdir } from 'os';
 import { RequestContext } from '@mastra/core/request-context';
-import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
-import 'axios';
 import 'googleapis';
 import 'openai';
+import 'axios';
 
-function dynamicInstructions(datos) {
-  const ahora = new Intl.DateTimeFormat("es-AR", {
-    timeZone: "America/Argentina/Buenos_Aires",
-    hour: "numeric",
-    hour12: false
-  }).format(/* @__PURE__ */ new Date());
-  const hora = parseInt(ahora);
-  let momentoDia = "\xA1Hola!";
-  if (hora >= 5 && hora < 12) momentoDia = "\xA1Buen d\xEDa!";
-  else if (hora >= 12 && hora < 20) momentoDia = "\xA1Buenas tardes!";
-  else momentoDia = "\xA1Buenas noches!";
-  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, qu\xE9 bueno saludarte de nuevo. Nico por ac\xE1 \u{1F44B}` : `${momentoDia} \xBFC\xF3mo va? Nico por ac\xE1, de Fausti Propiedades \u{1F44B}`;
-  const faltaEmail = !datos.email;
-  const faltaTelefono = !datos.telefono;
-  const faltaNombre = !datos.nombre;
-  console.log("=== DEBUG: Nico Agent ===");
-  console.log("Contexto:", { nombre: datos.nombre, email: datos.email, hora });
-  console.log("Faltantes:", { faltaNombre, faltaEmail, faltaTelefono });
-  console.log("=========================");
-  return `
-    PROMPT INTEGRAL: NICO - FAUSTI PROPIEDADES
-    
-    0) MODO DE ACCESO (SEGURIDAD):
-    ${"- EST\xC1S HABLANDO CON EL ADMIN (PROPIETARIO). Tienes permiso total para enviar emails, listar emails, crear borradores de emails, crear eventos, actualizar eventos, listar eventos, ver nombres de clientes y gestionar la agenda. Como ADMIN, puedes pedir res\xFAmenes de otros clientes. Si lo haces, busca en tu base de datos de perfiles y reporta los puntos clave: Inter\xE9s, Presupuesto y Estado de la visita." }
-
-    1) SEGURIDAD Y PRIVACIDAD DE DATOS (REGLA CR\xCDTICA)
-    - Tu interlocutor es un CLIENTE/INTERESADO.
-    - \u274C PROHIBIDO: Listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda").
-    - \u274C PRIVACIDAD: No reveles nombres de otros clientes, direcciones de otras visitas ni horarios ocupados de forma detallada.
-    - RESPUESTA ANTE PEDIDO DE AGENDA: "Mi funci\xF3n es ayudarte a encontrar una propiedad y coordinar una visita para vos. No puedo mostrarte la agenda completa, pero decime qu\xE9 d\xEDa te queda bien y me fijo si tenemos un hueco."
-
-    2) IDENTIDAD Y ESTADO DEL CLIENTE
-    - Saludo: "${saludoInicial}"
-    - Tono: WhatsApp, c\xE1lido, profesional y natural. M\xE1ximo un emoji por mensaje.
-    - ESTADO ACTUAL:
-      ${faltaNombre ? "- \u26A0\uFE0F NOMBRE FALTANTE: Pedilo casualmente." : `- Nombre: ${datos.nombre}`}
-      ${faltaEmail ? "- \u26A0\uFE0F EMAIL FALTANTE: Obligatorio para agendar." : `- Email: ${datos.email}`}
-      ${faltaTelefono ? "- \u26A0\uFE0F TEL\xC9FONO FALTANTE: Obligatorio para agendar." : `- Tel\xE9fono: ${datos.telefono}`}
-
-    3) CLASIFICACI\xD3N DE OPERACI\xD3N (CR\xCDTICO)
-    Antes de responder, analiza el link o la propiedad:
-    - VENTA: Propiedades con precio de compra (USD). 
-      * Acci\xF3n: Si hay inter\xE9s, usar 'potential_sale_email'.
-      * Respuesta: "Genial, en el transcurso del d\xEDa te contactamos. Muchas gracias \u{1F60A}". NO ofrecer horarios de calendario.
-    - ALQUILER: Propiedades con precio mensual.
-      * Acci\xF3n: NO usar 'potential_sale_email'. Usar flujo de agendamiento manual/calendario.
-      * Respuesta: Informar requisitos y proponer horarios de visita (Lunes a Viernes 10-16hs).
-
-    4) REGLA DE ORO: CAPTURA DE DATOS
-    - Si el cliente quiere visitar o muestra inter\xE9s real:
-      a) Revisa si ya dio su email/tel\xE9fono en el chat reciente o si figuran en el "ESTADO ACTUAL".
-      b) Si YA los tenemos: No los vuelvas a pedir. Procede al cierre.
-      c) Si FALTAN: "\xA1Dale, me encanta esa unidad! Para que el equipo te contacte y coordinemos, \xBFme pasas tu email y un cel? \u{1F4E9}"
-    - Al recibir datos nuevos: Ejecutar inmediatamente 'update_client_preferences'.
-
-    5) L\xD3GICA DE AGENDAMIENTO (SOLO ALQUILER)
-    - Horarios: Lun a Vie, 10:00 a 16:00 hs. (40 min visita + 30 min buffer).
-    - Proximidad: Usar 'encontrar_propiedad' para sugerir horarios basados en visitas cercanas.
-    - Fallback: Si no hay visitas cerca, ofrecer bloques libres generales.
-
-    6) CAT\xC1LOGO DE HERRAMIENTAS
-    - apify_scraper: Usar siempre que env\xEDen un link.
-    - update_client_preferences: Usar CADA VEZ que el usuario mencione nombre, email o tel.
-    - potential_sale_email: \xDANICAMENTE para VENTAS. PROHIBIDO en alquileres.
-    - encontrar_propiedad / obtener_eventos_calendario: Para log\xEDstica de visitas en Alquiler.
-    - crear_eventos_calendario: Para confirmar la cita de Alquiler.
-    - search_client_history (SOLO ADMIN): 
-      \u26A0\uFE0F \xDASALA \xDANICAMENTE si el Admin solicita informaci\xF3n sobre lo que se habl\xF3 con otro cliente.
-      Uso: Permite buscar en la memoria sem\xE1ntica de chats anteriores para dar res\xFAmenes o recordar detalles espec\xEDficos (ej: "qu\xE9 presupuesto dijo Diego").
-      Prohibido: Nunca uses esta herramienta para responder a un cliente sobre otro cliente.
-
-    7) REGLAS DE HUMANIZACI\xD3N Y SEGURIDAD
-    - No uses frases rob\xF3ticas como "\xBFEn qu\xE9 puedo ayudarlo?".
-    - Si no sabes algo del aviso: "No tengo esa info ac\xE1, pero te la confirmo en la visita. \xBFQuer\xE9s ir a verla?".
-    - Seguridad: No reveles nombres de due\xF1os, direcciones exactas (sin agendar) ni procesos internos.
-
-    FORMATO DE RESPUESTA OBLIGATORIO:
-    Toda salida debe ser JSON v\xE1lido: {"output":{"response":["Mensaje"]}}
-  `;
-}
-
-const getSupabase = () => createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
-);
-const storage$1 = new PostgresStore({
-  id: "postgres-store",
-  connectionString: process.env.SUPABASE_POSTGRES_URL,
-  tableName: "chat_messages"
-});
-const agentMemory = new Memory$1({
-  storage: storage$1
-});
-const agentConfig = {
-  id: "real-estate-agent",
-  name: "Nico",
-  model: "openai/gpt-4o-mini",
-  memory: agentMemory,
-  tools: {
-    encontrar_propiedad_cercana: propiedadMasCercanaTool,
-    ...calendarManagerTools,
-    ...gmailManagerTools,
-    apify_scraper: apifyScraperTool,
-    update_client_preferences: updateClientPreferencesTool,
-    search_property_memory: searchPropertyMemoryTool,
-    search_client_history: searchClientHistoryTool,
-    potential_sale_email: potentialSaleEmailTool,
-    procesar_nueva_propiedad: procesarNuevaPropiedad
-  },
-  toolChoice: "auto",
-  inputProcessors: [
-    // Elimina logs verbose de herramientas para mantener el chat limpio [cite: 472, 474]
-    new ToolCallFilter({
-      exclude: ["apify_scraper", "enviar_correo", "search_property_memory"]
-    }),
-    // Evita errores de límite de tokens podando mensajes antiguos [cite: 452, 454]
-    new TokenLimiter(2e3)
-  ]
-};
-const getRealEstateAgent = async (userId) => {
-  const supabase = getSupabase();
-  const { data: profile } = await supabase.from("client_profiles").select("preferences, summary").eq("user_id", userId).single();
-  const nombreExtraido = profile?.preferences?.nombre || profile?.preferences?.name;
-  console.log("--- DEBUG SUPABASE PROFILE ---");
-  console.log("User ID buscado:", userId);
-  console.log("Data cruda de Supabase:", profile);
-  console.log("------------------------------");
-  const instrucciones = dynamicInstructions({
-    nombre: nombreExtraido});
-  const ltmContext = profile ? `
-    
-RECUERDA SOBRE ESTE CLIENTE:
-    - Preferencias: ${JSON.stringify(profile.preferences)}
-    - Resumen: ${profile.summary || "Sin historial previo"}
-  ` : "";
-  return new Agent({
-    ...agentConfig,
-    instructions: instrucciones + ltmContext
-  });
+// src/utils/stream.ts
+var StreamingApi$1 = class StreamingApi {
+  writer;
+  encoder;
+  writable;
+  abortSubscribers = [];
+  responseReadable;
+  /**
+   * Whether the stream has been aborted.
+   */
+  aborted = false;
+  /**
+   * Whether the stream has been closed normally.
+   */
+  closed = false;
+  constructor(writable, _readable) {
+    this.writable = writable;
+    this.writer = writable.getWriter();
+    this.encoder = new TextEncoder();
+    const reader = _readable.getReader();
+    this.abortSubscribers.push(async () => {
+      await reader.cancel();
+    });
+    this.responseReadable = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        done ? controller.close() : controller.enqueue(value);
+      },
+      cancel: () => {
+        this.abort();
+      }
+    });
+  }
+  async write(input) {
+    try {
+      if (typeof input === "string") {
+        input = this.encoder.encode(input);
+      }
+      await this.writer.write(input);
+    } catch {
+    }
+    return this;
+  }
+  async writeln(input) {
+    await this.write(input + "\n");
+    return this;
+  }
+  sleep(ms) {
+    return new Promise((res) => setTimeout(res, ms));
+  }
+  async close() {
+    try {
+      await this.writer.close();
+    } catch {
+    }
+    this.closed = true;
+  }
+  async pipe(body) {
+    this.writer.releaseLock();
+    await body.pipeTo(this.writable, { preventClose: true });
+    this.writer = this.writable.getWriter();
+  }
+  onAbort(listener) {
+    this.abortSubscribers.push(listener);
+  }
+  /**
+   * Abort the stream.
+   * You can call this method when stream is aborted by external event.
+   */
+  abort() {
+    if (!this.aborted) {
+      this.aborted = true;
+      this.abortSubscribers.forEach((subscriber) => subscriber());
+    }
+  }
 };
 
-const scrapePropertyStep = createStep({
-  id: "scrape-property",
-  inputSchema: z.object({ url: z.string().url() }),
-  outputSchema: z.object({ details: z.string() }),
-  execute: async () => {
-    return { details: "Casa en Lomas, 3 ambientes, USD 120k" };
+// src/helper/streaming/utils.ts
+var isOldBunVersion$1 = () => {
+  const version = typeof Bun !== "undefined" ? Bun.version : void 0;
+  if (version === void 0) {
+    return false;
   }
-});
-const geoProximityStep = createStep({
-  id: "check-proximity",
-  inputSchema: z.object({ details: z.string() }),
-  outputSchema: z.object({ suggestions: z.array(z.string()) }),
-  execute: async () => {
-    return { suggestions: ["Martes 10:00hs", "Jueves 15:00hs"] };
-  }
-});
-const nicoBookingWorkflow = createWorkflow({
-  id: "booking-flow",
-  inputSchema: z.object({ url: z.string().url() }),
-  outputSchema: z.object({ suggestions: z.array(z.string()) })
-}).then(scrapePropertyStep).then(geoProximityStep).commit();
-
-if (!global.crypto) {
-  global.crypto = require$$0;
-}
-const realEstateAgent = await getRealEstateAgent("placeholder-system");
-const storage = process.env.POSTGRES_URL ? new PostgresStore({
-  id: "pg-store",
-  connectionString: process.env.POSTGRES_URL
-  // Eliminamos tableName para que Mastra use su esquema estándar 
-  // y se mapee correctamente a tus tablas mastra_threads, mastra_messages, etc.
-}) : void 0;
-if (!storage) {
-  console.warn("\u26A0\uFE0F POSTGRES_URL missing. Using In-Memory storage (Non-persistent).");
-}
-const mastra = new Mastra({
-  storage,
-  agents: {
-    realEstateAgent
-  },
-  workflows: {
-    nicoBookingWorkflow,
-    ingestionWorkflow
-  }
-});
-
-function normalizeStudioBase(studioBase) {
-  if (studioBase.includes("..") || studioBase.includes("?") || studioBase.includes("#")) {
-    throw new Error(`Invalid base path: "${studioBase}". Base path cannot contain '..', '?', or '#'`);
-  }
-  studioBase = studioBase.replace(/\/+/g, "/");
-  if (studioBase === "/" || studioBase === "") {
-    return "";
-  }
-  if (studioBase.endsWith("/")) {
-    studioBase = studioBase.slice(0, -1);
-  }
-  if (!studioBase.startsWith("/")) {
-    studioBase = `/${studioBase}`;
-  }
-  return studioBase;
-}
-
-// src/utils/mime.ts
-var getMimeType = (filename, mimes = baseMimes) => {
-  const regexp = /\.([a-zA-Z0-9]+?)$/;
-  const match = filename.match(regexp);
-  if (!match) {
-    return;
-  }
-  let mimeType = mimes[match[1]];
-  if (mimeType && mimeType.startsWith("text")) {
-    mimeType += "; charset=utf-8";
-  }
-  return mimeType;
+  const result = version.startsWith("1.1") || version.startsWith("1.0") || version.startsWith("0.");
+  isOldBunVersion$1 = () => result;
+  return result;
 };
-var _baseMimes = {
-  aac: "audio/aac",
-  avi: "video/x-msvideo",
-  avif: "image/avif",
-  av1: "video/av1",
-  bin: "application/octet-stream",
-  bmp: "image/bmp",
-  css: "text/css",
-  csv: "text/csv",
-  eot: "application/vnd.ms-fontobject",
-  epub: "application/epub+zip",
-  gif: "image/gif",
-  gz: "application/gzip",
-  htm: "text/html",
-  html: "text/html",
-  ico: "image/x-icon",
-  ics: "text/calendar",
-  jpeg: "image/jpeg",
-  jpg: "image/jpeg",
-  js: "text/javascript",
-  json: "application/json",
-  jsonld: "application/ld+json",
-  map: "application/json",
-  mid: "audio/x-midi",
-  midi: "audio/x-midi",
-  mjs: "text/javascript",
-  mp3: "audio/mpeg",
-  mp4: "video/mp4",
-  mpeg: "video/mpeg",
-  oga: "audio/ogg",
-  ogv: "video/ogg",
-  ogx: "application/ogg",
-  opus: "audio/opus",
-  otf: "font/otf",
-  pdf: "application/pdf",
-  png: "image/png",
-  rtf: "application/rtf",
-  svg: "image/svg+xml",
-  tif: "image/tiff",
-  tiff: "image/tiff",
-  ts: "video/mp2t",
-  ttf: "font/ttf",
-  txt: "text/plain",
-  wasm: "application/wasm",
-  webm: "video/webm",
-  weba: "audio/webm",
-  webmanifest: "application/manifest+json",
-  webp: "image/webp",
-  woff: "font/woff",
-  woff2: "font/woff2",
-  xhtml: "application/xhtml+xml",
-  xml: "application/xml",
-  zip: "application/zip",
-  "3gp": "video/3gpp",
-  "3g2": "video/3gpp2",
-  gltf: "model/gltf+json",
-  glb: "model/gltf-binary"
+
+// src/helper/streaming/stream.ts
+var contextStash$1 = /* @__PURE__ */ new WeakMap();
+var stream$1 = (c, cb, onError) => {
+  const { readable, writable } = new TransformStream();
+  const stream2 = new StreamingApi$1(writable, readable);
+  if (isOldBunVersion$1()) {
+    c.req.raw.signal.addEventListener("abort", () => {
+      if (!stream2.closed) {
+        stream2.abort();
+      }
+    });
+  }
+  contextStash$1.set(stream2.responseReadable, c);
+  (async () => {
+    try {
+      await cb(stream2);
+    } catch (e) {
+      if (e === void 0) ; else {
+        console.error(e);
+      }
+    } finally {
+      stream2.close();
+    }
+  })();
+  return c.newResponse(stream2.responseReadable);
 };
-var baseMimes = _baseMimes;
 
 // src/utils/html.ts
 var HtmlEscapedCallbackPhase = {
@@ -435,6 +273,1691 @@ var resolveCallback = async (str, phase, preserveCallbacks, context, buffer) => 
   }
 };
 
+// src/http-exception.ts
+var HTTPException$2 = class HTTPException extends Error {
+  res;
+  status;
+  /**
+   * Creates an instance of `HTTPException`.
+   * @param status - HTTP status code for the exception. Defaults to 500.
+   * @param options - Additional options for the exception.
+   */
+  constructor(status = 500, options) {
+    super(options?.message, { cause: options?.cause });
+    this.res = options?.res;
+    this.status = status;
+  }
+  /**
+   * Returns the response object associated with the exception.
+   * If a response object is not provided, a new response is created with the error message and status code.
+   * @returns The response object.
+   */
+  getResponse() {
+    if (this.res) {
+      const newResponse = new Response(this.res.body, {
+        status: this.status,
+        headers: this.res.headers
+      });
+      return newResponse;
+    }
+    return new Response(this.message, {
+      status: this.status
+    });
+  }
+};
+
+// src/request/constants.ts
+var GET_MATCH_RESULT = /* @__PURE__ */ Symbol();
+
+// src/utils/body.ts
+var parseBody = async (request, options = /* @__PURE__ */ Object.create(null)) => {
+  const { all = false, dot = false } = options;
+  const headers = request instanceof HonoRequest ? request.raw.headers : request.headers;
+  const contentType = headers.get("Content-Type");
+  if (contentType?.startsWith("multipart/form-data") || contentType?.startsWith("application/x-www-form-urlencoded")) {
+    return parseFormData(request, { all, dot });
+  }
+  return {};
+};
+async function parseFormData(request, options) {
+  const formData = await request.formData();
+  if (formData) {
+    return convertFormDataToBodyData(formData, options);
+  }
+  return {};
+}
+function convertFormDataToBodyData(formData, options) {
+  const form = /* @__PURE__ */ Object.create(null);
+  formData.forEach((value, key) => {
+    const shouldParseAllValues = options.all || key.endsWith("[]");
+    if (!shouldParseAllValues) {
+      form[key] = value;
+    } else {
+      handleParsingAllValues(form, key, value);
+    }
+  });
+  if (options.dot) {
+    Object.entries(form).forEach(([key, value]) => {
+      const shouldParseDotValues = key.includes(".");
+      if (shouldParseDotValues) {
+        handleParsingNestedValues(form, key, value);
+        delete form[key];
+      }
+    });
+  }
+  return form;
+}
+var handleParsingAllValues = (form, key, value) => {
+  if (form[key] !== void 0) {
+    if (Array.isArray(form[key])) {
+      form[key].push(value);
+    } else {
+      form[key] = [form[key], value];
+    }
+  } else {
+    if (!key.endsWith("[]")) {
+      form[key] = value;
+    } else {
+      form[key] = [value];
+    }
+  }
+};
+var handleParsingNestedValues = (form, key, value) => {
+  let nestedForm = form;
+  const keys = key.split(".");
+  keys.forEach((key2, index) => {
+    if (index === keys.length - 1) {
+      nestedForm[key2] = value;
+    } else {
+      if (!nestedForm[key2] || typeof nestedForm[key2] !== "object" || Array.isArray(nestedForm[key2]) || nestedForm[key2] instanceof File) {
+        nestedForm[key2] = /* @__PURE__ */ Object.create(null);
+      }
+      nestedForm = nestedForm[key2];
+    }
+  });
+};
+
+// src/utils/url.ts
+var splitPath = (path) => {
+  const paths = path.split("/");
+  if (paths[0] === "") {
+    paths.shift();
+  }
+  return paths;
+};
+var splitRoutingPath = (routePath) => {
+  const { groups, path } = extractGroupsFromPath(routePath);
+  const paths = splitPath(path);
+  return replaceGroupMarks(paths, groups);
+};
+var extractGroupsFromPath = (path) => {
+  const groups = [];
+  path = path.replace(/\{[^}]+\}/g, (match, index) => {
+    const mark = `@${index}`;
+    groups.push([mark, match]);
+    return mark;
+  });
+  return { groups, path };
+};
+var replaceGroupMarks = (paths, groups) => {
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const [mark] = groups[i];
+    for (let j = paths.length - 1; j >= 0; j--) {
+      if (paths[j].includes(mark)) {
+        paths[j] = paths[j].replace(mark, groups[i][1]);
+        break;
+      }
+    }
+  }
+  return paths;
+};
+var patternCache = {};
+var getPattern = (label, next) => {
+  if (label === "*") {
+    return "*";
+  }
+  const match = label.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
+  if (match) {
+    const cacheKey = `${label}#${next}`;
+    if (!patternCache[cacheKey]) {
+      if (match[2]) {
+        patternCache[cacheKey] = next && next[0] !== ":" && next[0] !== "*" ? [cacheKey, match[1], new RegExp(`^${match[2]}(?=/${next})`)] : [label, match[1], new RegExp(`^${match[2]}$`)];
+      } else {
+        patternCache[cacheKey] = [label, match[1], true];
+      }
+    }
+    return patternCache[cacheKey];
+  }
+  return null;
+};
+var tryDecode = (str, decoder) => {
+  try {
+    return decoder(str);
+  } catch {
+    return str.replace(/(?:%[0-9A-Fa-f]{2})+/g, (match) => {
+      try {
+        return decoder(match);
+      } catch {
+        return match;
+      }
+    });
+  }
+};
+var tryDecodeURI = (str) => tryDecode(str, decodeURI);
+var getPath = (request) => {
+  const url = request.url;
+  const start = url.indexOf("/", url.indexOf(":") + 4);
+  let i = start;
+  for (; i < url.length; i++) {
+    const charCode = url.charCodeAt(i);
+    if (charCode === 37) {
+      const queryIndex = url.indexOf("?", i);
+      const path = url.slice(start, queryIndex === -1 ? void 0 : queryIndex);
+      return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
+    } else if (charCode === 63) {
+      break;
+    }
+  }
+  return url.slice(start, i);
+};
+var getPathNoStrict = (request) => {
+  const result = getPath(request);
+  return result.length > 1 && result.at(-1) === "/" ? result.slice(0, -1) : result;
+};
+var mergePath = (base, sub, ...rest) => {
+  if (rest.length) {
+    sub = mergePath(sub, ...rest);
+  }
+  return `${base?.[0] === "/" ? "" : "/"}${base}${sub === "/" ? "" : `${base?.at(-1) === "/" ? "" : "/"}${sub?.[0] === "/" ? sub.slice(1) : sub}`}`;
+};
+var checkOptionalParameter = (path) => {
+  if (path.charCodeAt(path.length - 1) !== 63 || !path.includes(":")) {
+    return null;
+  }
+  const segments = path.split("/");
+  const results = [];
+  let basePath = "";
+  segments.forEach((segment) => {
+    if (segment !== "" && !/\:/.test(segment)) {
+      basePath += "/" + segment;
+    } else if (/\:/.test(segment)) {
+      if (/\?/.test(segment)) {
+        if (results.length === 0 && basePath === "") {
+          results.push("/");
+        } else {
+          results.push(basePath);
+        }
+        const optionalSegment = segment.replace("?", "");
+        basePath += "/" + optionalSegment;
+        results.push(basePath);
+      } else {
+        basePath += "/" + segment;
+      }
+    }
+  });
+  return results.filter((v, i, a) => a.indexOf(v) === i);
+};
+var _decodeURI = (value) => {
+  if (!/[%+]/.test(value)) {
+    return value;
+  }
+  if (value.indexOf("+") !== -1) {
+    value = value.replace(/\+/g, " ");
+  }
+  return value.indexOf("%") !== -1 ? tryDecode(value, decodeURIComponent_) : value;
+};
+var _getQueryParam = (url, key, multiple) => {
+  let encoded;
+  if (!multiple && key && !/[%+]/.test(key)) {
+    let keyIndex2 = url.indexOf("?", 8);
+    if (keyIndex2 === -1) {
+      return void 0;
+    }
+    if (!url.startsWith(key, keyIndex2 + 1)) {
+      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
+    }
+    while (keyIndex2 !== -1) {
+      const trailingKeyCode = url.charCodeAt(keyIndex2 + key.length + 1);
+      if (trailingKeyCode === 61) {
+        const valueIndex = keyIndex2 + key.length + 2;
+        const endIndex = url.indexOf("&", valueIndex);
+        return _decodeURI(url.slice(valueIndex, endIndex === -1 ? void 0 : endIndex));
+      } else if (trailingKeyCode == 38 || isNaN(trailingKeyCode)) {
+        return "";
+      }
+      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
+    }
+    encoded = /[%+]/.test(url);
+    if (!encoded) {
+      return void 0;
+    }
+  }
+  const results = {};
+  encoded ??= /[%+]/.test(url);
+  let keyIndex = url.indexOf("?", 8);
+  while (keyIndex !== -1) {
+    const nextKeyIndex = url.indexOf("&", keyIndex + 1);
+    let valueIndex = url.indexOf("=", keyIndex);
+    if (valueIndex > nextKeyIndex && nextKeyIndex !== -1) {
+      valueIndex = -1;
+    }
+    let name = url.slice(
+      keyIndex + 1,
+      valueIndex === -1 ? nextKeyIndex === -1 ? void 0 : nextKeyIndex : valueIndex
+    );
+    if (encoded) {
+      name = _decodeURI(name);
+    }
+    keyIndex = nextKeyIndex;
+    if (name === "") {
+      continue;
+    }
+    let value;
+    if (valueIndex === -1) {
+      value = "";
+    } else {
+      value = url.slice(valueIndex + 1, nextKeyIndex === -1 ? void 0 : nextKeyIndex);
+      if (encoded) {
+        value = _decodeURI(value);
+      }
+    }
+    if (multiple) {
+      if (!(results[name] && Array.isArray(results[name]))) {
+        results[name] = [];
+      }
+      results[name].push(value);
+    } else {
+      results[name] ??= value;
+    }
+  }
+  return key ? results[key] : results;
+};
+var getQueryParam = _getQueryParam;
+var getQueryParams = (url, key) => {
+  return _getQueryParam(url, key, true);
+};
+var decodeURIComponent_ = decodeURIComponent;
+
+// src/request.ts
+var tryDecodeURIComponent = (str) => tryDecode(str, decodeURIComponent_);
+var HonoRequest = class {
+  /**
+   * `.raw` can get the raw Request object.
+   *
+   * @see {@link https://hono.dev/docs/api/request#raw}
+   *
+   * @example
+   * ```ts
+   * // For Cloudflare Workers
+   * app.post('/', async (c) => {
+   *   const metadata = c.req.raw.cf?.hostMetadata?
+   *   ...
+   * })
+   * ```
+   */
+  raw;
+  #validatedData;
+  // Short name of validatedData
+  #matchResult;
+  routeIndex = 0;
+  /**
+   * `.path` can get the pathname of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#path}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const pathname = c.req.path // `/about/me`
+   * })
+   * ```
+   */
+  path;
+  bodyCache = {};
+  constructor(request, path = "/", matchResult = [[]]) {
+    this.raw = request;
+    this.path = path;
+    this.#matchResult = matchResult;
+    this.#validatedData = {};
+  }
+  param(key) {
+    return key ? this.#getDecodedParam(key) : this.#getAllDecodedParams();
+  }
+  #getDecodedParam(key) {
+    const paramKey = this.#matchResult[0][this.routeIndex][1][key];
+    const param = this.#getParamValue(paramKey);
+    return param && /\%/.test(param) ? tryDecodeURIComponent(param) : param;
+  }
+  #getAllDecodedParams() {
+    const decoded = {};
+    const keys = Object.keys(this.#matchResult[0][this.routeIndex][1]);
+    for (const key of keys) {
+      const value = this.#getParamValue(this.#matchResult[0][this.routeIndex][1][key]);
+      if (value !== void 0) {
+        decoded[key] = /\%/.test(value) ? tryDecodeURIComponent(value) : value;
+      }
+    }
+    return decoded;
+  }
+  #getParamValue(paramKey) {
+    return this.#matchResult[1] ? this.#matchResult[1][paramKey] : paramKey;
+  }
+  query(key) {
+    return getQueryParam(this.url, key);
+  }
+  queries(key) {
+    return getQueryParams(this.url, key);
+  }
+  header(name) {
+    if (name) {
+      return this.raw.headers.get(name) ?? void 0;
+    }
+    const headerData = {};
+    this.raw.headers.forEach((value, key) => {
+      headerData[key] = value;
+    });
+    return headerData;
+  }
+  async parseBody(options) {
+    return this.bodyCache.parsedBody ??= await parseBody(this, options);
+  }
+  #cachedBody = (key) => {
+    const { bodyCache, raw } = this;
+    const cachedBody = bodyCache[key];
+    if (cachedBody) {
+      return cachedBody;
+    }
+    const anyCachedKey = Object.keys(bodyCache)[0];
+    if (anyCachedKey) {
+      return bodyCache[anyCachedKey].then((body) => {
+        if (anyCachedKey === "json") {
+          body = JSON.stringify(body);
+        }
+        return new Response(body)[key]();
+      });
+    }
+    return bodyCache[key] = raw[key]();
+  };
+  /**
+   * `.json()` can parse Request body of type `application/json`
+   *
+   * @see {@link https://hono.dev/docs/api/request#json}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.json()
+   * })
+   * ```
+   */
+  json() {
+    return this.#cachedBody("text").then((text) => JSON.parse(text));
+  }
+  /**
+   * `.text()` can parse Request body of type `text/plain`
+   *
+   * @see {@link https://hono.dev/docs/api/request#text}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.text()
+   * })
+   * ```
+   */
+  text() {
+    return this.#cachedBody("text");
+  }
+  /**
+   * `.arrayBuffer()` parse Request body as an `ArrayBuffer`
+   *
+   * @see {@link https://hono.dev/docs/api/request#arraybuffer}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.arrayBuffer()
+   * })
+   * ```
+   */
+  arrayBuffer() {
+    return this.#cachedBody("arrayBuffer");
+  }
+  /**
+   * Parses the request body as a `Blob`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.blob();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#blob
+   */
+  blob() {
+    return this.#cachedBody("blob");
+  }
+  /**
+   * Parses the request body as `FormData`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.formData();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#formdata
+   */
+  formData() {
+    return this.#cachedBody("formData");
+  }
+  /**
+   * Adds validated data to the request.
+   *
+   * @param target - The target of the validation.
+   * @param data - The validated data to add.
+   */
+  addValidatedData(target, data) {
+    this.#validatedData[target] = data;
+  }
+  valid(target) {
+    return this.#validatedData[target];
+  }
+  /**
+   * `.url()` can get the request url strings.
+   *
+   * @see {@link https://hono.dev/docs/api/request#url}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const url = c.req.url // `http://localhost:8787/about/me`
+   *   ...
+   * })
+   * ```
+   */
+  get url() {
+    return this.raw.url;
+  }
+  /**
+   * `.method()` can get the method name of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#method}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const method = c.req.method // `GET`
+   * })
+   * ```
+   */
+  get method() {
+    return this.raw.method;
+  }
+  get [GET_MATCH_RESULT]() {
+    return this.#matchResult;
+  }
+  /**
+   * `.matchedRoutes()` can return a matched route in the handler
+   *
+   * @deprecated
+   *
+   * Use matchedRoutes helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#matchedroutes}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async function logger(c, next) {
+   *   await next()
+   *   c.req.matchedRoutes.forEach(({ handler, method, path }, i) => {
+   *     const name = handler.name || (handler.length < 2 ? '[handler]' : '[middleware]')
+   *     console.log(
+   *       method,
+   *       ' ',
+   *       path,
+   *       ' '.repeat(Math.max(10 - path.length, 0)),
+   *       name,
+   *       i === c.req.routeIndex ? '<- respond from here' : ''
+   *     )
+   *   })
+   * })
+   * ```
+   */
+  get matchedRoutes() {
+    return this.#matchResult[0].map(([[, route]]) => route);
+  }
+  /**
+   * `routePath()` can retrieve the path registered within the handler
+   *
+   * @deprecated
+   *
+   * Use routePath helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#routepath}
+   *
+   * @example
+   * ```ts
+   * app.get('/posts/:id', (c) => {
+   *   return c.json({ path: c.req.routePath })
+   * })
+   * ```
+   */
+  get routePath() {
+    return this.#matchResult[0].map(([[, route]]) => route)[this.routeIndex].path;
+  }
+};
+
+// src/context.ts
+var TEXT_PLAIN = "text/plain; charset=UTF-8";
+var setDefaultContentType = (contentType, headers) => {
+  return {
+    "Content-Type": contentType,
+    ...headers
+  };
+};
+var Context = class {
+  #rawRequest;
+  #req;
+  /**
+   * `.env` can get bindings (environment variables, secrets, KV namespaces, D1 database, R2 bucket etc.) in Cloudflare Workers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#env}
+   *
+   * @example
+   * ```ts
+   * // Environment object for Cloudflare Workers
+   * app.get('*', async c => {
+   *   const counter = c.env.COUNTER
+   * })
+   * ```
+   */
+  env = {};
+  #var;
+  finalized = false;
+  /**
+   * `.error` can get the error object from the middleware if the Handler throws an error.
+   *
+   * @see {@link https://hono.dev/docs/api/context#error}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   await next()
+   *   if (c.error) {
+   *     // do something...
+   *   }
+   * })
+   * ```
+   */
+  error;
+  #status;
+  #executionCtx;
+  #res;
+  #layout;
+  #renderer;
+  #notFoundHandler;
+  #preparedHeaders;
+  #matchResult;
+  #path;
+  /**
+   * Creates an instance of the Context class.
+   *
+   * @param req - The Request object.
+   * @param options - Optional configuration options for the context.
+   */
+  constructor(req, options) {
+    this.#rawRequest = req;
+    if (options) {
+      this.#executionCtx = options.executionCtx;
+      this.env = options.env;
+      this.#notFoundHandler = options.notFoundHandler;
+      this.#path = options.path;
+      this.#matchResult = options.matchResult;
+    }
+  }
+  /**
+   * `.req` is the instance of {@link HonoRequest}.
+   */
+  get req() {
+    this.#req ??= new HonoRequest(this.#rawRequest, this.#path, this.#matchResult);
+    return this.#req;
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#event}
+   * The FetchEvent associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have a FetchEvent.
+   */
+  get event() {
+    if (this.#executionCtx && "respondWith" in this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no FetchEvent");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#executionctx}
+   * The ExecutionContext associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have an ExecutionContext.
+   */
+  get executionCtx() {
+    if (this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no ExecutionContext");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#res}
+   * The Response object for the current request.
+   */
+  get res() {
+    return this.#res ||= new Response(null, {
+      headers: this.#preparedHeaders ??= new Headers()
+    });
+  }
+  /**
+   * Sets the Response object for the current request.
+   *
+   * @param _res - The Response object to set.
+   */
+  set res(_res) {
+    if (this.#res && _res) {
+      _res = new Response(_res.body, _res);
+      for (const [k, v] of this.#res.headers.entries()) {
+        if (k === "content-type") {
+          continue;
+        }
+        if (k === "set-cookie") {
+          const cookies = this.#res.headers.getSetCookie();
+          _res.headers.delete("set-cookie");
+          for (const cookie of cookies) {
+            _res.headers.append("set-cookie", cookie);
+          }
+        } else {
+          _res.headers.set(k, v);
+        }
+      }
+    }
+    this.#res = _res;
+    this.finalized = true;
+  }
+  /**
+   * `.render()` can create a response within a layout.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   return c.render('Hello!')
+   * })
+   * ```
+   */
+  render = (...args) => {
+    this.#renderer ??= (content) => this.html(content);
+    return this.#renderer(...args);
+  };
+  /**
+   * Sets the layout for the response.
+   *
+   * @param layout - The layout to set.
+   * @returns The layout function.
+   */
+  setLayout = (layout) => this.#layout = layout;
+  /**
+   * Gets the current layout for the response.
+   *
+   * @returns The current layout function.
+   */
+  getLayout = () => this.#layout;
+  /**
+   * `.setRenderer()` can set the layout in the custom middleware.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```tsx
+   * app.use('*', async (c, next) => {
+   *   c.setRenderer((content) => {
+   *     return c.html(
+   *       <html>
+   *         <body>
+   *           <p>{content}</p>
+   *         </body>
+   *       </html>
+   *     )
+   *   })
+   *   await next()
+   * })
+   * ```
+   */
+  setRenderer = (renderer) => {
+    this.#renderer = renderer;
+  };
+  /**
+   * `.header()` can set headers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#header}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  header = (name, value, options) => {
+    if (this.finalized) {
+      this.#res = new Response(this.#res.body, this.#res);
+    }
+    const headers = this.#res ? this.#res.headers : this.#preparedHeaders ??= new Headers();
+    if (value === void 0) {
+      headers.delete(name);
+    } else if (options?.append) {
+      headers.append(name, value);
+    } else {
+      headers.set(name, value);
+    }
+  };
+  status = (status) => {
+    this.#status = status;
+  };
+  /**
+   * `.set()` can set the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   c.set('message', 'Hono is hot!!')
+   *   await next()
+   * })
+   * ```
+   */
+  set = (key, value) => {
+    this.#var ??= /* @__PURE__ */ new Map();
+    this.#var.set(key, value);
+  };
+  /**
+   * `.get()` can use the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   const message = c.get('message')
+   *   return c.text(`The message is "${message}"`)
+   * })
+   * ```
+   */
+  get = (key) => {
+    return this.#var ? this.#var.get(key) : void 0;
+  };
+  /**
+   * `.var` can access the value of a variable.
+   *
+   * @see {@link https://hono.dev/docs/api/context#var}
+   *
+   * @example
+   * ```ts
+   * const result = c.var.client.oneMethod()
+   * ```
+   */
+  // c.var.propName is a read-only
+  get var() {
+    if (!this.#var) {
+      return {};
+    }
+    return Object.fromEntries(this.#var);
+  }
+  #newResponse(data, arg, headers) {
+    const responseHeaders = this.#res ? new Headers(this.#res.headers) : this.#preparedHeaders ?? new Headers();
+    if (typeof arg === "object" && "headers" in arg) {
+      const argHeaders = arg.headers instanceof Headers ? arg.headers : new Headers(arg.headers);
+      for (const [key, value] of argHeaders) {
+        if (key.toLowerCase() === "set-cookie") {
+          responseHeaders.append(key, value);
+        } else {
+          responseHeaders.set(key, value);
+        }
+      }
+    }
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        if (typeof v === "string") {
+          responseHeaders.set(k, v);
+        } else {
+          responseHeaders.delete(k);
+          for (const v2 of v) {
+            responseHeaders.append(k, v2);
+          }
+        }
+      }
+    }
+    const status = typeof arg === "number" ? arg : arg?.status ?? this.#status;
+    return new Response(data, { status, headers: responseHeaders });
+  }
+  newResponse = (...args) => this.#newResponse(...args);
+  /**
+   * `.body()` can return the HTTP response.
+   * You can set headers with `.header()` and set HTTP status code with `.status`.
+   * This can also be set in `.text()`, `.json()` and so on.
+   *
+   * @see {@link https://hono.dev/docs/api/context#body}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *   // Set HTTP status code
+   *   c.status(201)
+   *
+   *   // Return the response body
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  body = (data, arg, headers) => this.#newResponse(data, arg, headers);
+  /**
+   * `.text()` can render text as `Content-Type:text/plain`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#text}
+   *
+   * @example
+   * ```ts
+   * app.get('/say', (c) => {
+   *   return c.text('Hello!')
+   * })
+   * ```
+   */
+  text = (text, arg, headers) => {
+    return !this.#preparedHeaders && !this.#status && !arg && !headers && !this.finalized ? new Response(text) : this.#newResponse(
+      text,
+      arg,
+      setDefaultContentType(TEXT_PLAIN, headers)
+    );
+  };
+  /**
+   * `.json()` can render JSON as `Content-Type:application/json`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#json}
+   *
+   * @example
+   * ```ts
+   * app.get('/api', (c) => {
+   *   return c.json({ message: 'Hello!' })
+   * })
+   * ```
+   */
+  json = (object, arg, headers) => {
+    return this.#newResponse(
+      JSON.stringify(object),
+      arg,
+      setDefaultContentType("application/json", headers)
+    );
+  };
+  html = (html, arg, headers) => {
+    const res = (html2) => this.#newResponse(html2, arg, setDefaultContentType("text/html; charset=UTF-8", headers));
+    return typeof html === "object" ? resolveCallback(html, HtmlEscapedCallbackPhase.Stringify, false, {}).then(res) : res(html);
+  };
+  /**
+   * `.redirect()` can Redirect, default status code is 302.
+   *
+   * @see {@link https://hono.dev/docs/api/context#redirect}
+   *
+   * @example
+   * ```ts
+   * app.get('/redirect', (c) => {
+   *   return c.redirect('/')
+   * })
+   * app.get('/redirect-permanently', (c) => {
+   *   return c.redirect('/', 301)
+   * })
+   * ```
+   */
+  redirect = (location, status) => {
+    const locationString = String(location);
+    this.header(
+      "Location",
+      // Multibyes should be encoded
+      // eslint-disable-next-line no-control-regex
+      !/[^\x00-\xFF]/.test(locationString) ? locationString : encodeURI(locationString)
+    );
+    return this.newResponse(null, status ?? 302);
+  };
+  /**
+   * `.notFound()` can return the Not Found Response.
+   *
+   * @see {@link https://hono.dev/docs/api/context#notfound}
+   *
+   * @example
+   * ```ts
+   * app.get('/notfound', (c) => {
+   *   return c.notFound()
+   * })
+   * ```
+   */
+  notFound = () => {
+    this.#notFoundHandler ??= () => new Response();
+    return this.#notFoundHandler(this);
+  };
+};
+
+const connectionString = process.env.SUPABASE_POSTGRES_URL;
+if (!connectionString) {
+  throw new Error("\u274C SUPABASE_POSTGRES_URL missing");
+}
+const pool = new Pool({
+  connectionString,
+  max: 10,
+  // Límite conservador para dejar espacio a las instancias de Mastra
+  idleTimeoutMillis: 3e4
+});
+const storage = new PostgresStore({
+  id: "pg-store",
+  connectionString
+});
+const vectorStore = new PgVector({
+  id: "pg-vector",
+  connectionString,
+  tableName: "memory_messages",
+  columnName: "embedding",
+  dims: 1536
+});
+class ThreadContextService {
+  static async getContext(threadId) {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT metadata FROM mastra_threads WHERE id = $1`,
+        [threadId]
+      );
+      return res.rows[0]?.metadata || {};
+    } catch (err) {
+      console.error("\u{1F525} Error DB GetContext:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async updateContext(threadId, resourceId, newClientData) {
+    if (!newClientData || Object.keys(newClientData).length === 0) {
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const jsonString = JSON.stringify(newClientData);
+      const query = `
+        INSERT INTO mastra_threads (id, "resourceId", title, metadata, "createdAt", "updatedAt")
+        VALUES ($1, $2, 'Nueva Conversaci\xF3n', $3::jsonb, NOW(), NOW())
+        ON CONFLICT (id) 
+        DO UPDATE SET 
+          metadata = COALESCE(mastra_threads.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+          "updatedAt" = NOW()
+          -- Nota: No tocamos el title en el update para no borrar res\xFAmenes previos
+        RETURNING metadata; 
+      `;
+      await client.query(query, [threadId, resourceId, jsonString]);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] ERROR CR\xCDTICO AL GUARDAR:", err);
+    } finally {
+      client.release();
+    }
+  }
+  static async getResourceProfile(resourceId) {
+    if (!resourceId) return {};
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT "workingMemory" FROM mastra_resources WHERE id = $1 LIMIT 1`,
+        [resourceId]
+      );
+      const rawText = res.rows[0]?.workingMemory || "";
+      if (!rawText) return {};
+      const extract = (key) => {
+        const regex = new RegExp(`- \\*\\*${key}\\*\\*:\\s*(.*)`, "i");
+        const match = rawText.match(regex);
+        return match && match[1].trim() ? match[1].trim() : void 0;
+      };
+      return {
+        // Asegúrate que estas keys coincidan con tu Template de Mastra
+        nombre: extract("First Name") || extract("Name"),
+        // Fallback por si acaso
+        apellido: extract("Last Name"),
+        email: extract("Email"),
+        telefono: extract("Phone") || extract("Tel\xE9fono")
+      };
+    } catch (err) {
+      console.error("\u{1F525} Error leyendo Mastra Resources:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async clearThreadMessages(threadId) {
+    const client = await pool.connect();
+    try {
+      console.log(`\u{1F9F9} [Storage] Limpiando historial para thread: ${threadId}`);
+      await client.query(
+        `DELETE FROM mastra_messages WHERE "thread_id" = $1`,
+        [threadId]
+      );
+      console.log(`\u2705 [Storage] Historial eliminado exitosamente.`);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] Error al limpiar mensajes:", err);
+    } finally {
+      client.release();
+    }
+  }
+}
+
+const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
+const commonTools = {
+  ...calendarManagerTools,
+  ...gmailManagerTools
+};
+const salesTools = {
+  potential_sale_email: potentialSaleEmailTool
+  // Solo para ventas
+};
+const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
+  const memory = new Memory$1({
+    storage,
+    vector: vectorStore,
+    embedder: openai$1.embedding("text-embedding-3-small"),
+    options: {
+      lastMessages: 22,
+      semanticRecall: {
+        topK: 3,
+        messageRange: 3
+      },
+      workingMemory: {
+        enabled: true,
+        scope: "resource",
+        template: `# User Profile
+          - **First Name**:
+          - **Last Name**:
+          - **Email**:
+          - **Phone**:
+          - **Location**:
+          - **Budget Max**:
+          - **Preferred Zone**:
+          - **Property Type Interest**: (Casa/Depto/PH)
+          `
+      },
+      generateTitle: true
+    }
+  });
+  const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
+  let selectedTools = { ...commonTools };
+  if (operacionTipo === "ALQUILAR") {
+    selectedTools = { ...selectedTools };
+  } else if (operacionTipo === "VENDER") {
+    selectedTools = { ...selectedTools, ...salesTools };
+  } else {
+    selectedTools = { ...selectedTools };
+  }
+  return new Agent({
+    // ID obligatorio para Mastra
+    id: "real-estate-agent",
+    name: "Real Estate Agent",
+    instructions: finalInstructions,
+    model: openai$1("gpt-4o"),
+    memory,
+    tools: selectedTools,
+    inputProcessors: [
+      new PromptInjectionDetector({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.8,
+        strategy: "block"
+      }),
+      new ModerationProcessor({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.7,
+        strategy: "block"
+      }),
+      new TokenLimiter(3e3)
+    ],
+    outputProcessors: [
+      new SystemPromptScrubber({
+        model: openai$1("gpt-4o-mini"),
+        strategy: "redact",
+        redactionMethod: "placeholder"
+      })
+    ]
+  });
+};
+
+const realEstateCleaningAgent = new Agent({
+  id: "real-estate-cleaning-agent",
+  name: "Real Estate Cleaning Agent",
+  tools: { realEstatePropertyFormatterTool },
+  instructions: `
+    Eres un experto en procesamiento de datos inmobiliarios. 
+    Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
+    Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
+    No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
+    El tono debe ser profesional y persuasivo, destacando los beneficios.
+    
+  `,
+  model: "openai/gpt-4.1-mini"
+});
+
+const frasesRevisareLink = [
+  "Dame un toque que lo veo y te digo... \u{1F50D}",
+  "Ahora lo miro y te aviso... \u{1F440}",
+  "D\xE9jame revisarlo y te confirmo... \u{1F4F2}",
+  "Esper\xE1 que lo chequeo y te comento... \u{1F914}",
+  "Ahora le doy una mirada y te respondo... \u{1F517}",
+  "Voy a verlo y te digo... \u{1F4AC}",
+  "Lo reviso y te aviso... \u{1F4F1}",
+  "Dame un momento, lo veo y te aviso... \u23F3",
+  "Ahora lo abro y te doy mi opini\xF3n... \u2728",
+  "De una, lo miro y te contacto... \u{1F4AF}",
+  "Ya mismo lo veo y te cuento... \u{1F4DD}",
+  "D\xE9jame que lo analizo y te contesto... \u{1F9D0}",
+  "Ahora me fijo y te escribo... \u270D\uFE0F",
+  "Voy a echarle un ojo y te digo... \u{1F441}\uFE0F",
+  "Lo chequeo r\xE1pido y te mando mensaje... \u26A1",
+  "Ahora lo examino y te paso feedback... \u{1F50E}",
+  "Dejame verlo y te respondo enseguida... \u{1F680}",
+  "Ya lo abro, lo miro y te contacto... \u{1F4E8}",
+  "En un segundo lo reviso y te aviso... \u{1F552}",
+  "Ahora mismo lo veo y te tiro un mensaje... \u{1F4AD}"
+];
+const frasesDisponibilidad = [
+  "\xBFQu\xE9 d\xEDa y rango horario te queda c\xF3modo?",
+  "\xBFEn qu\xE9 d\xEDa y franja horaria tienes disponibilidad?",
+  "\xBFQu\xE9 fecha y horario se ajustan mejor a tu agenda?",
+  "\xBFQu\xE9 d\xEDa y rango de horas te viene bien?",
+  "\xBFCu\xE1l es el d\xEDa y el horario que m\xE1s te conviene?",
+  "\xBFEn qu\xE9 d\xEDa y qu\xE9 horas tienes libre?",
+  "\xBFQu\xE9 fecha y turno prefieres para coordinar?",
+  "\xBFQu\xE9 d\xEDa y per\xEDodo del d\xEDa te funciona mejor?",
+  "\xBFEn qu\xE9 jornada y momento del d\xEDa est\xE1s disponible?",
+  "\xBFQu\xE9 fecha y franja horaria se acomoda a tu tiempo?"
+];
+const frasesSolicitudDatos = [
+  "Para avanzar, necesitar\xEDa por favor tu nombre, apellido, email y tel\xE9fono.",
+  "Para continuar, requiero que proporciones tu nombre, apellido, correo electr\xF3nico y n\xFAmero de contacto.",
+  "Necesito tu nombre completo, direcci\xF3n de email y tel\xE9fono para proceder.",
+  "Para completar el proceso, por favor ingresa tu nombre, apellido, email y n\xFAmero telef\xF3nico.",
+  "Ser\xEDa necesario que me brindes tu nombre, apellido, correo y tel\xE9fono de contacto.",
+  "Para seguir adelante, te solicito tu nombre, apellidos, email y tel\xE9fono.",
+  "Requiero tu nombre y apellido, junto con tu email y n\xFAmero de tel\xE9fono.",
+  "Para poder ayudarte, necesito que me des tu nombre completo, email y tel\xE9fono.",
+  "Es necesario que proporciones tu nombre, apellido, direcci\xF3n de correo y tel\xE9fono.",
+  "Para finalizar, preciso que completes con tu nombre, apellido, email y n\xFAmero de contacto."
+];
+
+function auditMissingFields(datos) {
+  const missing = [];
+  const isInvalid = (val) => !val || val === "" || val === "Preguntar" || val === "Ver chat";
+  if (isInvalid(datos.nombre)) missing.push("NOMBRE");
+  if (isInvalid(datos.apellido)) missing.push("APELLIDO");
+  if (isInvalid(datos.email)) missing.push("EMAIL");
+  if (isInvalid(datos.telefono)) missing.push("TEL\xC9FONO");
+  return missing;
+}
+function obtenerFraseAleatoriaDisponibilidad() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesDisponibilidad.length);
+  return frasesDisponibilidad[indiceAleatorio];
+}
+function obtenerFraseAleatoriaSolicitudDatos() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesSolicitudDatos.length);
+  return frasesSolicitudDatos[indiceAleatorio];
+}
+const CORE_IDENTITY = `
+# I. IDENTIDAD & ROL
+Eres NICO, asistente de IA de Fausti Propiedades.
+
+### \u{1F4F1} ESTILO DE COMUNICACI\xD3N (WHATSAPP MODE)
+Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
+- **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
+- **TONO**: Casual, emp\xE1tico, directo ("vos", "dale", "genial").
+- **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
+- **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
+- **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
+
+### Reglas Operativas
+- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
+- **Privacidad**:
+  1. TERCEROS: JAM\xC1S reveles datos de otros.
+  2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
+`;
+function getTemporalContext() {
+  return (/* @__PURE__ */ new Date()).toLocaleDateString("es-AR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+}
+const dynamicInstructions = (datos, op) => {
+  const opNormalizada = op ? op.toUpperCase() : "INDEFINIDO";
+  const missingFields = auditMissingFields(datos);
+  let statusBlock = "";
+  if (missingFields.length > 0) {
+    const missingString = missingFields.map((f) => f.toLowerCase()).join(", ").replace(/, ([^,]*)$/, " y $1");
+    statusBlock = `
+## \u{1F6A8} ESTADO: DATOS INCOMPLETOS
+Faltan: ${missingFields.join(", ")}.
+
+### \u26A1 TU OBJETIVO:
+Pide **TODOS** los datos faltantes en **UNA SOLA ORACI\xD3N** al final de tu respuesta.
+Formato: ${obtenerFraseAleatoriaSolicitudDatos()} **${missingString}**."
+(NO inventes datos. NO preguntes uno a uno).
+    `;
+  } else {
+    statusBlock = `
+## \u2705 ESTADO: FICHA COMPLETA
+Procede con el protocolo operativo.
+    `;
+  }
+  let protocolBlock = "";
+  if (opNormalizada === "ALQUILAR") {
+    protocolBlock = `
+# III. FLUJO: ALQUILER (OBJETIVO: CITA)
+1. **Validaci\xF3n**: Celebra la elecci\xF3n ("\xA1Excelente opci\xF3n!").
+2. **Acci\xF3n**: Pregunta DIRECTO: **${obtenerFraseAleatoriaDisponibilidad()}**
+   - Usa 'get_available_slots'.
+   - NO asumas horarios.
+3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+4. **PROHIBICI\xD3N**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+      `;
+  } else if (opNormalizada === "VENDER") {
+    protocolBlock = `
+# III. FLUJO: VENTA (OBJETIVO: DERIVAR)
+1. **Acci\xF3n**: usa 'potential_sale_email'.
+2. **Despedida**: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
+3. **Fin**: Cierra la conversaci\xF3n.
+      `;
+  }
+  return `
+  ${CORE_IDENTITY}
+
+  # II. DATOS ACTUALES
+  - Nombre: ${datos.nombre || "No registrado"}
+  - Apellido: ${datos.apellido || "No registrado"}
+  - Email: ${datos.email || "No registrado"}
+  - Tel\xE9fono: ${datos.telefono || "No registrado"}
+  
+  ${statusBlock}
+
+  ${protocolBlock}
+
+  - Fecha: ${getTemporalContext()}
+  `;
+};
+
+const sleep = async (seconds) => {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+};
+
+const randomSleep = async (min, max) => {
+  const waitTime = Math.random() * (max - min) + min;
+  await sleep(waitTime);
+};
+
+const scrapeStep = createStep({
+  id: "scrapeStep",
+  inputSchema: z.object({
+    url: z.url()
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    data: z.any()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 1 (Scraping)");
+    console.log(`[Workflow] \u{1F310} Scrapeando URL: ${inputData.url}`);
+    await sleep(3);
+    const result = await apifyScraperTool.execute(
+      { url: inputData.url }
+    );
+    console.log(">>> FIN: PASO 1");
+    if (!("data" in result)) {
+      throw new Error("Scraping failed");
+    }
+    return {
+      success: true,
+      data: result.data || []
+    };
+  }
+});
+const extratDataFromScrapperTool = createStep({
+  id: "extratDataFromScrapperTool",
+  inputSchema: z.object({
+    data: z.any()
+  }),
+  outputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    keywords: z.string()
+  }),
+  maxRetries: 2,
+  retryDelay: 2500,
+  execute: async ({ inputData, mastra }) => {
+    try {
+      const result = await propertyDataProcessorTool.execute(
+        { rawData: inputData.data },
+        { mastra }
+      );
+      console.log(">>> DEBUG: propertyDataProcessorTool result:", JSON.stringify(result, null, 2));
+      if (!("operacionTipo" in result)) {
+        throw new Error("Validation failed in propertyDataProcessorTool");
+      }
+      console.log(">>> INICIO: PASO 2 (Formato)");
+      console.log(result);
+      console.log(">>> FIN: PASO 2");
+      return {
+        address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
+        operacionTipo: result.operacionTipo,
+        // Guaranteed by the check above
+        keywords: result.keywords || ""
+      };
+    } catch (error) {
+      if (error.message.includes("rate_limit_exceeded") || error.statusCode === 429) {
+        console.warn("\u26A0\uFE0F Rate limit detectado. Reintentando paso...");
+      }
+      throw error;
+    }
+  }
+});
+const cleanDataStep = createStep({
+  id: "cleanDataStep",
+  inputSchema: z.object({
+    keywords: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  outputSchema: z.object({
+    formattedText: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 3 (Limpieza/Formatter)");
+    const result = await realEstatePropertyFormatterTool.execute({
+      keywordsZonaProp: inputData.keywords
+    });
+    console.log(">>> DEBUG: Formatter result:", result);
+    console.log(">>> FIN: PASO 3");
+    return {
+      formattedText: result.formattedText || inputData.keywords,
+      // Fallback si falla
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const logicStep = createStep({
+  id: "logicStep",
+  inputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    formattedText: z.string()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 4 (Logic)");
+    console.log(">>> FIN: PASO 4");
+    return {
+      minimalDescription: inputData.formattedText,
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const propertyWorkflow = createWorkflow({
+  id: "property-intelligence-pipeline",
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  })
+}).then(scrapeStep).then(extratDataFromScrapperTool).then(cleanDataStep).then(logicStep).commit();
+
+await storage.init();
+const realEstateAgent = await getRealEstateAgent();
+const mastra = new Mastra({
+  storage,
+  vectors: {
+    vectorStore
+  },
+  agents: {
+    realEstateAgent,
+    realEstateCleaningAgent
+  },
+  tools: {
+    realEstatePropertyFormatterTool
+  },
+  workflows: {
+    propertyWorkflow
+  },
+  server: {
+    port: 4111,
+    apiRoutes: [registerApiRoute("chat", {
+      method: "POST",
+      handler: async (c) => {
+        try {
+          const body = await c.req.json();
+          const {
+            message,
+            threadId,
+            userId,
+            clientData
+          } = body;
+          console.log("\n\u{1F525}\u{1F525}\u{1F525} INICIO DEL REQUEST \u{1F525}\u{1F525}\u{1F525}");
+          console.log("1. ThreadID recibido:", threadId);
+          console.log("2. ClientData CRUDA:", clientData);
+          console.log("3. \xBFTiene llaves?", clientData ? Object.keys(clientData) : "Es Null/Undefined");
+          if (!threadId) {
+            return c.json({
+              error: "ThreadID is required"
+            }, 400);
+          }
+          const currentThreadId = threadId || `chat_${userId}`;
+          const urlRegex = /(https?:\/\/[^\s]+)/g;
+          const linksEncontrados = message?.match(urlRegex);
+          let finalContextData = {};
+          finalContextData.operacionTipo = "";
+          let propertyOperationType = "";
+          try {
+            if (clientData && Object.keys(clientData).length > 0) {
+              const validResourceId = userId || "anonymous_user";
+              await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+            }
+            const dbContext = await ThreadContextService.getContext(threadId);
+            const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+            console.log("\u{1F9E0} [PERFIL MASTRA DETECTADO]:", mastraProfile);
+            console.log("\u{1F50D} [DB] Datos guardados en Base de Datos:", dbContext);
+            finalContextData = {
+              ...mastraProfile,
+              // 1. Base (Mastra)
+              ...dbContext,
+              // 2. Contexto Thread
+              ...clientData || {}
+              // 3. Override actual
+            };
+            console.log("\u{1F9E0} [MEMORIA FINAL] Esto es lo que sabr\xE1 el agente:", finalContextData);
+          } catch (err) {
+            console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
+            finalContextData = clientData || {};
+          }
+          return stream$1(c, async (streamInstance) => {
+            if (linksEncontrados && linksEncontrados.length > 0) {
+              const url = linksEncontrados[0].trim();
+              finalContextData.link = url;
+              if (currentThreadId) {
+                await ThreadContextService.clearThreadMessages(currentThreadId);
+              }
+              await randomSleep(1, 3);
+              await streamInstance.write(frasesRevisareLink[Math.floor(Math.random() * frasesRevisareLink.length)] + "\n\n");
+              try {
+                const workflow = mastra.getWorkflow("propertyWorkflow");
+                const run = await workflow.createRun();
+                console.log(`\u{1F680} Iniciando Workflow para: ${url}`);
+                const result = await run.start({
+                  inputData: {
+                    url
+                  }
+                });
+                if (result.status !== "success") {
+                  throw new Error(`Workflow failed: ${result.status}`);
+                }
+                const outputLogica = result.result;
+                if (outputLogica) {
+                  console.log("\u{1F4E6} Output Workflow recibido");
+                  if (outputLogica.minimalDescription) {
+                    await streamInstance.write(outputLogica.minimalDescription + "\n\n");
+                    await randomSleep(2, 4);
+                    await streamInstance.write(outputLogica.address + "\n\n");
+                  }
+                  if (outputLogica.operacionTipo) {
+                    propertyOperationType = outputLogica.operacionTipo;
+                    console.log("\u{1F680} Tipo de operaci\xF3n detectado ########## :", propertyOperationType);
+                    finalContextData.operacionTipo = outputLogica.operacionTipo;
+                    finalContextData.propertyAddress = outputLogica.address;
+                  }
+                }
+              } catch (workflowErr) {
+                console.error("\u274C Workflow error:", workflowErr);
+              }
+            }
+            try {
+              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
+              const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
+              console.log("\u{1F4DD} [PROMPT] Contexto adicional:", contextoAdicional);
+              const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
+              console.log("\u{1F6E0}\uFE0F Tools disponibles para el agente:", Object.keys(agent.tools || {}));
+              console.log("whatsapp-style: Volviendo a stream() por latencia. El estilo se manejar\xE1 via Prompt.");
+              const result = await agent.stream(message, {
+                threadId: currentThreadId,
+                resourceId: userId
+              });
+              if (result.textStream) {
+                for await (const chunk of result.textStream) {
+                  await streamInstance.write(chunk);
+                }
+              }
+            } catch (streamError) {
+              console.error("\u{1F4A5} Error en el stream del agente:", streamError);
+              await streamInstance.write("\n\n[Lo siento, tuve un problema procesando tu respuesta final.]");
+            }
+          });
+        } catch (error) {
+          console.error("\u{1F4A5} Error general en el handler:", error);
+          return c.json({
+            error: "Internal Server Error"
+          }, 500);
+        }
+      }
+    })]
+  }
+});
+
+function normalizeStudioBase(studioBase) {
+  if (studioBase.includes("..") || studioBase.includes("?") || studioBase.includes("#")) {
+    throw new Error(`Invalid base path: "${studioBase}". Base path cannot contain '..', '?', or '#'`);
+  }
+  studioBase = studioBase.replace(/\/+/g, "/");
+  if (studioBase === "/" || studioBase === "") {
+    return "";
+  }
+  if (studioBase.endsWith("/")) {
+    studioBase = studioBase.slice(0, -1);
+  }
+  if (!studioBase.startsWith("/")) {
+    studioBase = `/${studioBase}`;
+  }
+  return studioBase;
+}
+
+// src/utils/mime.ts
+var getMimeType = (filename, mimes = baseMimes) => {
+  const regexp = /\.([a-zA-Z0-9]+?)$/;
+  const match = filename.match(regexp);
+  if (!match) {
+    return;
+  }
+  let mimeType = mimes[match[1]];
+  if (mimeType && mimeType.startsWith("text")) {
+    mimeType += "; charset=utf-8";
+  }
+  return mimeType;
+};
+var _baseMimes = {
+  aac: "audio/aac",
+  avi: "video/x-msvideo",
+  avif: "image/avif",
+  av1: "video/av1",
+  bin: "application/octet-stream",
+  bmp: "image/bmp",
+  css: "text/css",
+  csv: "text/csv",
+  eot: "application/vnd.ms-fontobject",
+  epub: "application/epub+zip",
+  gif: "image/gif",
+  gz: "application/gzip",
+  htm: "text/html",
+  html: "text/html",
+  ico: "image/x-icon",
+  ics: "text/calendar",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  js: "text/javascript",
+  json: "application/json",
+  jsonld: "application/ld+json",
+  map: "application/json",
+  mid: "audio/x-midi",
+  midi: "audio/x-midi",
+  mjs: "text/javascript",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  mpeg: "video/mpeg",
+  oga: "audio/ogg",
+  ogv: "video/ogg",
+  ogx: "application/ogg",
+  opus: "audio/opus",
+  otf: "font/otf",
+  pdf: "application/pdf",
+  png: "image/png",
+  rtf: "application/rtf",
+  svg: "image/svg+xml",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  ts: "video/mp2t",
+  ttf: "font/ttf",
+  txt: "text/plain",
+  wasm: "application/wasm",
+  webm: "video/webm",
+  weba: "audio/webm",
+  webmanifest: "application/manifest+json",
+  webp: "image/webp",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  xhtml: "application/xhtml+xml",
+  xml: "application/xml",
+  zip: "application/zip",
+  "3gp": "video/3gpp",
+  "3g2": "video/3gpp2",
+  gltf: "model/gltf+json",
+  glb: "model/gltf-binary"
+};
+var baseMimes = _baseMimes;
+
 // src/helper/html/index.ts
 var html = (strings, ...values) => {
   const buffer = [""];
@@ -470,6 +1993,61 @@ var html = (strings, ...values) => {
   buffer[0] += strings.at(-1);
   return buffer.length === 1 ? "callbacks" in buffer ? raw(resolveCallbackSync(raw(buffer[0], buffer.callbacks))) : raw(buffer[0]) : stringBufferToString(buffer, buffer.callbacks);
 };
+
+// src/server/http-exception.ts
+var HTTPException$1 = class HTTPException extends Error {
+  res;
+  status;
+  /**
+   * Creates an instance of `HTTPException`.
+   * @param status - HTTP status code for the exception. Defaults to 500.
+   * @param options - Additional options for the exception.
+   */
+  constructor(status = 500, options) {
+    super(options?.message, { cause: options?.cause });
+    this.res = options?.res;
+    this.status = status;
+    this.stack = options?.stack || this.stack;
+  }
+  /**
+   * Returns the response object associated with the exception.
+   * If a response object is not provided, a new response is created with the error message and status code.
+   * @returns The response object.
+   */
+  getResponse() {
+    if (this.res) {
+      const newResponse = new Response(this.res.body, {
+        status: this.status,
+        headers: this.res.headers
+      });
+      return newResponse;
+    }
+    return new Response(this.message, {
+      status: this.status
+    });
+  }
+};
+
+// src/server/handlers/error.ts
+function formatZodError(error, context) {
+  const issues = error.issues.map((e) => ({
+    field: e.path.length > 0 ? e.path.join(".") : "root",
+    message: e.message
+  }));
+  return {
+    error: `Invalid ${context}`,
+    issues
+  };
+}
+function handleError$1(error, defaultMessage) {
+  const apiError = error;
+  const apiErrorStatus = apiError.status || apiError.details?.status || 500;
+  throw new HTTPException$1(apiErrorStatus, {
+    message: apiError.message || defaultMessage,
+    stack: apiError.stack,
+    cause: apiError.cause
+  });
+}
 
 // src/server/schemas/common.ts
 var runIdSchema = z$1.object({
@@ -677,8 +2255,62 @@ function generateOpenAPIDocument(routes, info) {
     paths
   };
 }
-
-// src/server/server-adapter/routes/route-builder.ts
+function pickParams(schema, params) {
+  const keys = Object.keys(schema.shape);
+  const result = {};
+  for (const key of keys) {
+    if (key in params) {
+      result[key] = params[key];
+    }
+  }
+  return result;
+}
+function jsonQueryParam(schema) {
+  return z.union([
+    schema,
+    // Already the expected type (non-string input)
+    z.string().transform((val, ctx) => {
+      try {
+        const parsed = JSON.parse(val);
+        const result = schema.safeParse(parsed);
+        if (!result.success) {
+          for (const issue of result.error.issues) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: issue.message,
+              path: issue.path
+            });
+          }
+          return z.NEVER;
+        }
+        return result.data;
+      } catch (e) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Invalid JSON: ${e instanceof Error ? e.message : "parse error"}`
+        });
+        return z.NEVER;
+      }
+    })
+  ]);
+}
+function isComplexType(schema) {
+  let inner = schema;
+  if (inner instanceof ZodOptional) inner = inner.unwrap();
+  if (inner instanceof ZodNullable) inner = inner.unwrap();
+  return inner instanceof ZodArray || inner instanceof ZodRecord || inner instanceof ZodObject;
+}
+function wrapSchemaForQueryParams(schema) {
+  const newShape = {};
+  for (const [key, fieldSchema] of Object.entries(schema.shape)) {
+    if (isComplexType(fieldSchema)) {
+      newShape[key] = jsonQueryParam(fieldSchema);
+    } else {
+      newShape[key] = fieldSchema;
+    }
+  }
+  return z.object(newShape);
+}
 function createRoute(config) {
   const { summary, description, tags, deprecated, ...baseRoute } = config;
   const openapi = config.method !== "ALL" ? generateRouteOpenAPI({
@@ -698,51 +2330,6 @@ function createRoute(config) {
     openapi,
     deprecated
   };
-}
-
-// src/server/http-exception.ts
-var HTTPException$2 = class HTTPException extends Error {
-  res;
-  status;
-  /**
-   * Creates an instance of `HTTPException`.
-   * @param status - HTTP status code for the exception. Defaults to 500.
-   * @param options - Additional options for the exception.
-   */
-  constructor(status = 500, options) {
-    super(options?.message, { cause: options?.cause });
-    this.res = options?.res;
-    this.status = status;
-    this.stack = options?.stack || this.stack;
-  }
-  /**
-   * Returns the response object associated with the exception.
-   * If a response object is not provided, a new response is created with the error message and status code.
-   * @returns The response object.
-   */
-  getResponse() {
-    if (this.res) {
-      const newResponse = new Response(this.res.body, {
-        status: this.status,
-        headers: this.res.headers
-      });
-      return newResponse;
-    }
-    return new Response(this.message, {
-      status: this.status
-    });
-  }
-};
-
-// src/server/handlers/error.ts
-function handleError$1(error, defaultMessage) {
-  const apiError = error;
-  const apiErrorStatus = apiError.status || apiError.details?.status || 500;
-  throw new HTTPException$2(apiErrorStatus, {
-    message: apiError.message || defaultMessage,
-    stack: apiError.stack,
-    cause: apiError.cause
-  });
 }
 
 var storedAgentIdPathParams = z$1.object({
@@ -811,12 +2398,13 @@ var LIST_STORED_AGENTS_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$2(400, { message: "Storage is not configured" });
+        throw new HTTPException$1(500, { message: "Storage is not configured" });
       }
-      if (!storage.supports.agents) {
-        throw new HTTPException$2(400, { message: "Storage does not support agents" });
+      const agentsStore = await storage.getStore("agents");
+      if (!agentsStore) {
+        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
       }
-      const result = await storage.listAgents({
+      const result = await agentsStore.listAgents({
         page,
         perPage,
         orderBy
@@ -840,14 +2428,15 @@ var GET_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$2(400, { message: "Storage is not configured" });
+        throw new HTTPException$1(500, { message: "Storage is not configured" });
       }
-      if (!storage.supports.agents) {
-        throw new HTTPException$2(400, { message: "Storage does not support agents" });
+      const agentsStore = await storage.getStore("agents");
+      if (!agentsStore) {
+        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
       }
-      const agent = await storage.getAgentById({ id: storedAgentId });
+      const agent = await agentsStore.getAgentById({ id: storedAgentId });
       if (!agent) {
-        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
       return agent;
     } catch (error) {
@@ -884,17 +2473,18 @@ var CREATE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$2(400, { message: "Storage is not configured" });
+        throw new HTTPException$1(500, { message: "Storage is not configured" });
       }
-      if (!storage.supports.agents) {
-        throw new HTTPException$2(400, { message: "Storage does not support agents" });
+      const agentsStore = await storage.getStore("agents");
+      if (!agentsStore) {
+        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
       }
-      const existing = await storage.getAgentById({ id });
+      const existing = await agentsStore.getAgentById({ id });
       if (existing) {
-        throw new HTTPException$2(409, { message: `Agent with id ${id} already exists` });
+        throw new HTTPException$1(409, { message: `Agent with id ${id} already exists` });
       }
       const toolsFromBody = Array.isArray(tools) ? tools : void 0;
-      const agent = await storage.createAgent({
+      const agent = await agentsStore.createAgent({
         agent: {
           id,
           name,
@@ -948,17 +2538,18 @@ var UPDATE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$2(400, { message: "Storage is not configured" });
+        throw new HTTPException$1(500, { message: "Storage is not configured" });
       }
-      if (!storage.supports.agents) {
-        throw new HTTPException$2(400, { message: "Storage does not support agents" });
+      const agentsStore = await storage.getStore("agents");
+      if (!agentsStore) {
+        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
       }
-      const existing = await storage.getAgentById({ id: storedAgentId });
+      const existing = await agentsStore.getAgentById({ id: storedAgentId });
       if (!existing) {
-        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
       const toolsFromBody = Array.isArray(tools) ? tools : void 0;
-      const agent = await storage.updateAgent({
+      const agent = await agentsStore.updateAgent({
         id: storedAgentId,
         name,
         description,
@@ -993,16 +2584,17 @@ var DELETE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$2(400, { message: "Storage is not configured" });
+        throw new HTTPException$1(500, { message: "Storage is not configured" });
       }
-      if (!storage.supports.agents) {
-        throw new HTTPException$2(400, { message: "Storage does not support agents" });
+      const agentsStore = await storage.getStore("agents");
+      if (!agentsStore) {
+        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
       }
-      const existing = await storage.getAgentById({ id: storedAgentId });
+      const existing = await agentsStore.getAgentById({ id: storedAgentId });
       if (!existing) {
-        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
-      await storage.deleteAgent({ id: storedAgentId });
+      await agentsStore.deleteAgent({ id: storedAgentId });
       return { success: true, message: `Agent ${storedAgentId} deleted successfully` };
     } catch (error) {
       return handleError$1(error, "Error deleting stored agent");
@@ -1010,360 +2602,38 @@ var DELETE_STORED_AGENT_ROUTE = createRoute({
   }
 });
 
-function commonjsRequire(path) {
-	throw new Error('Could not dynamically require "' + path + '". Please configure the dynamicRequireTargets or/and ignoreDynamicRequires option of @rollup/plugin-commonjs appropriately for this require call to work.');
-}
+var mastraPackageSchema = z.object({
+  name: z.string(),
+  version: z.string()
+});
+var systemPackagesResponseSchema = z.object({
+  packages: z.array(mastraPackageSchema)
+});
 
-var __create$3 = Object.create;
-var __defProp$3 = Object.defineProperty;
-var __getOwnPropDesc$3 = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames$3 = Object.getOwnPropertyNames;
-var __getProtoOf$3 = Object.getPrototypeOf;
-var __hasOwnProp$3 = Object.prototype.hasOwnProperty;
-var __require = /* @__PURE__ */ ((x) => typeof commonjsRequire !== "undefined" ? commonjsRequire : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof commonjsRequire !== "undefined" ? commonjsRequire : a)[b]
-}) : x)(function(x) {
-  if (typeof commonjsRequire !== "undefined") return commonjsRequire.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
-var __commonJS$2 = (cb, mod) => function __require2() {
-  return mod || (0, cb[__getOwnPropNames$3(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-};
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp$3(target, name, { get: all[name], enumerable: true });
-};
-var __copyProps$3 = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames$3(from))
-      if (!__hasOwnProp$3.call(to, key) && key !== except)
-        __defProp$3(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$3(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM$2 = (mod, isNodeMode, target) => (target = mod != null ? __create$3(__getProtoOf$3(mod)) : {}, __copyProps$3(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  __defProp$3(target, "default", { value: mod, enumerable: true }) ,
-  mod
-));
-
-// src/server/handlers/vector.ts
-var vector_exports = {};
-__export(vector_exports, {
-  CREATE_INDEX_ROUTE: () => CREATE_INDEX_ROUTE,
-  DELETE_INDEX_ROUTE: () => DELETE_INDEX_ROUTE,
-  DESCRIBE_INDEX_ROUTE: () => DESCRIBE_INDEX_ROUTE,
-  LIST_INDEXES_ROUTE: () => LIST_INDEXES_ROUTE,
-  QUERY_VECTORS_ROUTE: () => QUERY_VECTORS_ROUTE,
-  UPSERT_VECTORS_ROUTE: () => UPSERT_VECTORS_ROUTE,
-  createIndex: () => createIndex,
-  deleteIndex: () => deleteIndex,
-  describeIndex: () => describeIndex,
-  listIndexes: () => listIndexes,
-  queryVectors: () => queryVectors,
-  upsertVectors: () => upsertVectors
-});
-var vectorNamePathParams = z$1.object({
-  vectorName: z$1.string().describe("Name of the vector store")
-});
-var vectorIndexPathParams = vectorNamePathParams.extend({
-  indexName: z$1.string().describe("Name of the index")
-});
-var indexBodyBaseSchema = z$1.object({
-  indexName: z$1.string()
-});
-var upsertVectorsBodySchema = indexBodyBaseSchema.extend({
-  vectors: z$1.array(z$1.array(z$1.number())),
-  metadata: z$1.array(z$1.record(z$1.string(), z$1.any())).optional(),
-  ids: z$1.array(z$1.string()).optional()
-});
-var createIndexBodySchema = indexBodyBaseSchema.extend({
-  dimension: z$1.number(),
-  metric: z$1.enum(["cosine", "euclidean", "dotproduct"]).optional()
-});
-var queryVectorsBodySchema = indexBodyBaseSchema.extend({
-  queryVector: z$1.array(z$1.number()),
-  topK: z$1.number().optional(),
-  filter: z$1.record(z$1.string(), z$1.any()).optional(),
-  includeVector: z$1.boolean().optional()
-});
-var upsertVectorsResponseSchema = z$1.object({
-  ids: z$1.array(z$1.string())
-});
-var createIndexResponseSchema = successResponseSchema;
-var queryVectorsResponseSchema = z$1.array(z$1.unknown());
-var listIndexesResponseSchema = z$1.array(z$1.string());
-var describeIndexResponseSchema = z$1.object({
-  dimension: z$1.number(),
-  count: z$1.number(),
-  metric: z$1.string().optional()
-});
-var deleteIndexResponseSchema = successResponseSchema;
-
-// src/server/handlers/vector.ts
-function getVector(mastra, vectorName) {
-  if (!vectorName) {
-    throw new HTTPException$2(400, { message: "Vector name is required" });
-  }
-  const vector = mastra.getVector(vectorName);
-  if (!vector) {
-    throw new HTTPException$2(404, { message: `Vector store ${vectorName} not found` });
-  }
-  return vector;
-}
-async function upsertVectors({
-  mastra,
-  vectorName,
-  indexName,
-  vectors,
-  metadata,
-  ids
-}) {
-  try {
-    if (!indexName || !vectors || !Array.isArray(vectors)) {
-      throw new HTTPException$2(400, { message: "Invalid request index. indexName and vectors array are required." });
-    }
-    const vector = getVector(mastra, vectorName);
-    const result = await vector.upsert({ indexName, vectors, metadata, ids });
-    return { ids: result };
-  } catch (error) {
-    return handleError$1(error, "Error upserting vectors");
-  }
-}
-async function createIndex({
-  mastra,
-  vectorName,
-  indexName,
-  dimension,
-  metric
-}) {
-  try {
-    if (!indexName || typeof dimension !== "number" || dimension <= 0) {
-      throw new HTTPException$2(400, {
-        message: "Invalid request index, indexName and positive dimension number are required."
-      });
-    }
-    if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
-      throw new HTTPException$2(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
-    }
-    const vector = getVector(mastra, vectorName);
-    await vector.createIndex({ indexName, dimension, metric });
-    return { success: true };
-  } catch (error) {
-    return handleError$1(error, "Error creating index");
-  }
-}
-async function queryVectors({
-  mastra,
-  vectorName,
-  indexName,
-  queryVector,
-  topK,
-  filter,
-  includeVector
-}) {
-  try {
-    if (!indexName || !queryVector || !Array.isArray(queryVector)) {
-      throw new HTTPException$2(400, { message: "Invalid request query. indexName and queryVector array are required." });
-    }
-    const vector = getVector(mastra, vectorName);
-    const results = await vector.query({ indexName, queryVector, topK, filter, includeVector });
-    return results;
-  } catch (error) {
-    return handleError$1(error, "Error querying vectors");
-  }
-}
-async function listIndexes({ mastra, vectorName }) {
-  try {
-    const vector = getVector(mastra, vectorName);
-    const indexes = await vector.listIndexes();
-    return indexes.filter(Boolean);
-  } catch (error) {
-    return handleError$1(error, "Error listing indexes");
-  }
-}
-async function describeIndex({
-  mastra,
-  vectorName,
-  indexName
-}) {
-  try {
-    if (!indexName) {
-      throw new HTTPException$2(400, { message: "Index name is required" });
-    }
-    const vector = getVector(mastra, vectorName);
-    const stats = await vector.describeIndex({ indexName });
-    return {
-      dimension: stats.dimension,
-      count: stats.count,
-      metric: stats.metric?.toLowerCase()
-    };
-  } catch (error) {
-    return handleError$1(error, "Error describing index");
-  }
-}
-async function deleteIndex({
-  mastra,
-  vectorName,
-  indexName
-}) {
-  try {
-    if (!indexName) {
-      throw new HTTPException$2(400, { message: "Index name is required" });
-    }
-    const vector = getVector(mastra, vectorName);
-    await vector.deleteIndex({ indexName });
-    return { success: true };
-  } catch (error) {
-    return handleError$1(error, "Error deleting index");
-  }
-}
-var UPSERT_VECTORS_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/vector/:vectorName/upsert",
-  responseType: "json",
-  pathParamSchema: vectorNamePathParams,
-  bodySchema: upsertVectorsBodySchema,
-  responseSchema: upsertVectorsResponseSchema,
-  summary: "Upsert vectors",
-  description: "Inserts or updates vectors in the specified index",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName, ...params }) => {
-    try {
-      const { indexName, vectors, metadata, ids } = params;
-      if (!indexName || !vectors || !Array.isArray(vectors)) {
-        throw new HTTPException$2(400, { message: "Invalid request index. indexName and vectors array are required." });
-      }
-      const vector = getVector(mastra, vectorName);
-      const result = await vector.upsert({ indexName, vectors, metadata, ids });
-      return { ids: result };
-    } catch (error) {
-      return handleError$1(error, "Error upserting vectors");
-    }
-  }
-});
-var CREATE_INDEX_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/vector/:vectorName/create-index",
-  responseType: "json",
-  pathParamSchema: vectorNamePathParams,
-  bodySchema: createIndexBodySchema,
-  responseSchema: createIndexResponseSchema,
-  summary: "Create index",
-  description: "Creates a new vector index with the specified dimension and metric",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName, ...params }) => {
-    try {
-      const { indexName, dimension, metric } = params;
-      if (!indexName || typeof dimension !== "number" || dimension <= 0) {
-        throw new HTTPException$2(400, {
-          message: "Invalid request index, indexName and positive dimension number are required."
-        });
-      }
-      if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
-        throw new HTTPException$2(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
-      }
-      const vector = getVector(mastra, vectorName);
-      await vector.createIndex({ indexName, dimension, metric });
-      return { success: true };
-    } catch (error) {
-      return handleError$1(error, "Error creating index");
-    }
-  }
-});
-var QUERY_VECTORS_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/vector/:vectorName/query",
-  responseType: "json",
-  pathParamSchema: vectorNamePathParams,
-  bodySchema: queryVectorsBodySchema,
-  responseSchema: queryVectorsResponseSchema,
-  summary: "Query vectors",
-  description: "Performs a similarity search on the vector index",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName, ...params }) => {
-    try {
-      const { indexName, queryVector, topK, filter, includeVector } = params;
-      if (!indexName || !queryVector || !Array.isArray(queryVector)) {
-        throw new HTTPException$2(400, {
-          message: "Invalid request query. indexName and queryVector array are required."
-        });
-      }
-      const vector = getVector(mastra, vectorName);
-      const results = await vector.query({ indexName, queryVector, topK, filter, includeVector });
-      return results;
-    } catch (error) {
-      return handleError$1(error, "Error querying vectors");
-    }
-  }
-});
-var LIST_INDEXES_ROUTE = createRoute({
+// src/server/handlers/system.ts
+var GET_SYSTEM_PACKAGES_ROUTE = createRoute({
   method: "GET",
-  path: "/api/vector/:vectorName/indexes",
+  path: "/api/system/packages",
   responseType: "json",
-  pathParamSchema: vectorNamePathParams,
-  responseSchema: listIndexesResponseSchema,
-  summary: "List indexes",
-  description: "Returns a list of all indexes in the vector store",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName }) => {
+  responseSchema: systemPackagesResponseSchema,
+  summary: "Get installed Mastra packages",
+  description: "Returns a list of all installed Mastra packages and their versions from the project",
+  tags: ["System"],
+  handler: async () => {
     try {
-      const vector = getVector(mastra, vectorName);
-      const indexes = await vector.listIndexes();
-      return indexes.filter(Boolean);
-    } catch (error) {
-      return handleError$1(error, "Error listing indexes");
-    }
-  }
-});
-var DESCRIBE_INDEX_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/vector/:vectorName/indexes/:indexName",
-  responseType: "json",
-  pathParamSchema: vectorIndexPathParams,
-  responseSchema: describeIndexResponseSchema,
-  summary: "Describe index",
-  description: "Returns statistics and metadata for a specific index",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName, indexName }) => {
-    try {
-      if (!indexName) {
-        throw new HTTPException$2(400, { message: "Index name is required" });
+      const packagesFilePath = process.env.MASTRA_PACKAGES_FILE;
+      let packages = [];
+      if (packagesFilePath) {
+        try {
+          const fileContent = readFileSync(packagesFilePath, "utf-8");
+          packages = JSON.parse(fileContent);
+        } catch {
+          packages = [];
+        }
       }
-      const vector = getVector(mastra, vectorName);
-      const stats = await vector.describeIndex({ indexName });
-      return {
-        dimension: stats.dimension,
-        count: stats.count,
-        metric: stats.metric?.toLowerCase()
-      };
+      return { packages };
     } catch (error) {
-      return handleError$1(error, "Error describing index");
-    }
-  }
-});
-var DELETE_INDEX_ROUTE = createRoute({
-  method: "DELETE",
-  path: "/api/vector/:vectorName/indexes/:indexName",
-  responseType: "json",
-  pathParamSchema: vectorIndexPathParams,
-  responseSchema: deleteIndexResponseSchema,
-  summary: "Delete index",
-  description: "Deletes a vector index and all its data",
-  tags: ["Vectors"],
-  handler: async ({ mastra, vectorName, indexName }) => {
-    try {
-      if (!indexName) {
-        throw new HTTPException$2(400, { message: "Index name is required" });
-      }
-      const vector = getVector(mastra, vectorName);
-      await vector.deleteIndex({ indexName });
-      return { success: true };
-    } catch (error) {
-      return handleError$1(error, "Error deleting index");
+      return handleError$1(error, "Error getting system packages");
     }
   }
 });
@@ -1377,7 +2647,7 @@ function validateBody(body) {
     return acc;
   }, {});
   if (Object.keys(errorResponse).length > 0) {
-    throw new HTTPException$2(400, { message: Object.values(errorResponse)[0] });
+    throw new HTTPException$1(400, { message: Object.values(errorResponse)[0] });
   }
 }
 function sanitizeBody(body, disallowedKeys) {
@@ -1605,7 +2875,7 @@ var generateSpeechBodySchema = z$1.object({
   speakerId: z$1.string().optional()
 });
 var transcribeSpeechBodySchema = z$1.object({
-  audioData: z$1.any(),
+  audio: z$1.any(),
   // Buffer
   options: z$1.record(z$1.string(), z$1.any()).optional()
 });
@@ -1624,2111 +2894,6 @@ var enhanceInstructionsBodySchema = z$1.object({
 var enhanceInstructionsResponseSchema = z$1.object({
   explanation: z$1.string().describe("Explanation of the changes made"),
   new_prompt: z$1.string().describe("The enhanced instructions")
-});
-
-// src/server/handlers/voice.ts
-var voice_exports = {};
-__export(voice_exports, {
-  GENERATE_SPEECH_DEPRECATED_ROUTE: () => GENERATE_SPEECH_DEPRECATED_ROUTE,
-  GENERATE_SPEECH_ROUTE: () => GENERATE_SPEECH_ROUTE,
-  GET_LISTENER_ROUTE: () => GET_LISTENER_ROUTE,
-  GET_SPEAKERS_DEPRECATED_ROUTE: () => GET_SPEAKERS_DEPRECATED_ROUTE,
-  GET_SPEAKERS_ROUTE: () => GET_SPEAKERS_ROUTE,
-  TRANSCRIBE_SPEECH_DEPRECATED_ROUTE: () => TRANSCRIBE_SPEECH_DEPRECATED_ROUTE,
-  TRANSCRIBE_SPEECH_ROUTE: () => TRANSCRIBE_SPEECH_ROUTE
-});
-var GET_SPEAKERS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/agents/:agentId/voice/speakers",
-  responseType: "json",
-  pathParamSchema: agentIdPathParams,
-  responseSchema: voiceSpeakersResponseSchema,
-  summary: "Get voice speakers",
-  description: "Returns available voice speakers for the specified agent",
-  tags: ["Agents", "Voice"],
-  handler: async ({ mastra, agentId, requestContext }) => {
-    try {
-      if (!agentId) {
-        throw new HTTPException$2(400, { message: "Agent ID is required" });
-      }
-      const agent = mastra.getAgentById(agentId);
-      if (!agent) {
-        throw new HTTPException$2(404, { message: "Agent not found" });
-      }
-      const voice = await agent.getVoice({ requestContext });
-      const speakers = await Promise.resolve().then(() => voice.getSpeakers()).catch((err) => {
-        if (err instanceof MastraError) {
-          return [];
-        }
-        throw err;
-      });
-      return speakers;
-    } catch (error) {
-      return handleError$1(error, "Error getting speakers");
-    }
-  }
-});
-var GET_SPEAKERS_DEPRECATED_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/agents/:agentId/speakers",
-  responseType: "json",
-  pathParamSchema: agentIdPathParams,
-  responseSchema: voiceSpeakersResponseSchema,
-  summary: "Get available speakers for an agent",
-  description: "[DEPRECATED] Use /api/agents/:agentId/voice/speakers instead. Get available speakers for an agent",
-  tags: ["Agents", "Voice"],
-  handler: GET_SPEAKERS_ROUTE.handler
-});
-var GENERATE_SPEECH_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agents/:agentId/voice/speak",
-  responseType: "stream",
-  pathParamSchema: agentIdPathParams,
-  bodySchema: generateSpeechBodySchema,
-  responseSchema: speakResponseSchema,
-  summary: "Generate speech",
-  description: "Generates speech audio from text using the agent voice configuration",
-  tags: ["Agents", "Voice"],
-  handler: async ({ mastra, agentId, text, speakerId, requestContext }) => {
-    try {
-      if (!agentId) {
-        throw new HTTPException$2(400, { message: "Agent ID is required" });
-      }
-      validateBody({ text });
-      const agent = mastra.getAgentById(agentId);
-      if (!agent) {
-        throw new HTTPException$2(404, { message: "Agent not found" });
-      }
-      const voice = await agent.getVoice({ requestContext });
-      if (!voice) {
-        throw new HTTPException$2(400, { message: "Agent does not have voice capabilities" });
-      }
-      const audioStream = await Promise.resolve().then(() => voice.speak(text, { speaker: speakerId })).catch((err) => {
-        if (err instanceof MastraError) {
-          throw new HTTPException$2(400, { message: err.message });
-        }
-        throw err;
-      });
-      if (!audioStream) {
-        throw new HTTPException$2(500, { message: "Failed to generate speech" });
-      }
-      return audioStream;
-    } catch (error) {
-      return handleError$1(error, "Error generating speech");
-    }
-  }
-});
-var GENERATE_SPEECH_DEPRECATED_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agents/:agentId/speak",
-  responseType: "stream",
-  pathParamSchema: agentIdPathParams,
-  bodySchema: generateSpeechBodySchema,
-  responseSchema: speakResponseSchema,
-  summary: "Convert text to speech",
-  description: "[DEPRECATED] Use /api/agents/:agentId/voice/speak instead. Convert text to speech using the agent's voice provider",
-  tags: ["Agents", "Voice"],
-  handler: GENERATE_SPEECH_ROUTE.handler
-});
-var TRANSCRIBE_SPEECH_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agents/:agentId/voice/listen",
-  responseType: "json",
-  pathParamSchema: agentIdPathParams,
-  bodySchema: transcribeSpeechBodySchema,
-  responseSchema: transcribeSpeechResponseSchema,
-  summary: "Transcribe speech",
-  description: "Transcribes speech audio to text using the agent voice configuration",
-  tags: ["Agents", "Voice"],
-  handler: async ({ mastra, agentId, audioData, options, requestContext }) => {
-    try {
-      if (!agentId) {
-        throw new HTTPException$2(400, { message: "Agent ID is required" });
-      }
-      if (!audioData) {
-        throw new HTTPException$2(400, { message: "Audio data is required" });
-      }
-      const agent = mastra.getAgentById(agentId);
-      if (!agent) {
-        throw new HTTPException$2(404, { message: "Agent not found" });
-      }
-      const voice = await agent.getVoice({ requestContext });
-      if (!voice) {
-        throw new HTTPException$2(400, { message: "Agent does not have voice capabilities" });
-      }
-      const audioStream = new Readable();
-      audioStream.push(audioData);
-      audioStream.push(null);
-      const text = await voice.listen(audioStream, options);
-      return { text };
-    } catch (error) {
-      return handleError$1(error, "Error transcribing speech");
-    }
-  }
-});
-var TRANSCRIBE_SPEECH_DEPRECATED_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agents/:agentId/listen",
-  responseType: "json",
-  pathParamSchema: agentIdPathParams,
-  bodySchema: transcribeSpeechBodySchema,
-  responseSchema: transcribeSpeechResponseSchema,
-  summary: "Convert speech to text",
-  description: "[DEPRECATED] Use /api/agents/:agentId/voice/listen instead. Convert speech to text using the agent's voice provider. Additional provider-specific options can be passed as query parameters.",
-  tags: ["Agents", "Voice"],
-  handler: TRANSCRIBE_SPEECH_ROUTE.handler
-});
-var GET_LISTENER_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/agents/:agentId/voice/listener",
-  responseType: "json",
-  pathParamSchema: agentIdPathParams,
-  responseSchema: getListenerResponseSchema,
-  summary: "Get voice listener",
-  description: "Returns the voice listener configuration for the agent",
-  tags: ["Agents", "Voice"],
-  handler: async ({ mastra, agentId, requestContext }) => {
-    try {
-      if (!agentId) {
-        throw new HTTPException$2(400, { message: "Agent ID is required" });
-      }
-      const agent = mastra.getAgentById(agentId);
-      if (!agent) {
-        throw new HTTPException$2(404, { message: "Agent not found" });
-      }
-      const voice = await agent.getVoice({ requestContext });
-      const listeners = await Promise.resolve().then(() => voice.getListener()).catch((err) => {
-        if (err instanceof MastraError) {
-          return { enabled: false };
-        }
-        throw err;
-      });
-      return listeners;
-    } catch (error) {
-      return handleError$1(error, "Error getting listeners");
-    }
-  }
-});
-
-// src/server/handlers/logs.ts
-var logs_exports = {};
-__export(logs_exports, {
-  LIST_LOGS_BY_RUN_ID_ROUTE: () => LIST_LOGS_BY_RUN_ID_ROUTE,
-  LIST_LOGS_ROUTE: () => LIST_LOGS_ROUTE,
-  LIST_LOG_TRANSPORTS_ROUTE: () => LIST_LOG_TRANSPORTS_ROUTE
-});
-var listLogsQuerySchema = createPagePaginationSchema().extend({
-  fromDate: z$1.coerce.date().optional(),
-  toDate: z$1.coerce.date().optional(),
-  logLevel: z$1.enum(["debug", "info", "warn", "error", "silent"]).optional(),
-  filters: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
-  transportId: z$1.string()
-});
-var listLogsResponseSchema = z$1.object({
-  logs: z$1.array(baseLogMessageSchema),
-  total: z$1.number(),
-  page: z$1.number(),
-  perPage: z$1.union([z$1.number(), z$1.literal(false)]),
-  hasMore: z$1.boolean()
-});
-var listLogTransportsResponseSchema = z$1.object({
-  transports: z$1.array(z$1.string())
-});
-
-// src/server/handlers/logs.ts
-var LIST_LOG_TRANSPORTS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/logs/transports",
-  responseType: "json",
-  responseSchema: listLogTransportsResponseSchema,
-  summary: "List log transports",
-  description: "Returns a list of all available log transports",
-  tags: ["Logs"],
-  handler: async ({ mastra }) => {
-    try {
-      const logger = mastra.getLogger();
-      const transports = logger.getTransports();
-      return {
-        transports: transports ? [...transports.keys()] : []
-      };
-    } catch (error) {
-      return handleError$1(error, "Error getting log Transports");
-    }
-  }
-});
-var LIST_LOGS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/logs",
-  responseType: "json",
-  queryParamSchema: listLogsQuerySchema,
-  responseSchema: listLogsResponseSchema,
-  summary: "List logs",
-  description: "Returns logs from a specific transport with optional filtering by date range, log level, and custom filters",
-  tags: ["Logs"],
-  handler: async ({ mastra, ...params }) => {
-    try {
-      const { transportId, fromDate, toDate, logLevel, filters: _filters, page, perPage } = params;
-      validateBody({ transportId });
-      const filters = parseFilters(_filters);
-      const logs = await mastra.listLogs(transportId, {
-        fromDate,
-        toDate,
-        logLevel,
-        filters,
-        page: page ? Number(page) : void 0,
-        perPage: perPage ? Number(perPage) : void 0
-      });
-      return logs;
-    } catch (error) {
-      return handleError$1(error, "Error getting logs");
-    }
-  }
-});
-var LIST_LOGS_BY_RUN_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/logs/:runId",
-  responseType: "json",
-  pathParamSchema: runIdSchema,
-  queryParamSchema: listLogsQuerySchema,
-  responseSchema: listLogsResponseSchema,
-  summary: "List logs by run ID",
-  description: "Returns all logs for a specific execution run from a transport",
-  tags: ["Logs"],
-  handler: async ({ mastra, runId, ...params }) => {
-    try {
-      const { transportId, fromDate, toDate, logLevel, filters: _filters, page, perPage } = params;
-      validateBody({ runId, transportId });
-      const filters = parseFilters(_filters);
-      const logs = await mastra.listLogsByRunId({
-        runId,
-        transportId,
-        fromDate,
-        toDate,
-        logLevel,
-        filters,
-        page: page ? Number(page) : void 0,
-        perPage: perPage ? Number(perPage) : void 0
-      });
-      return logs;
-    } catch (error) {
-      return handleError$1(error, "Error getting logs by run ID");
-    }
-  }
-});
-
-// src/server/handlers/mcp.ts
-var mcp_exports = {};
-__export(mcp_exports, {
-  EXECUTE_MCP_SERVER_TOOL_ROUTE: () => EXECUTE_MCP_SERVER_TOOL_ROUTE,
-  GET_MCP_SERVER_DETAIL_ROUTE: () => GET_MCP_SERVER_DETAIL_ROUTE,
-  GET_MCP_SERVER_TOOL_DETAIL_ROUTE: () => GET_MCP_SERVER_TOOL_DETAIL_ROUTE,
-  LIST_MCP_SERVERS_ROUTE: () => LIST_MCP_SERVERS_ROUTE,
-  LIST_MCP_SERVER_TOOLS_ROUTE: () => LIST_MCP_SERVER_TOOLS_ROUTE,
-  MCP_HTTP_TRANSPORT_ROUTE: () => MCP_HTTP_TRANSPORT_ROUTE,
-  MCP_SSE_MESSAGES_ROUTE: () => MCP_SSE_MESSAGES_ROUTE,
-  MCP_SSE_TRANSPORT_ROUTE: () => MCP_SSE_TRANSPORT_ROUTE
-});
-var mcpServerIdPathParams = z.object({
-  serverId: z.string().describe("MCP server ID")
-});
-var mcpServerDetailPathParams = z.object({
-  id: z.string().describe("MCP server ID")
-});
-var mcpServerToolPathParams = z.object({
-  serverId: z.string().describe("MCP server ID"),
-  toolId: z.string().describe("Tool ID")
-});
-var executeToolBodySchema = z.object({
-  data: z.unknown().optional()
-});
-var listMcpServersQuerySchema = createCombinedPaginationSchema();
-var getMcpServerDetailQuerySchema = z.object({
-  version: z.string().optional()
-});
-var versionDetailSchema = z.object({
-  version: z.string(),
-  release_date: z.string(),
-  is_latest: z.boolean()
-});
-var serverInfoSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  version_detail: versionDetailSchema
-});
-var listMcpServersResponseSchema = z.object({
-  servers: z.array(serverInfoSchema),
-  total_count: z.number(),
-  next: z.string().nullable()
-});
-var serverDetailSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  description: z.string().optional(),
-  version_detail: versionDetailSchema,
-  package_canonical: z.string().optional(),
-  packages: z.array(z.unknown()).optional(),
-  remotes: z.array(z.unknown()).optional()
-});
-var mcpToolInfoSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
-  inputSchema: z.unknown(),
-  outputSchema: z.unknown().optional(),
-  toolType: z.string().optional()
-});
-var listMcpServerToolsResponseSchema = z.object({
-  tools: z.array(mcpToolInfoSchema)
-});
-var executeToolResponseSchema = z.object({
-  result: z.unknown()
-});
-z.object({
-  jsonrpc: z.literal("2.0"),
-  error: z.object({
-    code: z.number(),
-    message: z.string()
-  }),
-  id: z.null()
-});
-
-// src/server/handlers/mcp.ts
-var LIST_MCP_SERVERS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/mcp/v0/servers",
-  responseType: "json",
-  queryParamSchema: listMcpServersQuerySchema,
-  responseSchema: listMcpServersResponseSchema,
-  summary: "List MCP servers",
-  description: "Returns a list of registered MCP servers with pagination support",
-  tags: ["MCP"],
-  handler: async ({
-    mastra,
-    page,
-    perPage,
-    limit,
-    offset
-  }) => {
-    if (!mastra || typeof mastra.listMCPServers !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or listMCPServers method not available" });
-    }
-    const servers = mastra.listMCPServers();
-    if (!servers) {
-      return { servers: [], total_count: 0, next: null };
-    }
-    const serverList = Object.values(servers);
-    const totalCount = serverList.length;
-    const useLegacyFormat = (limit !== void 0 || offset !== void 0) && page === void 0 && perPage === void 0;
-    const finalPerPage = perPage ?? limit;
-    let finalPage = page;
-    if (finalPage === void 0 && offset !== void 0 && finalPerPage !== void 0 && finalPerPage > 0) {
-      finalPage = Math.floor(offset / finalPerPage);
-    }
-    const actualOffset = finalPage !== void 0 && finalPerPage !== void 0 ? finalPage * finalPerPage : 0;
-    let paginatedServers = serverList;
-    let nextUrl = null;
-    if (finalPerPage !== void 0) {
-      paginatedServers = serverList.slice(actualOffset, actualOffset + finalPerPage);
-      if (actualOffset + finalPerPage < totalCount) {
-        const nextPage = (finalPage ?? 0) + 1;
-        if (useLegacyFormat) {
-          const nextOffset = actualOffset + finalPerPage;
-          nextUrl = `/api/mcp/v0/servers?limit=${finalPerPage}&offset=${nextOffset}`;
-        } else {
-          nextUrl = `/api/mcp/v0/servers?perPage=${finalPerPage}&page=${nextPage}`;
-        }
-      }
-    }
-    const serverInfoList = paginatedServers.map((server) => server.getServerInfo());
-    return {
-      servers: serverInfoList,
-      total_count: totalCount,
-      next: nextUrl
-    };
-  }
-});
-var GET_MCP_SERVER_DETAIL_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/mcp/v0/servers/:id",
-  responseType: "json",
-  pathParamSchema: mcpServerDetailPathParams,
-  queryParamSchema: getMcpServerDetailQuerySchema,
-  responseSchema: serverDetailSchema,
-  summary: "Get MCP server details",
-  description: "Returns detailed information about a specific MCP server",
-  tags: ["MCP"],
-  handler: async ({ mastra, id, version }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(id);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server with ID '${id}' not found` });
-    }
-    const serverDetail = server.getServerDetail();
-    if (version && serverDetail.version_detail.version !== version) {
-      throw new HTTPException$2(404, {
-        message: `MCP server with ID '${id}' found, but not version '${version}'. Available version: ${serverDetail.version_detail.version}`
-      });
-    }
-    return serverDetail;
-  }
-});
-var LIST_MCP_SERVER_TOOLS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/mcp/:serverId/tools",
-  responseType: "json",
-  pathParamSchema: mcpServerIdPathParams,
-  responseSchema: listMcpServerToolsResponseSchema,
-  summary: "List MCP server tools",
-  description: "Returns a list of tools available on the specified MCP server",
-  tags: ["MCP"],
-  handler: async ({ mastra, serverId }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(serverId);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
-    }
-    if (typeof server.getToolListInfo !== "function") {
-      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot list tools in this way.` });
-    }
-    return server.getToolListInfo();
-  }
-});
-var GET_MCP_SERVER_TOOL_DETAIL_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/mcp/:serverId/tools/:toolId",
-  responseType: "json",
-  pathParamSchema: mcpServerToolPathParams,
-  responseSchema: mcpToolInfoSchema,
-  summary: "Get MCP server tool details",
-  description: "Returns detailed information about a specific tool on the MCP server",
-  tags: ["MCP"],
-  handler: async ({ mastra, serverId, toolId }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(serverId);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
-    }
-    if (typeof server.getToolInfo !== "function") {
-      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot provide tool details in this way.` });
-    }
-    const toolInfo = server.getToolInfo(toolId);
-    if (!toolInfo) {
-      throw new HTTPException$2(404, { message: `Tool with ID '${toolId}' not found on MCP server '${serverId}'` });
-    }
-    return toolInfo;
-  }
-});
-var EXECUTE_MCP_SERVER_TOOL_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/mcp/:serverId/tools/:toolId/execute",
-  responseType: "json",
-  pathParamSchema: mcpServerToolPathParams,
-  bodySchema: executeToolBodySchema,
-  responseSchema: executeToolResponseSchema,
-  summary: "Execute MCP server tool",
-  description: "Executes a tool on the specified MCP server with the provided arguments",
-  tags: ["MCP"],
-  handler: async ({
-    mastra,
-    serverId,
-    toolId,
-    data
-  }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(serverId);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
-    }
-    if (typeof server.executeTool !== "function") {
-      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot execute tools in this way.` });
-    }
-    const result = await server.executeTool(toolId, data);
-    return { result };
-  }
-});
-var MCP_HTTP_TRANSPORT_ROUTE = createRoute({
-  method: "ALL",
-  path: "/api/mcp/:serverId/mcp",
-  responseType: "mcp-http",
-  pathParamSchema: mcpServerIdPathParams,
-  summary: "MCP HTTP Transport",
-  description: "Streamable HTTP transport endpoint for MCP protocol communication",
-  tags: ["MCP"],
-  handler: async ({ mastra, serverId }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(serverId);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server '${serverId}' not found` });
-    }
-    return {
-      server,
-      httpPath: `/api/mcp/${serverId}/mcp`
-    };
-  }
-});
-var MCP_SSE_TRANSPORT_ROUTE = createRoute({
-  method: "ALL",
-  path: "/api/mcp/:serverId/sse",
-  responseType: "mcp-sse",
-  pathParamSchema: mcpServerIdPathParams,
-  summary: "MCP SSE Transport",
-  description: "SSE transport endpoint for MCP protocol communication",
-  tags: ["MCP"],
-  handler: async ({ mastra, serverId }) => {
-    if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
-    }
-    const server = mastra.getMCPServerById(serverId);
-    if (!server) {
-      throw new HTTPException$2(404, { message: `MCP server '${serverId}' not found` });
-    }
-    return {
-      server,
-      ssePath: `/api/mcp/${serverId}/sse`,
-      messagePath: `/api/mcp/${serverId}/messages`
-    };
-  }
-});
-var MCP_SSE_MESSAGES_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/mcp/:serverId/messages",
-  responseType: "mcp-sse",
-  pathParamSchema: mcpServerIdPathParams,
-  summary: "MCP SSE Messages",
-  description: "Message endpoint for SSE transport (posts messages to active SSE streams)",
-  tags: ["MCP"],
-  handler: MCP_SSE_TRANSPORT_ROUTE.handler
-});
-
-// src/server/handlers/memory.ts
-var memory_exports = {};
-__export(memory_exports, {
-  CREATE_THREAD_NETWORK_ROUTE: () => CREATE_THREAD_NETWORK_ROUTE,
-  CREATE_THREAD_ROUTE: () => CREATE_THREAD_ROUTE,
-  DELETE_MESSAGES_NETWORK_ROUTE: () => DELETE_MESSAGES_NETWORK_ROUTE,
-  DELETE_MESSAGES_ROUTE: () => DELETE_MESSAGES_ROUTE,
-  DELETE_THREAD_NETWORK_ROUTE: () => DELETE_THREAD_NETWORK_ROUTE,
-  DELETE_THREAD_ROUTE: () => DELETE_THREAD_ROUTE,
-  GET_MEMORY_CONFIG_ROUTE: () => GET_MEMORY_CONFIG_ROUTE,
-  GET_MEMORY_STATUS_NETWORK_ROUTE: () => GET_MEMORY_STATUS_NETWORK_ROUTE,
-  GET_MEMORY_STATUS_ROUTE: () => GET_MEMORY_STATUS_ROUTE,
-  GET_THREAD_BY_ID_NETWORK_ROUTE: () => GET_THREAD_BY_ID_NETWORK_ROUTE,
-  GET_THREAD_BY_ID_ROUTE: () => GET_THREAD_BY_ID_ROUTE,
-  GET_WORKING_MEMORY_ROUTE: () => GET_WORKING_MEMORY_ROUTE,
-  LIST_MESSAGES_NETWORK_ROUTE: () => LIST_MESSAGES_NETWORK_ROUTE,
-  LIST_MESSAGES_ROUTE: () => LIST_MESSAGES_ROUTE,
-  LIST_THREADS_NETWORK_ROUTE: () => LIST_THREADS_NETWORK_ROUTE,
-  LIST_THREADS_ROUTE: () => LIST_THREADS_ROUTE,
-  SAVE_MESSAGES_NETWORK_ROUTE: () => SAVE_MESSAGES_NETWORK_ROUTE,
-  SAVE_MESSAGES_ROUTE: () => SAVE_MESSAGES_ROUTE,
-  SEARCH_MEMORY_ROUTE: () => SEARCH_MEMORY_ROUTE,
-  UPDATE_THREAD_NETWORK_ROUTE: () => UPDATE_THREAD_NETWORK_ROUTE,
-  UPDATE_THREAD_ROUTE: () => UPDATE_THREAD_ROUTE,
-  UPDATE_WORKING_MEMORY_ROUTE: () => UPDATE_WORKING_MEMORY_ROUTE,
-  getTextContent: () => getTextContent
-});
-var threadIdPathParams = z$1.object({
-  threadId: z$1.string().describe("Unique identifier for the conversation thread")
-});
-var agentIdQuerySchema = z$1.object({
-  agentId: z$1.string()
-});
-var storageOrderBySchema = z$1.object({
-  field: z$1.enum(["createdAt", "updatedAt"]).optional(),
-  direction: z$1.enum(["ASC", "DESC"]).optional()
-});
-var messageOrderBySchema = z$1.object({
-  field: z$1.enum(["createdAt"]).optional(),
-  direction: z$1.enum(["ASC", "DESC"]).optional()
-});
-var includeSchema = z$1.preprocess(
-  (val) => {
-    if (typeof val === "string") {
-      try {
-        return JSON.parse(val);
-      } catch {
-        return void 0;
-      }
-    }
-    return val;
-  },
-  z$1.array(
-    z$1.object({
-      id: z$1.string(),
-      threadId: z$1.string().optional(),
-      withPreviousMessages: z$1.number().optional(),
-      withNextMessages: z$1.number().optional()
-    })
-  ).optional()
-);
-var filterSchema = z$1.preprocess(
-  (val) => {
-    if (typeof val === "string") {
-      try {
-        return JSON.parse(val);
-      } catch {
-        return void 0;
-      }
-    }
-    return val;
-  },
-  z$1.object({
-    dateRange: z$1.object({
-      start: z$1.coerce.date().optional(),
-      end: z$1.coerce.date().optional()
-    }).optional()
-  }).optional()
-);
-var memoryConfigSchema = z$1.preprocess((val) => {
-  if (typeof val === "string") {
-    try {
-      return JSON.parse(val);
-    } catch {
-      return void 0;
-    }
-  }
-  return val;
-}, z$1.record(z$1.string(), z$1.unknown()).optional());
-var threadSchema = z$1.object({
-  id: z$1.string(),
-  title: z$1.string().optional(),
-  resourceId: z$1.string(),
-  createdAt: z$1.date(),
-  updatedAt: z$1.date(),
-  metadata: z$1.record(z$1.string(), z$1.unknown()).optional()
-});
-var messageSchema$1 = z$1.any();
-var getMemoryStatusQuerySchema = agentIdQuerySchema;
-var getMemoryConfigQuerySchema = agentIdQuerySchema;
-var listThreadsQuerySchema = createPagePaginationSchema(100).extend({
-  agentId: z$1.string(),
-  resourceId: z$1.string(),
-  orderBy: storageOrderBySchema.optional()
-});
-var getThreadByIdQuerySchema = agentIdQuerySchema;
-var listMessagesQuerySchema = createPagePaginationSchema(40).extend({
-  agentId: z$1.string(),
-  resourceId: z$1.string().optional(),
-  orderBy: messageOrderBySchema.optional(),
-  include: includeSchema,
-  filter: filterSchema
-});
-var getWorkingMemoryQuerySchema = z$1.object({
-  agentId: z$1.string(),
-  resourceId: z$1.string().optional(),
-  memoryConfig: memoryConfigSchema
-});
-var getMemoryStatusNetworkQuerySchema = agentIdQuerySchema;
-var listThreadsNetworkQuerySchema = createPagePaginationSchema(100).extend({
-  agentId: z$1.string(),
-  resourceId: z$1.string(),
-  orderBy: storageOrderBySchema.optional()
-});
-var getThreadByIdNetworkQuerySchema = agentIdQuerySchema;
-var listMessagesNetworkQuerySchema = createPagePaginationSchema(40).extend({
-  agentId: z$1.string(),
-  resourceId: z$1.string().optional(),
-  orderBy: messageOrderBySchema.optional(),
-  include: includeSchema,
-  filter: filterSchema
-});
-var saveMessagesNetworkQuerySchema = agentIdQuerySchema;
-var createThreadNetworkQuerySchema = agentIdQuerySchema;
-var updateThreadNetworkQuerySchema = agentIdQuerySchema;
-var deleteThreadNetworkQuerySchema = agentIdQuerySchema;
-var deleteMessagesNetworkQuerySchema = agentIdQuerySchema;
-var memoryStatusResponseSchema = z$1.object({
-  result: z$1.boolean()
-});
-var memoryConfigResponseSchema = z$1.object({
-  config: z$1.object({
-    lastMessages: z$1.union([z$1.number(), z$1.literal(false)]).optional(),
-    semanticRecall: z$1.union([z$1.boolean(), z$1.any()]).optional(),
-    workingMemory: z$1.any().optional()
-  })
-});
-var listThreadsResponseSchema = paginationInfoSchema.extend({
-  threads: z$1.array(threadSchema)
-});
-var getThreadByIdResponseSchema = threadSchema;
-var listMessagesResponseSchema = z$1.object({
-  messages: z$1.array(messageSchema$1),
-  uiMessages: z$1.unknown()
-  // Converted messages in UI format
-});
-var getWorkingMemoryResponseSchema = z$1.object({
-  workingMemory: z$1.unknown(),
-  // Can be string or structured object depending on template
-  source: z$1.enum(["thread", "resource"]),
-  workingMemoryTemplate: z$1.unknown(),
-  // Template structure varies
-  threadExists: z$1.boolean()
-});
-var saveMessagesBodySchema = z$1.object({
-  messages: z$1.array(messageSchema$1)
-});
-var createThreadBodySchema = z$1.object({
-  resourceId: z$1.string(),
-  title: z$1.string().optional(),
-  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  threadId: z$1.string().optional()
-});
-var updateThreadBodySchema = z$1.object({
-  title: z$1.string().optional(),
-  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  resourceId: z$1.string().optional()
-});
-var updateWorkingMemoryBodySchema = z$1.object({
-  workingMemory: z$1.string(),
-  resourceId: z$1.string().optional(),
-  memoryConfig: z$1.record(z$1.string(), z$1.unknown()).optional()
-});
-var deleteMessagesBodySchema = z$1.object({
-  messageIds: z$1.union([
-    z$1.string(),
-    z$1.array(z$1.string()),
-    z$1.object({ id: z$1.string() }),
-    z$1.array(z$1.object({ id: z$1.string() }))
-  ])
-});
-var searchMemoryQuerySchema = z$1.object({
-  agentId: z$1.string(),
-  searchQuery: z$1.string(),
-  resourceId: z$1.string(),
-  threadId: z$1.string().optional(),
-  limit: z$1.coerce.number().optional().default(20),
-  memoryConfig: memoryConfigSchema
-});
-var saveMessagesResponseSchema = z$1.object({
-  messages: z$1.array(messageSchema$1)
-});
-var deleteThreadResponseSchema = z$1.object({
-  result: z$1.string()
-});
-var updateWorkingMemoryResponseSchema = successResponseSchema;
-var deleteMessagesResponseSchema = successResponseSchema.extend({
-  message: z$1.string()
-});
-var searchMemoryResponseSchema = z$1.object({
-  results: z$1.array(z$1.unknown()),
-  count: z$1.number(),
-  query: z$1.string(),
-  searchScope: z$1.string().optional(),
-  searchType: z$1.string().optional()
-});
-
-// src/server/handlers/memory.ts
-function getTextContent(message) {
-  if (typeof message.content === "string") {
-    return message.content;
-  }
-  if (message.content && typeof message.content === "object" && "parts" in message.content) {
-    const textPart = message.content.parts.find((p) => p.type === "text");
-    return textPart?.text || "";
-  }
-  return "";
-}
-async function getMemoryFromContext({
-  mastra,
-  agentId,
-  requestContext
-}) {
-  const logger = mastra.getLogger();
-  let agent;
-  if (agentId) {
-    try {
-      agent = mastra.getAgentById(agentId);
-    } catch (error) {
-      logger.debug("Error getting agent from mastra, searching agents for agent", error);
-    }
-  }
-  if (agentId && !agent) {
-    logger.debug("Agent not found, searching agents for agent", { agentId });
-    const agents = mastra.listAgents();
-    if (Object.keys(agents || {}).length) {
-      for (const [_, ag] of Object.entries(agents)) {
-        try {
-          const agents2 = await ag.listAgents();
-          if (agents2[agentId]) {
-            agent = agents2[agentId];
-            break;
-          }
-        } catch (error) {
-          logger.debug("Error getting agent from agent", error);
-        }
-      }
-    }
-    if (!agent) {
-      throw new HTTPException$2(404, { message: "Agent not found" });
-    }
-  }
-  if (agent) {
-    return await agent?.getMemory({
-      requestContext
-    });
-  }
-}
-var GET_MEMORY_STATUS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/status",
-  responseType: "json",
-  queryParamSchema: getMemoryStatusQuerySchema,
-  responseSchema: memoryStatusResponseSchema,
-  summary: "Get memory status",
-  description: "Returns the current status of the memory system including configuration and health information",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, requestContext }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        return { result: false };
-      }
-      return { result: true };
-    } catch (error) {
-      return handleError$1(error, "Error getting memory status");
-    }
-  }
-});
-var GET_MEMORY_CONFIG_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/config",
-  responseType: "json",
-  queryParamSchema: getMemoryConfigQuerySchema,
-  responseSchema: memoryConfigResponseSchema,
-  summary: "Get memory configuration",
-  description: "Returns the memory configuration for a specific agent or the system default",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, requestContext }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const config = memory.getMergedThreadConfig({});
-      return { config };
-    } catch (error) {
-      return handleError$1(error, "Error getting memory configuration");
-    }
-  }
-});
-var LIST_THREADS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/threads",
-  responseType: "json",
-  queryParamSchema: listThreadsQuerySchema,
-  responseSchema: listThreadsResponseSchema,
-  summary: "List memory threads",
-  description: "Returns a paginated list of conversation threads filtered by resource ID",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, resourceId, requestContext, page, perPage, orderBy }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      validateBody({ resourceId });
-      const result = await memory.listThreadsByResourceId({
-        resourceId,
-        page,
-        perPage,
-        orderBy
-      });
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error listing threads");
-    }
-  }
-});
-var GET_THREAD_BY_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: getThreadByIdQuerySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Get thread by ID",
-  description: "Returns details for a specific conversation thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, threadId, requestContext }) => {
-    try {
-      validateBody({ threadId });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
-      }
-      return thread;
-    } catch (error) {
-      return handleError$1(error, "Error getting thread");
-    }
-  }
-});
-var LIST_MESSAGES_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/threads/:threadId/messages",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: listMessagesQuerySchema,
-  responseSchema: listMessagesResponseSchema,
-  summary: "List thread messages",
-  description: "Returns a paginated list of messages in a conversation thread",
-  tags: ["Memory"],
-  handler: async ({
-    mastra,
-    agentId,
-    threadId,
-    resourceId,
-    perPage,
-    page,
-    orderBy,
-    include,
-    filter,
-    requestContext
-  }) => {
-    try {
-      validateBody({ threadId });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      if (!threadId) {
-        throw new HTTPException$2(400, { message: "No threadId found" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
-      }
-      const result = await memory.recall({
-        threadId,
-        resourceId,
-        perPage,
-        page,
-        orderBy,
-        include,
-        filter
-      });
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error getting messages");
-    }
-  }
-});
-var GET_WORKING_MEMORY_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/threads/:threadId/working-memory",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: getWorkingMemoryQuerySchema,
-  responseSchema: getWorkingMemoryResponseSchema,
-  summary: "Get working memory",
-  description: "Returns the working memory state for a thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, threadId, resourceId, requestContext, memoryConfig }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      validateBody({ threadId });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      const threadExists = !!thread;
-      const template = await memory.getWorkingMemoryTemplate({ memoryConfig });
-      const workingMemoryTemplate = template?.format === "json" ? { ...template, content: JSON.stringify(generateEmptyFromSchema(template.content)) } : template;
-      const workingMemory = await memory.getWorkingMemory({ threadId, resourceId, memoryConfig });
-      const config = memory.getMergedThreadConfig(memoryConfig || {});
-      const source = config.workingMemory?.scope !== "thread" && resourceId ? "resource" : "thread";
-      return { workingMemory, source, workingMemoryTemplate, threadExists };
-    } catch (error) {
-      return handleError$1(error, "Error getting working memory");
-    }
-  }
-});
-var SAVE_MESSAGES_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/save-messages",
-  responseType: "json",
-  queryParamSchema: agentIdQuerySchema,
-  bodySchema: saveMessagesBodySchema,
-  responseSchema: saveMessagesResponseSchema,
-  summary: "Save messages",
-  description: "Saves new messages to memory",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, messages, requestContext }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      if (!messages) {
-        throw new HTTPException$2(400, { message: "Messages are required" });
-      }
-      if (!Array.isArray(messages)) {
-        throw new HTTPException$2(400, { message: "Messages should be an array" });
-      }
-      const invalidMessages = messages.filter((message) => !message.threadId || !message.resourceId);
-      if (invalidMessages.length > 0) {
-        throw new HTTPException$2(400, {
-          message: `All messages must have threadId and resourceId fields. Found ${invalidMessages.length} invalid message(s).`
-        });
-      }
-      const processedMessages = messages.map((message) => ({
-        ...message,
-        id: message.id || memory.generateId(),
-        createdAt: message.createdAt ? new Date(message.createdAt) : /* @__PURE__ */ new Date()
-      }));
-      const result = await memory.saveMessages({ messages: processedMessages, memoryConfig: {} });
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error saving messages");
-    }
-  }
-});
-var CREATE_THREAD_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/threads",
-  responseType: "json",
-  queryParamSchema: agentIdQuerySchema,
-  bodySchema: createThreadBodySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Create thread",
-  description: "Creates a new conversation thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, resourceId, title, metadata, threadId, requestContext }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      validateBody({ resourceId });
-      const result = await memory.createThread({
-        resourceId,
-        title,
-        metadata,
-        threadId
-      });
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error saving thread to memory");
-    }
-  }
-});
-var UPDATE_THREAD_ROUTE = createRoute({
-  method: "PATCH",
-  path: "/api/memory/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: agentIdQuerySchema,
-  bodySchema: updateThreadBodySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Update thread",
-  description: "Updates a conversation thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, threadId, title, metadata, resourceId, requestContext }) => {
-    try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      const updatedAt = /* @__PURE__ */ new Date();
-      validateBody({ threadId });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
-      }
-      const updatedThread = {
-        ...thread,
-        title: title || thread.title,
-        metadata: metadata || thread.metadata,
-        resourceId: resourceId || thread.resourceId,
-        createdAt: thread.createdAt,
-        updatedAt
-      };
-      const result = await memory.saveThread({ thread: updatedThread });
-      return {
-        ...result,
-        resourceId: result.resourceId ?? null
-      };
-    } catch (error) {
-      return handleError$1(error, "Error updating thread");
-    }
-  }
-});
-var DELETE_THREAD_ROUTE = createRoute({
-  method: "DELETE",
-  path: "/api/memory/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: agentIdQuerySchema,
-  responseSchema: deleteThreadResponseSchema,
-  summary: "Delete thread",
-  description: "Deletes a conversation thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, threadId, requestContext }) => {
-    try {
-      validateBody({ threadId });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
-      }
-      await memory.deleteThread(threadId);
-      return { result: "Thread deleted" };
-    } catch (error) {
-      return handleError$1(error, "Error deleting thread");
-    }
-  }
-});
-var UPDATE_WORKING_MEMORY_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/threads/:threadId/working-memory",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: agentIdQuerySchema,
-  bodySchema: updateWorkingMemoryBodySchema,
-  responseSchema: updateWorkingMemoryResponseSchema,
-  summary: "Update working memory",
-  description: "Updates the working memory state for a thread",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, threadId, resourceId, memoryConfig, workingMemory, requestContext }) => {
-    try {
-      validateBody({ threadId, workingMemory });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
-      }
-      await memory.updateWorkingMemory({ threadId, resourceId, workingMemory, memoryConfig });
-      return { success: true };
-    } catch (error) {
-      return handleError$1(error, "Error updating working memory");
-    }
-  }
-});
-var DELETE_MESSAGES_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/messages/delete",
-  responseType: "json",
-  queryParamSchema: agentIdQuerySchema,
-  bodySchema: deleteMessagesBodySchema,
-  responseSchema: deleteMessagesResponseSchema,
-  summary: "Delete messages",
-  description: "Deletes specific messages from memory",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, messageIds, requestContext }) => {
-    try {
-      if (messageIds === void 0 || messageIds === null) {
-        throw new HTTPException$2(400, { message: "messageIds is required" });
-      }
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      let normalizedIds;
-      if (Array.isArray(messageIds)) {
-        normalizedIds = messageIds;
-      } else if (typeof messageIds === "string") {
-        normalizedIds = [messageIds];
-      } else {
-        normalizedIds = [messageIds];
-      }
-      await memory.deleteMessages(normalizedIds);
-      const count = Array.isArray(messageIds) ? messageIds.length : 1;
-      return { success: true, message: `${count} message${count === 1 ? "" : "s"} deleted successfully` };
-    } catch (error) {
-      return handleError$1(error, "Error deleting messages");
-    }
-  }
-});
-var SEARCH_MEMORY_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/search",
-  responseType: "json",
-  queryParamSchema: searchMemoryQuerySchema,
-  responseSchema: searchMemoryResponseSchema,
-  summary: "Search memory",
-  description: "Searches across memory using semantic or text search",
-  tags: ["Memory"],
-  handler: async ({ mastra, agentId, searchQuery, resourceId, threadId, limit = 20, requestContext, memoryConfig }) => {
-    try {
-      validateBody({ searchQuery, resourceId });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
-      const config = memory.getMergedThreadConfig(memoryConfig || {});
-      const hasSemanticRecall = !!config?.semanticRecall;
-      const resourceScope = typeof config?.semanticRecall === "object" ? config?.semanticRecall?.scope !== "thread" : true;
-      const searchResults = [];
-      if (threadId && !resourceScope) {
-        const thread = await memory.getThreadById({ threadId });
-        if (!thread) {
-          return {
-            results: [],
-            count: 0,
-            query: searchQuery,
-            searchScope: resourceScope ? "resource" : "thread",
-            searchType: hasSemanticRecall ? "semantic" : "text"
-          };
-        }
-        if (thread.resourceId !== resourceId) {
-          throw new HTTPException$2(403, { message: "Thread does not belong to the specified resource" });
-        }
-      }
-      if (!threadId) {
-        const { threads } = await memory.listThreadsByResourceId({
-          resourceId,
-          page: 0,
-          perPage: 1,
-          orderBy: { field: "updatedAt", direction: "DESC" }
-        });
-        if (threads.length === 0) {
-          return {
-            results: [],
-            count: 0,
-            query: searchQuery,
-            searchScope: resourceScope ? "resource" : "thread",
-            searchType: hasSemanticRecall ? "semantic" : "text"
-          };
-        }
-        threadId = threads[0].id;
-      }
-      const beforeRange = typeof config.semanticRecall === `boolean` ? 2 : typeof config.semanticRecall?.messageRange === `number` ? config.semanticRecall.messageRange : config.semanticRecall?.messageRange.before || 2;
-      const afterRange = typeof config.semanticRecall === `boolean` ? 2 : typeof config.semanticRecall?.messageRange === `number` ? config.semanticRecall.messageRange : config.semanticRecall?.messageRange.after || 2;
-      if (resourceScope && config.semanticRecall) {
-        config.semanticRecall = typeof config.semanticRecall === `boolean` ? (
-          // make message range 0 so we can highlight the matches in search, message range will include other messages, not the matching ones
-          // and we add prev/next messages in a special section on each message anyway
-          { messageRange: 0, topK: 2, scope: "resource" }
-        ) : { ...config.semanticRecall, messageRange: 0 };
-      }
-      const threadConfig = memory.getMergedThreadConfig(config || {});
-      if (!threadConfig.lastMessages && !threadConfig.semanticRecall) {
-        return { results: [], count: 0, query: searchQuery };
-      }
-      const result = await memory.recall({
-        threadId,
-        resourceId,
-        perPage: threadConfig.lastMessages,
-        threadConfig: config,
-        vectorSearchString: threadConfig.semanticRecall && searchQuery ? searchQuery : void 0
-      });
-      const threadIds = Array.from(
-        new Set(result.messages.map((m) => m.threadId || threadId).filter(Boolean))
-      );
-      const fetched = await Promise.all(threadIds.map((id) => memory.getThreadById({ threadId: id })));
-      const threadMap = new Map(fetched.filter(Boolean).map((t) => [t.id, t]));
-      for (const msg of result.messages) {
-        const content = getTextContent(msg);
-        const msgThreadId = msg.threadId || threadId;
-        const thread = threadMap.get(msgThreadId);
-        const threadMessages = (await memory.recall({ threadId: msgThreadId })).messages;
-        const messageIndex = threadMessages.findIndex((m) => m.id === msg.id);
-        const searchResult = {
-          id: msg.id,
-          role: msg.role,
-          content,
-          createdAt: msg.createdAt,
-          threadId: msgThreadId,
-          threadTitle: thread?.title || msgThreadId
-        };
-        if (messageIndex !== -1) {
-          searchResult.context = {
-            before: threadMessages.slice(Math.max(0, messageIndex - beforeRange), messageIndex).map((m) => ({
-              id: m.id,
-              role: m.role,
-              content: getTextContent(m),
-              createdAt: m.createdAt || /* @__PURE__ */ new Date()
-            })),
-            after: threadMessages.slice(messageIndex + 1, messageIndex + afterRange + 1).map((m) => ({
-              id: m.id,
-              role: m.role,
-              content: getTextContent(m),
-              createdAt: m.createdAt || /* @__PURE__ */ new Date()
-            }))
-          };
-        }
-        searchResults.push(searchResult);
-      }
-      const sortedResults = searchResults.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, limit);
-      return {
-        results: sortedResults,
-        count: sortedResults.length,
-        query: searchQuery,
-        searchScope: resourceScope ? "resource" : "thread",
-        searchType: hasSemanticRecall ? "semantic" : "text"
-      };
-    } catch (error) {
-      return handleError$1(error, "Error searching memory");
-    }
-  }
-});
-var GET_MEMORY_STATUS_NETWORK_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/network/status",
-  responseType: "json",
-  queryParamSchema: getMemoryStatusNetworkQuerySchema,
-  responseSchema: memoryStatusResponseSchema,
-  summary: "Get memory status (network)",
-  description: "Returns the current status of the memory system (network route)",
-  tags: ["Memory - Network"],
-  handler: GET_MEMORY_STATUS_ROUTE.handler
-});
-var LIST_THREADS_NETWORK_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/network/threads",
-  responseType: "json",
-  queryParamSchema: listThreadsNetworkQuerySchema,
-  responseSchema: listThreadsResponseSchema,
-  summary: "List memory threads (network)",
-  description: "Returns a paginated list of conversation threads (network route)",
-  tags: ["Memory - Network"],
-  handler: LIST_THREADS_ROUTE.handler
-});
-var GET_THREAD_BY_ID_NETWORK_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/network/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: getThreadByIdNetworkQuerySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Get thread by ID (network)",
-  description: "Returns details for a specific conversation thread (network route)",
-  tags: ["Memory - Network"],
-  handler: GET_THREAD_BY_ID_ROUTE.handler
-});
-var LIST_MESSAGES_NETWORK_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/memory/network/threads/:threadId/messages",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: listMessagesNetworkQuerySchema,
-  responseSchema: listMessagesResponseSchema,
-  summary: "List thread messages (network)",
-  description: "Returns a paginated list of messages in a conversation thread (network route)",
-  tags: ["Memory - Network"],
-  handler: LIST_MESSAGES_ROUTE.handler
-});
-var SAVE_MESSAGES_NETWORK_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/network/save-messages",
-  responseType: "json",
-  queryParamSchema: saveMessagesNetworkQuerySchema,
-  bodySchema: saveMessagesBodySchema,
-  responseSchema: saveMessagesResponseSchema,
-  summary: "Save messages (network)",
-  description: "Saves new messages to memory (network route)",
-  tags: ["Memory - Network"],
-  handler: SAVE_MESSAGES_ROUTE.handler
-});
-var CREATE_THREAD_NETWORK_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/network/threads",
-  responseType: "json",
-  queryParamSchema: createThreadNetworkQuerySchema,
-  bodySchema: createThreadBodySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Create thread (network)",
-  description: "Creates a new conversation thread (network route)",
-  tags: ["Memory - Network"],
-  handler: CREATE_THREAD_ROUTE.handler
-});
-var UPDATE_THREAD_NETWORK_ROUTE = createRoute({
-  method: "PATCH",
-  path: "/api/memory/network/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: updateThreadNetworkQuerySchema,
-  bodySchema: updateThreadBodySchema,
-  responseSchema: getThreadByIdResponseSchema,
-  summary: "Update thread (network)",
-  description: "Updates a conversation thread (network route)",
-  tags: ["Memory - Network"],
-  handler: UPDATE_THREAD_ROUTE.handler
-});
-var DELETE_THREAD_NETWORK_ROUTE = createRoute({
-  method: "DELETE",
-  path: "/api/memory/network/threads/:threadId",
-  responseType: "json",
-  pathParamSchema: threadIdPathParams,
-  queryParamSchema: deleteThreadNetworkQuerySchema,
-  responseSchema: deleteThreadResponseSchema,
-  summary: "Delete thread (network)",
-  description: "Deletes a conversation thread (network route)",
-  tags: ["Memory - Network"],
-  handler: DELETE_THREAD_ROUTE.handler
-});
-var DELETE_MESSAGES_NETWORK_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/memory/network/messages/delete",
-  responseType: "json",
-  queryParamSchema: deleteMessagesNetworkQuerySchema,
-  bodySchema: deleteMessagesBodySchema,
-  responseSchema: deleteMessagesResponseSchema,
-  summary: "Delete messages (network)",
-  description: "Deletes specific messages from memory (network route)",
-  tags: ["Memory - Network"],
-  handler: DELETE_MESSAGES_ROUTE.handler
-});
-
-// src/server/handlers/observability.ts
-var observability_exports = {};
-__export(observability_exports, {
-  GET_TRACES_PAGINATED_ROUTE: () => GET_TRACES_PAGINATED_ROUTE,
-  GET_TRACE_ROUTE: () => GET_TRACE_ROUTE,
-  LIST_SCORES_BY_SPAN_ROUTE: () => LIST_SCORES_BY_SPAN_ROUTE,
-  SCORE_TRACES_ROUTE: () => SCORE_TRACES_ROUTE,
-  getTraceHandler: () => getTraceHandler,
-  getTracesPaginatedHandler: () => getTracesPaginatedHandler,
-  listScoresBySpan: () => listScoresBySpan,
-  scoreTracesHandler: () => scoreTracesHandler
-});
-var aiSpanTypeSchema = z$1.enum([
-  "agent_run",
-  "generic",
-  "model_generation",
-  "model_step",
-  "model_chunk",
-  "mcp_tool_call",
-  "processor_run",
-  "tool_call",
-  "workflow_run",
-  "workflow_step",
-  "workflow_conditional",
-  "workflow_conditional_eval",
-  "workflow_parallel",
-  "workflow_loop",
-  "workflow_sleep",
-  "workflow_wait_event"
-]);
-var aiSpanRecordSchema = z$1.object({
-  traceId: z$1.string(),
-  spanId: z$1.string(),
-  parentSpanId: z$1.string().nullable(),
-  name: z$1.string(),
-  scope: z$1.record(z$1.string(), z$1.any()).nullable(),
-  spanType: aiSpanTypeSchema,
-  attributes: z$1.record(z$1.string(), z$1.any()).nullable(),
-  metadata: z$1.record(z$1.string(), z$1.any()).nullable(),
-  links: z$1.any(),
-  startedAt: z$1.coerce.date(),
-  endedAt: z$1.coerce.date().nullable(),
-  createdAt: z$1.coerce.date(),
-  updatedAt: z$1.coerce.date().nullable(),
-  input: z$1.any(),
-  output: z$1.any(),
-  error: z$1.any(),
-  isEvent: z$1.boolean()
-});
-var getAITracesPaginatedResponseSchema = z$1.object({
-  pagination: paginationInfoSchema,
-  spans: z$1.array(aiSpanRecordSchema)
-});
-var traceIdPathParams = z$1.object({
-  traceId: z$1.string().describe("Unique identifier for the trace")
-});
-var traceSpanPathParams = traceIdPathParams.extend({
-  spanId: z$1.string().describe("Unique identifier for the span")
-});
-var scoreTracesBodySchema = z$1.object({
-  scorerName: z$1.string(),
-  targets: z$1.array(
-    z$1.object({
-      traceId: z$1.string(),
-      spanId: z$1.string().optional()
-    })
-  )
-});
-var getAITraceResponseSchema = z$1.object({
-  spans: z$1.array(aiSpanRecordSchema)
-});
-var scoreTracesResponseSchema = z$1.object({
-  status: z$1.string(),
-  message: z$1.string(),
-  traceCount: z$1.number()
-});
-var listScoresBySpanResponseSchema = z$1.object({
-  pagination: paginationInfoSchema,
-  scores: z$1.array(z$1.unknown())
-});
-var listScoresBySpanQuerySchema = createPagePaginationSchema(10);
-
-// src/server/handlers/observability.ts
-async function getTraceHandler({ mastra, traceId }) {
-  try {
-    if (!traceId) {
-      throw new HTTPException$2(400, { message: "Trace ID is required" });
-    }
-    const storage = mastra.getStorage();
-    if (!storage) {
-      throw new HTTPException$2(500, { message: "Storage is not available" });
-    }
-    const trace = await storage.getTrace(traceId);
-    if (!trace) {
-      throw new HTTPException$2(404, { message: `Trace with ID '${traceId}' not found` });
-    }
-    return trace;
-  } catch (error) {
-    handleError$1(error, "Error getting trace");
-  }
-}
-async function getTracesPaginatedHandler({ mastra, pagination, filters }) {
-  try {
-    const storage = mastra.getStorage();
-    if (!storage) {
-      throw new HTTPException$2(500, { message: "Storage is not available" });
-    }
-    if (pagination?.page && pagination.page < 0) {
-      throw new HTTPException$2(400, { message: "Page must be a non-negative integer" });
-    }
-    if (pagination?.perPage && pagination.perPage < 0) {
-      throw new HTTPException$2(400, { message: "Per page must be a non-negative integer" });
-    }
-    if (pagination?.dateRange) {
-      const { start, end } = pagination.dateRange;
-      if (start && !(start instanceof Date)) {
-        throw new HTTPException$2(400, { message: "Invalid date format in date range" });
-      }
-      if (end && !(end instanceof Date)) {
-        throw new HTTPException$2(400, { message: "Invalid date format in date range" });
-      }
-    }
-    return storage.getTracesPaginated({
-      pagination,
-      filters
-    });
-  } catch (error) {
-    handleError$1(error, "Error getting traces paginated");
-  }
-}
-async function scoreTracesHandler({ mastra, scorerName, targets }) {
-  try {
-    if (!scorerName) {
-      throw new HTTPException$2(400, { message: "Scorer ID is required" });
-    }
-    if (!targets || targets.length === 0) {
-      throw new HTTPException$2(400, { message: "At least one target is required" });
-    }
-    const storage = mastra.getStorage();
-    if (!storage) {
-      throw new HTTPException$2(500, { message: "Storage is not available" });
-    }
-    const scorer = mastra.getScorerById(scorerName);
-    if (!scorer) {
-      throw new HTTPException$2(404, { message: `Scorer '${scorerName}' not found` });
-    }
-    const logger = mastra.getLogger();
-    scoreTraces({
-      scorerId: scorer.config.id || scorer.config.name,
-      targets,
-      mastra
-    }).catch((error) => {
-      logger?.error(`Background trace scoring failed: ${error.message}`, error);
-    });
-    return {
-      status: "success",
-      message: `Scoring started for ${targets.length} ${targets.length === 1 ? "trace" : "traces"}`,
-      traceCount: targets.length
-    };
-  } catch (error) {
-    handleError$1(error, "Error processing trace scoring");
-  }
-}
-async function listScoresBySpan({
-  mastra,
-  traceId,
-  spanId,
-  page,
-  perPage
-}) {
-  try {
-    const storage = mastra.getStorage();
-    if (!storage) {
-      throw new HTTPException$2(500, { message: "Storage is not available" });
-    }
-    if (!traceId || !spanId) {
-      throw new HTTPException$2(400, { message: "Trace ID and span ID are required" });
-    }
-    return await storage.listScoresBySpan({ traceId, spanId, pagination: { page, perPage } });
-  } catch (error) {
-    return handleError$1(error, "Error getting scores by span");
-  }
-}
-var GET_TRACES_PAGINATED_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/observability/traces",
-  responseType: "json",
-  queryParamSchema: z$1.object({
-    page: z$1.coerce.number().optional().default(0),
-    perPage: z$1.coerce.number().optional().default(10),
-    name: z$1.string().optional(),
-    spanType: z$1.string().optional(),
-    dateRange: z$1.string().optional(),
-    entityId: z$1.string().optional(),
-    entityType: z$1.string().optional()
-  }),
-  responseSchema: getAITracesPaginatedResponseSchema,
-  summary: "Get AI traces",
-  description: "Returns a paginated list of AI execution traces with optional filtering by name, type, date range, and entity",
-  tags: ["Observability"],
-  handler: async ({ mastra, ...params }) => {
-    try {
-      const storage = mastra.getStorage();
-      if (!storage) {
-        throw new HTTPException$2(500, { message: "Storage is not available" });
-      }
-      const { page, perPage, name, spanType, dateRange, entityId, entityType } = params;
-      const rawDateRange = dateRange ? JSON.parse(dateRange) : void 0;
-      const pagination = {
-        page,
-        perPage,
-        dateRange: rawDateRange ? {
-          start: rawDateRange.start ? new Date(rawDateRange.start) : void 0,
-          end: rawDateRange.end ? new Date(rawDateRange.end) : void 0
-        } : void 0
-      };
-      const filters = Object.fromEntries(
-        Object.entries({ name, spanType, entityId, entityType }).filter(([_, v]) => v !== void 0)
-      );
-      if (pagination?.page && pagination.page < 0) {
-        throw new HTTPException$2(400, { message: "Page must be a non-negative integer" });
-      }
-      if (pagination?.perPage && pagination.perPage < 0) {
-        throw new HTTPException$2(400, { message: "Per page must be a non-negative integer" });
-      }
-      if (pagination?.dateRange) {
-        const { start, end } = pagination.dateRange;
-        if (start && !(start instanceof Date)) {
-          throw new HTTPException$2(400, { message: "Invalid date format in date range" });
-        }
-        if (end && !(end instanceof Date)) {
-          throw new HTTPException$2(400, { message: "Invalid date format in date range" });
-        }
-      }
-      return storage.getTracesPaginated({ pagination, filters });
-    } catch (error) {
-      handleError$1(error, "Error getting traces paginated");
-    }
-  }
-});
-var GET_TRACE_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/observability/traces/:traceId",
-  responseType: "json",
-  pathParamSchema: traceIdPathParams,
-  responseSchema: getAITraceResponseSchema,
-  summary: "Get AI trace by ID",
-  description: "Returns a complete AI trace with all spans by trace ID",
-  tags: ["Observability"],
-  handler: async ({ mastra, traceId }) => {
-    try {
-      if (!traceId) {
-        throw new HTTPException$2(400, { message: "Trace ID is required" });
-      }
-      const storage = mastra.getStorage();
-      if (!storage) {
-        throw new HTTPException$2(500, { message: "Storage is not available" });
-      }
-      const trace = await storage.getTrace(traceId);
-      if (!trace) {
-        throw new HTTPException$2(404, { message: `Trace with ID '${traceId}' not found` });
-      }
-      return trace;
-    } catch (error) {
-      handleError$1(error, "Error getting trace");
-    }
-  }
-});
-var SCORE_TRACES_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/observability/traces/score",
-  responseType: "json",
-  bodySchema: scoreTracesBodySchema,
-  responseSchema: scoreTracesResponseSchema,
-  summary: "Score traces",
-  description: "Scores one or more traces using a specified scorer (fire-and-forget)",
-  tags: ["Observability"],
-  handler: async ({ mastra, ...params }) => {
-    try {
-      const { scorerName, targets } = params;
-      if (!scorerName) {
-        throw new HTTPException$2(400, { message: "Scorer ID is required" });
-      }
-      if (!targets || targets.length === 0) {
-        throw new HTTPException$2(400, { message: "At least one target is required" });
-      }
-      const storage = mastra.getStorage();
-      if (!storage) {
-        throw new HTTPException$2(500, { message: "Storage is not available" });
-      }
-      const scorer = mastra.getScorerById(scorerName);
-      if (!scorer) {
-        throw new HTTPException$2(404, { message: `Scorer '${scorerName}' not found` });
-      }
-      const logger = mastra.getLogger();
-      scoreTraces({
-        scorerId: scorer.config.id || scorer.config.name,
-        targets,
-        mastra
-      }).catch((error) => {
-        logger?.error(`Background trace scoring failed: ${error.message}`, error);
-      });
-      return {
-        status: "success",
-        message: `Scoring started for ${targets.length} ${targets.length === 1 ? "trace" : "traces"}`,
-        traceCount: targets.length
-      };
-    } catch (error) {
-      handleError$1(error, "Error processing trace scoring");
-    }
-  }
-});
-var LIST_SCORES_BY_SPAN_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/observability/traces/:traceId/:spanId/scores",
-  responseType: "json",
-  pathParamSchema: traceSpanPathParams,
-  queryParamSchema: listScoresBySpanQuerySchema,
-  responseSchema: listScoresBySpanResponseSchema,
-  summary: "List scores by span",
-  description: "Returns all scores for a specific span within a trace",
-  tags: ["Observability"],
-  handler: async ({ mastra, traceId, spanId, ...params }) => {
-    try {
-      const storage = mastra.getStorage();
-      if (!storage) {
-        throw new HTTPException$2(500, { message: "Storage is not available" });
-      }
-      if (!traceId || !spanId) {
-        throw new HTTPException$2(400, { message: "Trace ID and span ID are required" });
-      }
-      const { page, perPage } = params;
-      return await storage.listScoresBySpan({
-        traceId,
-        spanId,
-        pagination: { page: page ?? 0, perPage: perPage ?? 10 }
-      });
-    } catch (error) {
-      return handleError$1(error, "Error getting scores by span");
-    }
-  }
-});
-
-// src/server/handlers/scores.ts
-var scores_exports = {};
-__export(scores_exports, {
-  GET_SCORER_ROUTE: () => GET_SCORER_ROUTE,
-  LIST_SCORERS_ROUTE: () => LIST_SCORERS_ROUTE,
-  LIST_SCORES_BY_ENTITY_ID_ROUTE: () => LIST_SCORES_BY_ENTITY_ID_ROUTE,
-  LIST_SCORES_BY_RUN_ID_ROUTE: () => LIST_SCORES_BY_RUN_ID_ROUTE,
-  LIST_SCORES_BY_SCORER_ID_ROUTE: () => LIST_SCORES_BY_SCORER_ID_ROUTE,
-  SAVE_SCORE_ROUTE: () => SAVE_SCORE_ROUTE
-});
-var scoringSamplingConfigSchema = z$1.object({});
-var mastraScorerConfigSchema = z$1.object({
-  id: z$1.string(),
-  name: z$1.string().optional(),
-  description: z$1.string(),
-  type: z$1.unknown().optional(),
-  judge: z$1.unknown().optional()
-});
-var mastraScorerSchema = z$1.object({
-  config: mastraScorerConfigSchema
-});
-var scorerEntrySchema = z$1.object({
-  scorer: mastraScorerSchema,
-  sampling: scoringSamplingConfigSchema.optional(),
-  agentIds: z$1.array(z$1.string()),
-  agentNames: z$1.array(z$1.string()),
-  workflowIds: z$1.array(z$1.string()),
-  isRegistered: z$1.boolean()
-});
-var listScorersResponseSchema = z$1.record(z$1.string(), scorerEntrySchema);
-var scorerIdPathParams = z$1.object({
-  scorerId: z$1.string().describe("Unique identifier for the scorer")
-});
-var entityPathParams = z$1.object({
-  entityType: z$1.string().describe("Type of the entity (AGENT or WORKFLOW)"),
-  entityId: z$1.string().describe("Unique identifier for the entity")
-});
-var listScoresByRunIdQuerySchema = z$1.object({
-  page: z$1.coerce.number().optional().default(0),
-  perPage: z$1.coerce.number().optional().default(10)
-});
-var listScoresByScorerIdQuerySchema = z$1.object({
-  page: z$1.coerce.number().optional().default(0),
-  perPage: z$1.coerce.number().optional().default(10),
-  entityId: z$1.string().optional(),
-  entityType: z$1.string().optional()
-});
-var listScoresByEntityIdQuerySchema = z$1.object({
-  page: z$1.coerce.number().optional().default(0),
-  perPage: z$1.coerce.number().optional().default(10)
-});
-var saveScoreBodySchema = z$1.object({
-  score: z$1.unknown()
-  // ScoreRowData - complex type
-});
-var scoresWithPaginationResponseSchema = z$1.object({
-  pagination: paginationInfoSchema,
-  scores: z$1.array(z$1.unknown())
-  // Array of score records
-});
-var saveScoreResponseSchema = z$1.object({
-  score: z$1.unknown()
-  // ScoreRowData
-});
-
-// src/server/handlers/scores.ts
-async function listScorersFromSystem({
-  mastra,
-  requestContext
-}) {
-  const agents = mastra.listAgents();
-  const workflows = mastra.listWorkflows();
-  const scorersMap = /* @__PURE__ */ new Map();
-  for (const [_, agent] of Object.entries(agents)) {
-    const scorers = await agent.listScorers({
-      requestContext
-    }) || {};
-    if (Object.keys(scorers).length > 0) {
-      for (const [_scorerId, scorer] of Object.entries(scorers)) {
-        const scorerId = scorer.scorer.id;
-        if (scorersMap.has(scorerId)) {
-          scorersMap.get(scorerId)?.agentIds.push(agent.id);
-          scorersMap.get(scorerId)?.agentNames.push(agent.name);
-        } else {
-          scorersMap.set(scorerId, {
-            workflowIds: [],
-            ...scorer,
-            agentNames: [agent.name],
-            agentIds: [agent.id],
-            isRegistered: false
-          });
-        }
-      }
-    }
-  }
-  for (const [workflowId, workflow] of Object.entries(workflows)) {
-    const scorers = await workflow.listScorers({
-      requestContext
-    }) || {};
-    if (Object.keys(scorers).length > 0) {
-      for (const [_scorerId, scorer] of Object.entries(scorers)) {
-        const scorerName = scorer.scorer.name;
-        if (scorersMap.has(scorerName)) {
-          scorersMap.get(scorerName)?.workflowIds.push(workflowId);
-        } else {
-          scorersMap.set(scorerName, {
-            agentIds: [],
-            agentNames: [],
-            ...scorer,
-            workflowIds: [workflowId],
-            isRegistered: false
-          });
-        }
-      }
-    }
-  }
-  const registeredScorers = await mastra.listScorers();
-  for (const [_scorerId, scorer] of Object.entries(registeredScorers || {})) {
-    const scorerId = scorer.id;
-    if (scorersMap.has(scorerId)) {
-      scorersMap.get(scorerId).isRegistered = true;
-    } else {
-      scorersMap.set(scorerId, {
-        scorer,
-        agentIds: [],
-        agentNames: [],
-        workflowIds: [],
-        isRegistered: true
-      });
-    }
-  }
-  return Object.fromEntries(scorersMap.entries());
-}
-function getTraceDetails(traceIdWithSpanId) {
-  if (!traceIdWithSpanId) {
-    return {};
-  }
-  const [traceId, spanId] = traceIdWithSpanId.split("-");
-  return {
-    ...traceId ? { traceId } : {},
-    ...spanId ? { spanId } : {}
-  };
-}
-var LIST_SCORERS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/scores/scorers",
-  responseType: "json",
-  responseSchema: listScorersResponseSchema,
-  summary: "List all scorers",
-  description: "Returns a list of all registered scorers with their configuration and associated agents and workflows",
-  tags: ["Scoring"],
-  handler: async ({ mastra, requestContext }) => {
-    const scorers = await listScorersFromSystem({
-      mastra,
-      requestContext
-    });
-    return scorers;
-  }
-});
-var GET_SCORER_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/scores/scorers/:scorerId",
-  responseType: "json",
-  pathParamSchema: scorerIdPathParams,
-  responseSchema: scorerEntrySchema.nullable(),
-  summary: "Get scorer by ID",
-  description: "Returns details for a specific scorer including its configuration and associations",
-  tags: ["Scoring"],
-  handler: async ({ mastra, scorerId, requestContext }) => {
-    const scorers = await listScorersFromSystem({
-      mastra,
-      requestContext
-    });
-    const scorer = scorers[scorerId];
-    if (!scorer) {
-      return null;
-    }
-    return scorer;
-  }
-});
-var LIST_SCORES_BY_RUN_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/scores/run/:runId",
-  responseType: "json",
-  pathParamSchema: runIdSchema,
-  queryParamSchema: listScoresByRunIdQuerySchema,
-  responseSchema: scoresWithPaginationResponseSchema,
-  summary: "List scores by run ID",
-  description: "Returns all scores for a specific execution run",
-  tags: ["Scoring"],
-  handler: async ({ mastra, runId, ...params }) => {
-    try {
-      const { page, perPage } = params;
-      const pagination = {
-        page: page ?? 0,
-        perPage: perPage ?? 10
-      };
-      const scoreResults = await mastra.getStorage()?.listScoresByRunId?.({
-        runId,
-        pagination
-      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
-      return {
-        pagination: scoreResults.pagination,
-        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
-      };
-    } catch (error) {
-      return handleError$1(error, "Error getting scores by run id");
-    }
-  }
-});
-var LIST_SCORES_BY_SCORER_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/scores/scorer/:scorerId",
-  responseType: "json",
-  pathParamSchema: scorerIdPathParams,
-  queryParamSchema: listScoresByScorerIdQuerySchema,
-  responseSchema: scoresWithPaginationResponseSchema,
-  summary: "List scores by scorer ID",
-  description: "Returns all scores generated by a specific scorer",
-  tags: ["Scoring"],
-  handler: async ({ mastra, scorerId, ...params }) => {
-    try {
-      const { page, perPage, entityId, entityType } = params;
-      const filters = Object.fromEntries(Object.entries({ entityId, entityType }).filter(([_, v]) => v !== void 0));
-      const scoreResults = await mastra.getStorage()?.listScoresByScorerId?.({
-        scorerId,
-        pagination: { page: page ?? 0, perPage: perPage ?? 10 },
-        ...filters
-      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
-      return {
-        pagination: scoreResults.pagination,
-        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
-      };
-    } catch (error) {
-      return handleError$1(error, "Error getting scores by scorer id");
-    }
-  }
-});
-var LIST_SCORES_BY_ENTITY_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/scores/entity/:entityType/:entityId",
-  responseType: "json",
-  pathParamSchema: entityPathParams,
-  queryParamSchema: listScoresByEntityIdQuerySchema,
-  responseSchema: scoresWithPaginationResponseSchema,
-  summary: "List scores by entity ID",
-  description: "Returns all scores for a specific entity (agent or workflow)",
-  tags: ["Scoring"],
-  handler: async ({ mastra, entityId, entityType, ...params }) => {
-    try {
-      const { page, perPage } = params;
-      let entityIdToUse = entityId;
-      if (entityType === "AGENT") {
-        const agent = mastra.getAgentById(entityId);
-        entityIdToUse = agent.id;
-      } else if (entityType === "WORKFLOW") {
-        const workflow = mastra.getWorkflowById(entityId);
-        entityIdToUse = workflow.id;
-      }
-      const pagination = {
-        page: page ?? 0,
-        perPage: perPage ?? 10
-      };
-      const scoreResults = await mastra.getStorage()?.listScoresByEntityId?.({
-        entityId: entityIdToUse,
-        entityType,
-        pagination
-      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
-      return {
-        pagination: scoreResults.pagination,
-        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
-      };
-    } catch (error) {
-      return handleError$1(error, "Error getting scores by entity id");
-    }
-  }
-});
-var SAVE_SCORE_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/scores",
-  responseType: "json",
-  bodySchema: saveScoreBodySchema,
-  responseSchema: saveScoreResponseSchema,
-  summary: "Save score",
-  description: "Saves a new score record to storage",
-  tags: ["Scoring"],
-  handler: async ({ mastra, ...params }) => {
-    try {
-      const { score } = params;
-      const result = await mastra.getStorage()?.saveScore?.(score);
-      if (!result) {
-        throw new HTTPException$2(500, { message: "Storage not configured" });
-      }
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error saving score");
-    }
-  }
 });
 
 // ../../node_modules/.pnpm/superjson@2.2.2/node_modules/superjson/dist/double-indexed-kv.js
@@ -4495,6 +3660,46 @@ SuperJSON.registerCustom = SuperJSON.defaultInstance.registerCustom.bind(SuperJS
 SuperJSON.allowErrorProps = SuperJSON.defaultInstance.allowErrorProps.bind(SuperJSON.defaultInstance);
 var stringify = SuperJSON.stringify;
 
+function commonjsRequire(path) {
+	throw new Error('Could not dynamically require "' + path + '". Please configure the dynamicRequireTargets or/and ignoreDynamicRequires option of @rollup/plugin-commonjs appropriately for this require call to work.');
+}
+
+var __create$4 = Object.create;
+var __defProp$4 = Object.defineProperty;
+var __getOwnPropDesc$4 = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames$4 = Object.getOwnPropertyNames;
+var __getProtoOf$4 = Object.getPrototypeOf;
+var __hasOwnProp$4 = Object.prototype.hasOwnProperty;
+var __require = /* @__PURE__ */ ((x) => typeof commonjsRequire !== "undefined" ? commonjsRequire : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof commonjsRequire !== "undefined" ? commonjsRequire : a)[b]
+}) : x)(function(x) {
+  if (typeof commonjsRequire !== "undefined") return commonjsRequire.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+var __commonJS$3 = (cb, mod) => function __require2() {
+  return mod || (0, cb[__getOwnPropNames$4(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp$4(target, name, { get: all[name], enumerable: true });
+};
+var __copyProps$4 = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames$4(from))
+      if (!__hasOwnProp$4.call(to, key) && key !== except)
+        __defProp$4(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$4(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM$3 = (mod, isNodeMode, target) => (target = mod != null ? __create$4(__getProtoOf$4(mod)) : {}, __copyProps$4(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  __defProp$4(target, "default", { value: mod, enumerable: true }) ,
+  mod
+));
+
 // src/server/handlers/tools.ts
 var tools_exports = {};
 __export(tools_exports, {
@@ -4551,7 +3756,7 @@ var GET_TOOL_BY_ID_ROUTE = createRoute({
         tool = mastra.getToolById(toolId);
       }
       if (!tool) {
-        throw new HTTPException$2(404, { message: "Tool not found" });
+        throw new HTTPException$1(404, { message: "Tool not found" });
       }
       const serializedTool = {
         ...tool,
@@ -4578,7 +3783,7 @@ var EXECUTE_TOOL_ROUTE = createRoute({
   handler: async ({ mastra, runId, toolId, tools, requestContext, ...bodyParams }) => {
     try {
       if (!toolId) {
-        throw new HTTPException$2(400, { message: "Tool ID is required" });
+        throw new HTTPException$1(400, { message: "Tool ID is required" });
       }
       let tool;
       if (tools && Object.keys(tools).length > 0) {
@@ -4587,10 +3792,10 @@ var EXECUTE_TOOL_ROUTE = createRoute({
         tool = mastra.getToolById(toolId);
       }
       if (!tool) {
-        throw new HTTPException$2(404, { message: "Tool not found" });
+        throw new HTTPException$1(404, { message: "Tool not found" });
       }
       if (!tool?.execute) {
-        throw new HTTPException$2(400, { message: "Tool is not executable" });
+        throw new HTTPException$1(400, { message: "Tool is not executable" });
       }
       const { data } = bodyParams;
       validateBody({ data });
@@ -4630,12 +3835,12 @@ var GET_AGENT_TOOL_ROUTE = createRoute({
     try {
       const agent = agentId ? mastra.getAgentById(agentId) : null;
       if (!agent) {
-        throw new HTTPException$2(404, { message: "Agent not found" });
+        throw new HTTPException$1(404, { message: "Agent not found" });
       }
       const agentTools = await agent.listTools({ requestContext });
       const tool = Object.values(agentTools || {}).find((tool2) => tool2.id === toolId);
       if (!tool) {
-        throw new HTTPException$2(404, { message: "Tool not found" });
+        throw new HTTPException$1(404, { message: "Tool not found" });
       }
       const serializedTool = {
         ...tool,
@@ -4662,15 +3867,15 @@ var EXECUTE_AGENT_TOOL_ROUTE = createRoute({
     try {
       const agent = agentId ? mastra.getAgentById(agentId) : null;
       if (!agent) {
-        throw new HTTPException$2(404, { message: "Tool not found" });
+        throw new HTTPException$1(404, { message: "Tool not found" });
       }
       const agentTools = await agent.listTools({ requestContext });
       const tool = Object.values(agentTools || {}).find((tool2) => tool2.id === toolId);
       if (!tool) {
-        throw new HTTPException$2(404, { message: "Tool not found" });
+        throw new HTTPException$1(404, { message: "Tool not found" });
       }
       if (!tool?.execute) {
-        throw new HTTPException$2(400, { message: "Tool is not executable" });
+        throw new HTTPException$1(400, { message: "Tool is not executable" });
       }
       const result = await tool.execute(data, {
         mastra,
@@ -4681,6 +3886,2258 @@ var EXECUTE_AGENT_TOOL_ROUTE = createRoute({
       return result;
     } catch (error) {
       return handleError$1(error, "Error executing agent tool");
+    }
+  }
+});
+
+// src/server/handlers/vector.ts
+var vector_exports = {};
+__export(vector_exports, {
+  CREATE_INDEX_ROUTE: () => CREATE_INDEX_ROUTE,
+  DELETE_INDEX_ROUTE: () => DELETE_INDEX_ROUTE,
+  DESCRIBE_INDEX_ROUTE: () => DESCRIBE_INDEX_ROUTE,
+  LIST_INDEXES_ROUTE: () => LIST_INDEXES_ROUTE,
+  QUERY_VECTORS_ROUTE: () => QUERY_VECTORS_ROUTE,
+  UPSERT_VECTORS_ROUTE: () => UPSERT_VECTORS_ROUTE,
+  createIndex: () => createIndex,
+  deleteIndex: () => deleteIndex,
+  describeIndex: () => describeIndex,
+  listIndexes: () => listIndexes,
+  queryVectors: () => queryVectors,
+  upsertVectors: () => upsertVectors
+});
+var vectorNamePathParams = z$1.object({
+  vectorName: z$1.string().describe("Name of the vector store")
+});
+var vectorIndexPathParams = vectorNamePathParams.extend({
+  indexName: z$1.string().describe("Name of the index")
+});
+var indexBodyBaseSchema = z$1.object({
+  indexName: z$1.string()
+});
+var upsertVectorsBodySchema = indexBodyBaseSchema.extend({
+  vectors: z$1.array(z$1.array(z$1.number())),
+  metadata: z$1.array(z$1.record(z$1.string(), z$1.any())).optional(),
+  ids: z$1.array(z$1.string()).optional()
+});
+var createIndexBodySchema = indexBodyBaseSchema.extend({
+  dimension: z$1.number(),
+  metric: z$1.enum(["cosine", "euclidean", "dotproduct"]).optional()
+});
+var queryVectorsBodySchema = indexBodyBaseSchema.extend({
+  queryVector: z$1.array(z$1.number()),
+  topK: z$1.number().optional(),
+  filter: z$1.record(z$1.string(), z$1.any()).optional(),
+  includeVector: z$1.boolean().optional()
+});
+var upsertVectorsResponseSchema = z$1.object({
+  ids: z$1.array(z$1.string())
+});
+var createIndexResponseSchema = successResponseSchema;
+var queryVectorsResponseSchema = z$1.array(z$1.unknown());
+var listIndexesResponseSchema = z$1.array(z$1.string());
+var describeIndexResponseSchema = z$1.object({
+  dimension: z$1.number(),
+  count: z$1.number(),
+  metric: z$1.string().optional()
+});
+var deleteIndexResponseSchema = successResponseSchema;
+
+// src/server/handlers/vector.ts
+function getVector(mastra, vectorName) {
+  if (!vectorName) {
+    throw new HTTPException$1(400, { message: "Vector name is required" });
+  }
+  const vector = mastra.getVector(vectorName);
+  if (!vector) {
+    throw new HTTPException$1(404, { message: `Vector store ${vectorName} not found` });
+  }
+  return vector;
+}
+async function upsertVectors({
+  mastra,
+  vectorName,
+  indexName,
+  vectors,
+  metadata,
+  ids
+}) {
+  try {
+    if (!indexName || !vectors || !Array.isArray(vectors)) {
+      throw new HTTPException$1(400, { message: "Invalid request index. indexName and vectors array are required." });
+    }
+    const vector = getVector(mastra, vectorName);
+    const result = await vector.upsert({ indexName, vectors, metadata, ids });
+    return { ids: result };
+  } catch (error) {
+    return handleError$1(error, "Error upserting vectors");
+  }
+}
+async function createIndex({
+  mastra,
+  vectorName,
+  indexName,
+  dimension,
+  metric
+}) {
+  try {
+    if (!indexName || typeof dimension !== "number" || dimension <= 0) {
+      throw new HTTPException$1(400, {
+        message: "Invalid request index, indexName and positive dimension number are required."
+      });
+    }
+    if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
+      throw new HTTPException$1(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
+    }
+    const vector = getVector(mastra, vectorName);
+    await vector.createIndex({ indexName, dimension, metric });
+    return { success: true };
+  } catch (error) {
+    return handleError$1(error, "Error creating index");
+  }
+}
+async function queryVectors({
+  mastra,
+  vectorName,
+  indexName,
+  queryVector,
+  topK,
+  filter,
+  includeVector
+}) {
+  try {
+    if (!indexName || !queryVector || !Array.isArray(queryVector)) {
+      throw new HTTPException$1(400, { message: "Invalid request query. indexName and queryVector array are required." });
+    }
+    const vector = getVector(mastra, vectorName);
+    const results = await vector.query({ indexName, queryVector, topK, filter, includeVector });
+    return results;
+  } catch (error) {
+    return handleError$1(error, "Error querying vectors");
+  }
+}
+async function listIndexes({ mastra, vectorName }) {
+  try {
+    const vector = getVector(mastra, vectorName);
+    const indexes = await vector.listIndexes();
+    return indexes.filter(Boolean);
+  } catch (error) {
+    return handleError$1(error, "Error listing indexes");
+  }
+}
+async function describeIndex({
+  mastra,
+  vectorName,
+  indexName
+}) {
+  try {
+    if (!indexName) {
+      throw new HTTPException$1(400, { message: "Index name is required" });
+    }
+    const vector = getVector(mastra, vectorName);
+    const stats = await vector.describeIndex({ indexName });
+    return {
+      dimension: stats.dimension,
+      count: stats.count,
+      metric: stats.metric?.toLowerCase()
+    };
+  } catch (error) {
+    return handleError$1(error, "Error describing index");
+  }
+}
+async function deleteIndex({
+  mastra,
+  vectorName,
+  indexName
+}) {
+  try {
+    if (!indexName) {
+      throw new HTTPException$1(400, { message: "Index name is required" });
+    }
+    const vector = getVector(mastra, vectorName);
+    await vector.deleteIndex({ indexName });
+    return { success: true };
+  } catch (error) {
+    return handleError$1(error, "Error deleting index");
+  }
+}
+var UPSERT_VECTORS_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/vector/:vectorName/upsert",
+  responseType: "json",
+  pathParamSchema: vectorNamePathParams,
+  bodySchema: upsertVectorsBodySchema,
+  responseSchema: upsertVectorsResponseSchema,
+  summary: "Upsert vectors",
+  description: "Inserts or updates vectors in the specified index",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName, ...params }) => {
+    try {
+      const { indexName, vectors, metadata, ids } = params;
+      if (!indexName || !vectors || !Array.isArray(vectors)) {
+        throw new HTTPException$1(400, { message: "Invalid request index. indexName and vectors array are required." });
+      }
+      const vector = getVector(mastra, vectorName);
+      const result = await vector.upsert({ indexName, vectors, metadata, ids });
+      return { ids: result };
+    } catch (error) {
+      return handleError$1(error, "Error upserting vectors");
+    }
+  }
+});
+var CREATE_INDEX_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/vector/:vectorName/create-index",
+  responseType: "json",
+  pathParamSchema: vectorNamePathParams,
+  bodySchema: createIndexBodySchema,
+  responseSchema: createIndexResponseSchema,
+  summary: "Create index",
+  description: "Creates a new vector index with the specified dimension and metric",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName, ...params }) => {
+    try {
+      const { indexName, dimension, metric } = params;
+      if (!indexName || typeof dimension !== "number" || dimension <= 0) {
+        throw new HTTPException$1(400, {
+          message: "Invalid request index, indexName and positive dimension number are required."
+        });
+      }
+      if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
+        throw new HTTPException$1(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
+      }
+      const vector = getVector(mastra, vectorName);
+      await vector.createIndex({ indexName, dimension, metric });
+      return { success: true };
+    } catch (error) {
+      return handleError$1(error, "Error creating index");
+    }
+  }
+});
+var QUERY_VECTORS_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/vector/:vectorName/query",
+  responseType: "json",
+  pathParamSchema: vectorNamePathParams,
+  bodySchema: queryVectorsBodySchema,
+  responseSchema: queryVectorsResponseSchema,
+  summary: "Query vectors",
+  description: "Performs a similarity search on the vector index",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName, ...params }) => {
+    try {
+      const { indexName, queryVector, topK, filter, includeVector } = params;
+      if (!indexName || !queryVector || !Array.isArray(queryVector)) {
+        throw new HTTPException$1(400, {
+          message: "Invalid request query. indexName and queryVector array are required."
+        });
+      }
+      const vector = getVector(mastra, vectorName);
+      const results = await vector.query({ indexName, queryVector, topK, filter, includeVector });
+      return results;
+    } catch (error) {
+      return handleError$1(error, "Error querying vectors");
+    }
+  }
+});
+var LIST_INDEXES_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/vector/:vectorName/indexes",
+  responseType: "json",
+  pathParamSchema: vectorNamePathParams,
+  responseSchema: listIndexesResponseSchema,
+  summary: "List indexes",
+  description: "Returns a list of all indexes in the vector store",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName }) => {
+    try {
+      const vector = getVector(mastra, vectorName);
+      const indexes = await vector.listIndexes();
+      return indexes.filter(Boolean);
+    } catch (error) {
+      return handleError$1(error, "Error listing indexes");
+    }
+  }
+});
+var DESCRIBE_INDEX_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/vector/:vectorName/indexes/:indexName",
+  responseType: "json",
+  pathParamSchema: vectorIndexPathParams,
+  responseSchema: describeIndexResponseSchema,
+  summary: "Describe index",
+  description: "Returns statistics and metadata for a specific index",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName, indexName }) => {
+    try {
+      if (!indexName) {
+        throw new HTTPException$1(400, { message: "Index name is required" });
+      }
+      const vector = getVector(mastra, vectorName);
+      const stats = await vector.describeIndex({ indexName });
+      return {
+        dimension: stats.dimension,
+        count: stats.count,
+        metric: stats.metric?.toLowerCase()
+      };
+    } catch (error) {
+      return handleError$1(error, "Error describing index");
+    }
+  }
+});
+var DELETE_INDEX_ROUTE = createRoute({
+  method: "DELETE",
+  path: "/api/vector/:vectorName/indexes/:indexName",
+  responseType: "json",
+  pathParamSchema: vectorIndexPathParams,
+  responseSchema: deleteIndexResponseSchema,
+  summary: "Delete index",
+  description: "Deletes a vector index and all its data",
+  tags: ["Vectors"],
+  handler: async ({ mastra, vectorName, indexName }) => {
+    try {
+      if (!indexName) {
+        throw new HTTPException$1(400, { message: "Index name is required" });
+      }
+      const vector = getVector(mastra, vectorName);
+      await vector.deleteIndex({ indexName });
+      return { success: true };
+    } catch (error) {
+      return handleError$1(error, "Error deleting index");
+    }
+  }
+});
+
+// src/server/handlers/voice.ts
+var voice_exports = {};
+__export(voice_exports, {
+  GENERATE_SPEECH_DEPRECATED_ROUTE: () => GENERATE_SPEECH_DEPRECATED_ROUTE,
+  GENERATE_SPEECH_ROUTE: () => GENERATE_SPEECH_ROUTE,
+  GET_LISTENER_ROUTE: () => GET_LISTENER_ROUTE,
+  GET_SPEAKERS_DEPRECATED_ROUTE: () => GET_SPEAKERS_DEPRECATED_ROUTE,
+  GET_SPEAKERS_ROUTE: () => GET_SPEAKERS_ROUTE,
+  TRANSCRIBE_SPEECH_DEPRECATED_ROUTE: () => TRANSCRIBE_SPEECH_DEPRECATED_ROUTE,
+  TRANSCRIBE_SPEECH_ROUTE: () => TRANSCRIBE_SPEECH_ROUTE
+});
+var GET_SPEAKERS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/agents/:agentId/voice/speakers",
+  responseType: "json",
+  pathParamSchema: agentIdPathParams,
+  responseSchema: voiceSpeakersResponseSchema,
+  summary: "Get voice speakers",
+  description: "Returns available voice speakers for the specified agent",
+  tags: ["Agents", "Voice"],
+  handler: async ({ mastra, agentId, requestContext }) => {
+    try {
+      if (!agentId) {
+        throw new HTTPException$1(400, { message: "Agent ID is required" });
+      }
+      const agent = mastra.getAgentById(agentId);
+      if (!agent) {
+        throw new HTTPException$1(404, { message: "Agent not found" });
+      }
+      const voice = await agent.getVoice({ requestContext });
+      const speakers = await Promise.resolve().then(() => voice.getSpeakers()).catch((err) => {
+        if (err instanceof MastraError) {
+          return [];
+        }
+        throw err;
+      });
+      return speakers;
+    } catch (error) {
+      return handleError$1(error, "Error getting speakers");
+    }
+  }
+});
+var GET_SPEAKERS_DEPRECATED_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/agents/:agentId/speakers",
+  responseType: "json",
+  pathParamSchema: agentIdPathParams,
+  responseSchema: voiceSpeakersResponseSchema,
+  summary: "Get available speakers for an agent",
+  description: "[DEPRECATED] Use /api/agents/:agentId/voice/speakers instead. Get available speakers for an agent",
+  tags: ["Agents", "Voice"],
+  handler: GET_SPEAKERS_ROUTE.handler
+});
+var GENERATE_SPEECH_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/voice/speak",
+  responseType: "stream",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: generateSpeechBodySchema,
+  responseSchema: speakResponseSchema,
+  summary: "Generate speech",
+  description: "Generates speech audio from text using the agent voice configuration",
+  tags: ["Agents", "Voice"],
+  handler: async ({ mastra, agentId, text, speakerId, requestContext }) => {
+    try {
+      if (!agentId) {
+        throw new HTTPException$1(400, { message: "Agent ID is required" });
+      }
+      validateBody({ text });
+      const agent = mastra.getAgentById(agentId);
+      if (!agent) {
+        throw new HTTPException$1(404, { message: "Agent not found" });
+      }
+      const voice = await agent.getVoice({ requestContext });
+      if (!voice) {
+        throw new HTTPException$1(400, { message: "Agent does not have voice capabilities" });
+      }
+      const audioStream = await Promise.resolve().then(() => voice.speak(text, { speaker: speakerId })).catch((err) => {
+        if (err instanceof MastraError) {
+          throw new HTTPException$1(400, { message: err.message });
+        }
+        throw err;
+      });
+      if (!audioStream) {
+        throw new HTTPException$1(500, { message: "Failed to generate speech" });
+      }
+      return audioStream;
+    } catch (error) {
+      return handleError$1(error, "Error generating speech");
+    }
+  }
+});
+var GENERATE_SPEECH_DEPRECATED_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/speak",
+  responseType: "stream",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: generateSpeechBodySchema,
+  responseSchema: speakResponseSchema,
+  summary: "Convert text to speech",
+  description: "[DEPRECATED] Use /api/agents/:agentId/voice/speak instead. Convert text to speech using the agent's voice provider",
+  tags: ["Agents", "Voice"],
+  handler: GENERATE_SPEECH_ROUTE.handler
+});
+var TRANSCRIBE_SPEECH_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/voice/listen",
+  responseType: "json",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: transcribeSpeechBodySchema,
+  responseSchema: transcribeSpeechResponseSchema,
+  summary: "Transcribe speech",
+  description: "Transcribes speech audio to text using the agent voice configuration",
+  tags: ["Agents", "Voice"],
+  handler: async ({ mastra, agentId, audio, options, requestContext }) => {
+    try {
+      if (!agentId) {
+        throw new HTTPException$1(400, { message: "Agent ID is required" });
+      }
+      if (!audio) {
+        throw new HTTPException$1(400, { message: "Audio data is required" });
+      }
+      const agent = mastra.getAgentById(agentId);
+      if (!agent) {
+        throw new HTTPException$1(404, { message: "Agent not found" });
+      }
+      const voice = await agent.getVoice({ requestContext });
+      if (!voice) {
+        throw new HTTPException$1(400, { message: "Agent does not have voice capabilities" });
+      }
+      const audioStream = new Readable();
+      audioStream.push(audio);
+      audioStream.push(null);
+      const text = await voice.listen(audioStream, options);
+      return { text };
+    } catch (error) {
+      return handleError$1(error, "Error transcribing speech");
+    }
+  }
+});
+var TRANSCRIBE_SPEECH_DEPRECATED_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/listen",
+  responseType: "json",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: transcribeSpeechBodySchema,
+  responseSchema: transcribeSpeechResponseSchema,
+  summary: "Convert speech to text",
+  description: "[DEPRECATED] Use /api/agents/:agentId/voice/listen instead. Convert speech to text using the agent's voice provider. Additional provider-specific options can be passed as query parameters.",
+  tags: ["Agents", "Voice"],
+  handler: TRANSCRIBE_SPEECH_ROUTE.handler
+});
+var GET_LISTENER_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/agents/:agentId/voice/listener",
+  responseType: "json",
+  pathParamSchema: agentIdPathParams,
+  responseSchema: getListenerResponseSchema,
+  summary: "Get voice listener",
+  description: "Returns the voice listener configuration for the agent",
+  tags: ["Agents", "Voice"],
+  handler: async ({ mastra, agentId, requestContext }) => {
+    try {
+      if (!agentId) {
+        throw new HTTPException$1(400, { message: "Agent ID is required" });
+      }
+      const agent = mastra.getAgentById(agentId);
+      if (!agent) {
+        throw new HTTPException$1(404, { message: "Agent not found" });
+      }
+      const voice = await agent.getVoice({ requestContext });
+      const listeners = await Promise.resolve().then(() => voice.getListener()).catch((err) => {
+        if (err instanceof MastraError) {
+          return { enabled: false };
+        }
+        throw err;
+      });
+      return listeners;
+    } catch (error) {
+      return handleError$1(error, "Error getting listeners");
+    }
+  }
+});
+
+// src/server/handlers/logs.ts
+var logs_exports = {};
+__export(logs_exports, {
+  LIST_LOGS_BY_RUN_ID_ROUTE: () => LIST_LOGS_BY_RUN_ID_ROUTE,
+  LIST_LOGS_ROUTE: () => LIST_LOGS_ROUTE,
+  LIST_LOG_TRANSPORTS_ROUTE: () => LIST_LOG_TRANSPORTS_ROUTE
+});
+var listLogsQuerySchema = createPagePaginationSchema().extend({
+  fromDate: z$1.coerce.date().optional(),
+  toDate: z$1.coerce.date().optional(),
+  logLevel: z$1.enum(["debug", "info", "warn", "error", "silent"]).optional(),
+  filters: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
+  transportId: z$1.string()
+});
+var listLogsResponseSchema = z$1.object({
+  logs: z$1.array(baseLogMessageSchema),
+  total: z$1.number(),
+  page: z$1.number(),
+  perPage: z$1.union([z$1.number(), z$1.literal(false)]),
+  hasMore: z$1.boolean()
+});
+var listLogTransportsResponseSchema = z$1.object({
+  transports: z$1.array(z$1.string())
+});
+
+// src/server/handlers/logs.ts
+var LIST_LOG_TRANSPORTS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/logs/transports",
+  responseType: "json",
+  responseSchema: listLogTransportsResponseSchema,
+  summary: "List log transports",
+  description: "Returns a list of all available log transports",
+  tags: ["Logs"],
+  handler: async ({ mastra }) => {
+    try {
+      const logger = mastra.getLogger();
+      const transports = logger.getTransports();
+      return {
+        transports: transports ? [...transports.keys()] : []
+      };
+    } catch (error) {
+      return handleError$1(error, "Error getting log Transports");
+    }
+  }
+});
+var LIST_LOGS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/logs",
+  responseType: "json",
+  queryParamSchema: listLogsQuerySchema,
+  responseSchema: listLogsResponseSchema,
+  summary: "List logs",
+  description: "Returns logs from a specific transport with optional filtering by date range, log level, and custom filters",
+  tags: ["Logs"],
+  handler: async ({ mastra, ...params }) => {
+    try {
+      const { transportId, fromDate, toDate, logLevel, filters: _filters, page, perPage } = params;
+      validateBody({ transportId });
+      const filters = parseFilters(_filters);
+      const logs = await mastra.listLogs(transportId, {
+        fromDate,
+        toDate,
+        logLevel,
+        filters,
+        page: page ? Number(page) : void 0,
+        perPage: perPage ? Number(perPage) : void 0
+      });
+      return logs;
+    } catch (error) {
+      return handleError$1(error, "Error getting logs");
+    }
+  }
+});
+var LIST_LOGS_BY_RUN_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/logs/:runId",
+  responseType: "json",
+  pathParamSchema: runIdSchema,
+  queryParamSchema: listLogsQuerySchema,
+  responseSchema: listLogsResponseSchema,
+  summary: "List logs by run ID",
+  description: "Returns all logs for a specific execution run from a transport",
+  tags: ["Logs"],
+  handler: async ({ mastra, runId, ...params }) => {
+    try {
+      const { transportId, fromDate, toDate, logLevel, filters: _filters, page, perPage } = params;
+      validateBody({ runId, transportId });
+      const filters = parseFilters(_filters);
+      const logs = await mastra.listLogsByRunId({
+        runId,
+        transportId,
+        fromDate,
+        toDate,
+        logLevel,
+        filters,
+        page: page ? Number(page) : void 0,
+        perPage: perPage ? Number(perPage) : void 0
+      });
+      return logs;
+    } catch (error) {
+      return handleError$1(error, "Error getting logs by run ID");
+    }
+  }
+});
+
+// src/server/handlers/mcp.ts
+var mcp_exports = {};
+__export(mcp_exports, {
+  EXECUTE_MCP_SERVER_TOOL_ROUTE: () => EXECUTE_MCP_SERVER_TOOL_ROUTE,
+  GET_MCP_SERVER_DETAIL_ROUTE: () => GET_MCP_SERVER_DETAIL_ROUTE,
+  GET_MCP_SERVER_TOOL_DETAIL_ROUTE: () => GET_MCP_SERVER_TOOL_DETAIL_ROUTE,
+  LIST_MCP_SERVERS_ROUTE: () => LIST_MCP_SERVERS_ROUTE,
+  LIST_MCP_SERVER_TOOLS_ROUTE: () => LIST_MCP_SERVER_TOOLS_ROUTE,
+  MCP_HTTP_TRANSPORT_ROUTE: () => MCP_HTTP_TRANSPORT_ROUTE,
+  MCP_SSE_MESSAGES_ROUTE: () => MCP_SSE_MESSAGES_ROUTE,
+  MCP_SSE_TRANSPORT_ROUTE: () => MCP_SSE_TRANSPORT_ROUTE
+});
+var mcpServerIdPathParams = z.object({
+  serverId: z.string().describe("MCP server ID")
+});
+var mcpServerDetailPathParams = z.object({
+  id: z.string().describe("MCP server ID")
+});
+var mcpServerToolPathParams = z.object({
+  serverId: z.string().describe("MCP server ID"),
+  toolId: z.string().describe("Tool ID")
+});
+var executeToolBodySchema = z.object({
+  data: z.unknown().optional()
+});
+var listMcpServersQuerySchema = createCombinedPaginationSchema();
+var getMcpServerDetailQuerySchema = z.object({
+  version: z.string().optional()
+});
+var versionDetailSchema = z.object({
+  version: z.string(),
+  release_date: z.string(),
+  is_latest: z.boolean()
+});
+var serverInfoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  version_detail: versionDetailSchema
+});
+var listMcpServersResponseSchema = z.object({
+  servers: z.array(serverInfoSchema),
+  total_count: z.number(),
+  next: z.string().nullable()
+});
+var serverDetailSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
+  version_detail: versionDetailSchema,
+  package_canonical: z.string().optional(),
+  packages: z.array(z.unknown()).optional(),
+  remotes: z.array(z.unknown()).optional()
+});
+var mcpToolInfoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown().optional(),
+  toolType: z.string().optional()
+});
+var listMcpServerToolsResponseSchema = z.object({
+  tools: z.array(mcpToolInfoSchema)
+});
+var executeToolResponseSchema = z.object({
+  result: z.unknown()
+});
+z.object({
+  jsonrpc: z.literal("2.0"),
+  error: z.object({
+    code: z.number(),
+    message: z.string()
+  }),
+  id: z.null()
+});
+
+// src/server/handlers/mcp.ts
+var LIST_MCP_SERVERS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/mcp/v0/servers",
+  responseType: "json",
+  queryParamSchema: listMcpServersQuerySchema,
+  responseSchema: listMcpServersResponseSchema,
+  summary: "List MCP servers",
+  description: "Returns a list of registered MCP servers with pagination support",
+  tags: ["MCP"],
+  handler: async ({
+    mastra,
+    page,
+    perPage,
+    limit,
+    offset
+  }) => {
+    if (!mastra || typeof mastra.listMCPServers !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or listMCPServers method not available" });
+    }
+    const servers = mastra.listMCPServers();
+    if (!servers) {
+      return { servers: [], total_count: 0, next: null };
+    }
+    const serverList = Object.values(servers);
+    const totalCount = serverList.length;
+    const useLegacyFormat = (limit !== void 0 || offset !== void 0) && page === void 0 && perPage === void 0;
+    const finalPerPage = perPage ?? limit;
+    let finalPage = page;
+    if (finalPage === void 0 && offset !== void 0 && finalPerPage !== void 0 && finalPerPage > 0) {
+      finalPage = Math.floor(offset / finalPerPage);
+    }
+    const actualOffset = finalPage !== void 0 && finalPerPage !== void 0 ? finalPage * finalPerPage : 0;
+    let paginatedServers = serverList;
+    let nextUrl = null;
+    if (finalPerPage !== void 0) {
+      paginatedServers = serverList.slice(actualOffset, actualOffset + finalPerPage);
+      if (actualOffset + finalPerPage < totalCount) {
+        const nextPage = (finalPage ?? 0) + 1;
+        if (useLegacyFormat) {
+          const nextOffset = actualOffset + finalPerPage;
+          nextUrl = `/api/mcp/v0/servers?limit=${finalPerPage}&offset=${nextOffset}`;
+        } else {
+          nextUrl = `/api/mcp/v0/servers?perPage=${finalPerPage}&page=${nextPage}`;
+        }
+      }
+    }
+    const serverInfoList = paginatedServers.map((server) => server.getServerInfo());
+    return {
+      servers: serverInfoList,
+      total_count: totalCount,
+      next: nextUrl
+    };
+  }
+});
+var GET_MCP_SERVER_DETAIL_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/mcp/v0/servers/:id",
+  responseType: "json",
+  pathParamSchema: mcpServerDetailPathParams,
+  queryParamSchema: getMcpServerDetailQuerySchema,
+  responseSchema: serverDetailSchema,
+  summary: "Get MCP server details",
+  description: "Returns detailed information about a specific MCP server",
+  tags: ["MCP"],
+  handler: async ({ mastra, id, version }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(id);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server with ID '${id}' not found` });
+    }
+    const serverDetail = server.getServerDetail();
+    if (version && serverDetail.version_detail.version !== version) {
+      throw new HTTPException$1(404, {
+        message: `MCP server with ID '${id}' found, but not version '${version}'. Available version: ${serverDetail.version_detail.version}`
+      });
+    }
+    return serverDetail;
+  }
+});
+var LIST_MCP_SERVER_TOOLS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/mcp/:serverId/tools",
+  responseType: "json",
+  pathParamSchema: mcpServerIdPathParams,
+  responseSchema: listMcpServerToolsResponseSchema,
+  summary: "List MCP server tools",
+  description: "Returns a list of tools available on the specified MCP server",
+  tags: ["MCP"],
+  handler: async ({ mastra, serverId }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(serverId);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+    }
+    if (typeof server.getToolListInfo !== "function") {
+      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot list tools in this way.` });
+    }
+    return server.getToolListInfo();
+  }
+});
+var GET_MCP_SERVER_TOOL_DETAIL_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/mcp/:serverId/tools/:toolId",
+  responseType: "json",
+  pathParamSchema: mcpServerToolPathParams,
+  responseSchema: mcpToolInfoSchema,
+  summary: "Get MCP server tool details",
+  description: "Returns detailed information about a specific tool on the MCP server",
+  tags: ["MCP"],
+  handler: async ({ mastra, serverId, toolId }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(serverId);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+    }
+    if (typeof server.getToolInfo !== "function") {
+      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot provide tool details in this way.` });
+    }
+    const toolInfo = server.getToolInfo(toolId);
+    if (!toolInfo) {
+      throw new HTTPException$1(404, { message: `Tool with ID '${toolId}' not found on MCP server '${serverId}'` });
+    }
+    return toolInfo;
+  }
+});
+var EXECUTE_MCP_SERVER_TOOL_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/mcp/:serverId/tools/:toolId/execute",
+  responseType: "json",
+  pathParamSchema: mcpServerToolPathParams,
+  bodySchema: executeToolBodySchema,
+  responseSchema: executeToolResponseSchema,
+  summary: "Execute MCP server tool",
+  description: "Executes a tool on the specified MCP server with the provided arguments",
+  tags: ["MCP"],
+  handler: async ({
+    mastra,
+    serverId,
+    toolId,
+    data
+  }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(serverId);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+    }
+    if (typeof server.executeTool !== "function") {
+      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot execute tools in this way.` });
+    }
+    const result = await server.executeTool(toolId, data);
+    return { result };
+  }
+});
+var MCP_HTTP_TRANSPORT_ROUTE = createRoute({
+  method: "ALL",
+  path: "/api/mcp/:serverId/mcp",
+  responseType: "mcp-http",
+  pathParamSchema: mcpServerIdPathParams,
+  summary: "MCP HTTP Transport",
+  description: "Streamable HTTP transport endpoint for MCP protocol communication",
+  tags: ["MCP"],
+  handler: async ({ mastra, serverId }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(serverId);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server '${serverId}' not found` });
+    }
+    return {
+      server,
+      httpPath: `/api/mcp/${serverId}/mcp`
+    };
+  }
+});
+var MCP_SSE_TRANSPORT_ROUTE = createRoute({
+  method: "ALL",
+  path: "/api/mcp/:serverId/sse",
+  responseType: "mcp-sse",
+  pathParamSchema: mcpServerIdPathParams,
+  summary: "MCP SSE Transport",
+  description: "SSE transport endpoint for MCP protocol communication",
+  tags: ["MCP"],
+  handler: async ({ mastra, serverId }) => {
+    if (!mastra || typeof mastra.getMCPServerById !== "function") {
+      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+    }
+    const server = mastra.getMCPServerById(serverId);
+    if (!server) {
+      throw new HTTPException$1(404, { message: `MCP server '${serverId}' not found` });
+    }
+    return {
+      server,
+      ssePath: `/api/mcp/${serverId}/sse`,
+      messagePath: `/api/mcp/${serverId}/messages`
+    };
+  }
+});
+var MCP_SSE_MESSAGES_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/mcp/:serverId/messages",
+  responseType: "mcp-sse",
+  pathParamSchema: mcpServerIdPathParams,
+  summary: "MCP SSE Messages",
+  description: "Message endpoint for SSE transport (posts messages to active SSE streams)",
+  tags: ["MCP"],
+  handler: MCP_SSE_TRANSPORT_ROUTE.handler
+});
+
+// src/server/handlers/memory.ts
+var memory_exports = {};
+__export(memory_exports, {
+  CREATE_THREAD_NETWORK_ROUTE: () => CREATE_THREAD_NETWORK_ROUTE,
+  CREATE_THREAD_ROUTE: () => CREATE_THREAD_ROUTE,
+  DELETE_MESSAGES_NETWORK_ROUTE: () => DELETE_MESSAGES_NETWORK_ROUTE,
+  DELETE_MESSAGES_ROUTE: () => DELETE_MESSAGES_ROUTE,
+  DELETE_THREAD_NETWORK_ROUTE: () => DELETE_THREAD_NETWORK_ROUTE,
+  DELETE_THREAD_ROUTE: () => DELETE_THREAD_ROUTE,
+  GET_MEMORY_CONFIG_ROUTE: () => GET_MEMORY_CONFIG_ROUTE,
+  GET_MEMORY_STATUS_NETWORK_ROUTE: () => GET_MEMORY_STATUS_NETWORK_ROUTE,
+  GET_MEMORY_STATUS_ROUTE: () => GET_MEMORY_STATUS_ROUTE,
+  GET_THREAD_BY_ID_NETWORK_ROUTE: () => GET_THREAD_BY_ID_NETWORK_ROUTE,
+  GET_THREAD_BY_ID_ROUTE: () => GET_THREAD_BY_ID_ROUTE,
+  GET_WORKING_MEMORY_ROUTE: () => GET_WORKING_MEMORY_ROUTE,
+  LIST_MESSAGES_NETWORK_ROUTE: () => LIST_MESSAGES_NETWORK_ROUTE,
+  LIST_MESSAGES_ROUTE: () => LIST_MESSAGES_ROUTE,
+  LIST_THREADS_NETWORK_ROUTE: () => LIST_THREADS_NETWORK_ROUTE,
+  LIST_THREADS_ROUTE: () => LIST_THREADS_ROUTE,
+  SAVE_MESSAGES_NETWORK_ROUTE: () => SAVE_MESSAGES_NETWORK_ROUTE,
+  SAVE_MESSAGES_ROUTE: () => SAVE_MESSAGES_ROUTE,
+  SEARCH_MEMORY_ROUTE: () => SEARCH_MEMORY_ROUTE,
+  UPDATE_THREAD_NETWORK_ROUTE: () => UPDATE_THREAD_NETWORK_ROUTE,
+  UPDATE_THREAD_ROUTE: () => UPDATE_THREAD_ROUTE,
+  UPDATE_WORKING_MEMORY_ROUTE: () => UPDATE_WORKING_MEMORY_ROUTE,
+  getTextContent: () => getTextContent
+});
+var threadIdPathParams = z$1.object({
+  threadId: z$1.string().describe("Unique identifier for the conversation thread")
+});
+var agentIdQuerySchema = z$1.object({
+  agentId: z$1.string()
+});
+var storageOrderBySchema = z$1.object({
+  field: z$1.enum(["createdAt", "updatedAt"]).optional(),
+  direction: z$1.enum(["ASC", "DESC"]).optional()
+});
+var messageOrderBySchema = z$1.object({
+  field: z$1.enum(["createdAt"]).optional(),
+  direction: z$1.enum(["ASC", "DESC"]).optional()
+});
+var includeSchema = z$1.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      try {
+        return JSON.parse(val);
+      } catch {
+        return void 0;
+      }
+    }
+    return val;
+  },
+  z$1.array(
+    z$1.object({
+      id: z$1.string(),
+      threadId: z$1.string().optional(),
+      withPreviousMessages: z$1.number().optional(),
+      withNextMessages: z$1.number().optional()
+    })
+  ).optional()
+);
+var filterSchema = z$1.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      try {
+        return JSON.parse(val);
+      } catch {
+        return void 0;
+      }
+    }
+    return val;
+  },
+  z$1.object({
+    dateRange: z$1.object({
+      start: z$1.coerce.date().optional(),
+      end: z$1.coerce.date().optional()
+    }).optional()
+  }).optional()
+);
+var memoryConfigSchema = z$1.preprocess((val) => {
+  if (typeof val === "string") {
+    try {
+      return JSON.parse(val);
+    } catch {
+      return void 0;
+    }
+  }
+  return val;
+}, z$1.record(z$1.string(), z$1.unknown()).optional());
+var threadSchema = z$1.object({
+  id: z$1.string(),
+  title: z$1.string().optional(),
+  resourceId: z$1.string(),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional()
+});
+var messageSchema$1 = z$1.any();
+var getMemoryStatusQuerySchema = agentIdQuerySchema;
+var getMemoryConfigQuerySchema = agentIdQuerySchema;
+var listThreadsQuerySchema = createPagePaginationSchema(100).extend({
+  agentId: z$1.string(),
+  resourceId: z$1.string(),
+  orderBy: storageOrderBySchema.optional()
+});
+var getThreadByIdQuerySchema = agentIdQuerySchema;
+var listMessagesQuerySchema = createPagePaginationSchema(40).extend({
+  agentId: z$1.string(),
+  resourceId: z$1.string().optional(),
+  orderBy: messageOrderBySchema.optional(),
+  include: includeSchema,
+  filter: filterSchema
+});
+var getWorkingMemoryQuerySchema = z$1.object({
+  agentId: z$1.string(),
+  resourceId: z$1.string().optional(),
+  memoryConfig: memoryConfigSchema
+});
+var getMemoryStatusNetworkQuerySchema = agentIdQuerySchema;
+var listThreadsNetworkQuerySchema = createPagePaginationSchema(100).extend({
+  agentId: z$1.string(),
+  resourceId: z$1.string(),
+  orderBy: storageOrderBySchema.optional()
+});
+var getThreadByIdNetworkQuerySchema = agentIdQuerySchema;
+var listMessagesNetworkQuerySchema = createPagePaginationSchema(40).extend({
+  agentId: z$1.string(),
+  resourceId: z$1.string().optional(),
+  orderBy: messageOrderBySchema.optional(),
+  include: includeSchema,
+  filter: filterSchema
+});
+var saveMessagesNetworkQuerySchema = agentIdQuerySchema;
+var createThreadNetworkQuerySchema = agentIdQuerySchema;
+var updateThreadNetworkQuerySchema = agentIdQuerySchema;
+var deleteThreadNetworkQuerySchema = agentIdQuerySchema;
+var deleteMessagesNetworkQuerySchema = agentIdQuerySchema;
+var memoryStatusResponseSchema = z$1.object({
+  result: z$1.boolean()
+});
+var memoryConfigResponseSchema = z$1.object({
+  config: z$1.object({
+    lastMessages: z$1.union([z$1.number(), z$1.literal(false)]).optional(),
+    semanticRecall: z$1.union([z$1.boolean(), z$1.any()]).optional(),
+    workingMemory: z$1.any().optional()
+  })
+});
+var listThreadsResponseSchema = paginationInfoSchema.extend({
+  threads: z$1.array(threadSchema)
+});
+var getThreadByIdResponseSchema = threadSchema;
+var listMessagesResponseSchema = z$1.object({
+  messages: z$1.array(messageSchema$1),
+  uiMessages: z$1.unknown()
+  // Converted messages in UI format
+});
+var getWorkingMemoryResponseSchema = z$1.object({
+  workingMemory: z$1.unknown(),
+  // Can be string or structured object depending on template
+  source: z$1.enum(["thread", "resource"]),
+  workingMemoryTemplate: z$1.unknown(),
+  // Template structure varies
+  threadExists: z$1.boolean()
+});
+var saveMessagesBodySchema = z$1.object({
+  messages: z$1.array(messageSchema$1)
+});
+var createThreadBodySchema = z$1.object({
+  resourceId: z$1.string(),
+  title: z$1.string().optional(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  threadId: z$1.string().optional()
+});
+var updateThreadBodySchema = z$1.object({
+  title: z$1.string().optional(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  resourceId: z$1.string().optional()
+});
+var updateWorkingMemoryBodySchema = z$1.object({
+  workingMemory: z$1.string(),
+  resourceId: z$1.string().optional(),
+  memoryConfig: z$1.record(z$1.string(), z$1.unknown()).optional()
+});
+var deleteMessagesBodySchema = z$1.object({
+  messageIds: z$1.union([
+    z$1.string(),
+    z$1.array(z$1.string()),
+    z$1.object({ id: z$1.string() }),
+    z$1.array(z$1.object({ id: z$1.string() }))
+  ])
+});
+var searchMemoryQuerySchema = z$1.object({
+  agentId: z$1.string(),
+  searchQuery: z$1.string(),
+  resourceId: z$1.string(),
+  threadId: z$1.string().optional(),
+  limit: z$1.coerce.number().optional().default(20),
+  memoryConfig: memoryConfigSchema
+});
+var saveMessagesResponseSchema = z$1.object({
+  messages: z$1.array(messageSchema$1)
+});
+var deleteThreadResponseSchema = z$1.object({
+  result: z$1.string()
+});
+var updateWorkingMemoryResponseSchema = successResponseSchema;
+var deleteMessagesResponseSchema = successResponseSchema.extend({
+  message: z$1.string()
+});
+var searchMemoryResponseSchema = z$1.object({
+  results: z$1.array(z$1.unknown()),
+  count: z$1.number(),
+  query: z$1.string(),
+  searchScope: z$1.string().optional(),
+  searchType: z$1.string().optional()
+});
+
+// src/server/handlers/memory.ts
+function getTextContent(message) {
+  if (typeof message.content === "string") {
+    return message.content;
+  }
+  if (message.content && typeof message.content === "object" && "parts" in message.content) {
+    const textPart = message.content.parts.find((p) => p.type === "text");
+    return textPart?.text || "";
+  }
+  return "";
+}
+async function getMemoryFromContext({
+  mastra,
+  agentId,
+  requestContext
+}) {
+  const logger = mastra.getLogger();
+  let agent;
+  if (agentId) {
+    try {
+      agent = mastra.getAgentById(agentId);
+    } catch (error) {
+      logger.debug("Error getting agent from mastra, searching agents for agent", error);
+    }
+  }
+  if (agentId && !agent) {
+    logger.debug("Agent not found, searching agents for agent", { agentId });
+    const agents = mastra.listAgents();
+    if (Object.keys(agents || {}).length) {
+      for (const [_, ag] of Object.entries(agents)) {
+        try {
+          const agents2 = await ag.listAgents();
+          if (agents2[agentId]) {
+            agent = agents2[agentId];
+            break;
+          }
+        } catch (error) {
+          logger.debug("Error getting agent from agent", error);
+        }
+      }
+    }
+    if (!agent) {
+      throw new HTTPException$1(404, { message: "Agent not found" });
+    }
+  }
+  if (agent) {
+    return await agent?.getMemory({
+      requestContext
+    });
+  }
+}
+var GET_MEMORY_STATUS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/status",
+  responseType: "json",
+  queryParamSchema: getMemoryStatusQuerySchema,
+  responseSchema: memoryStatusResponseSchema,
+  summary: "Get memory status",
+  description: "Returns the current status of the memory system including configuration and health information",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, requestContext }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        return { result: false };
+      }
+      return { result: true };
+    } catch (error) {
+      return handleError$1(error, "Error getting memory status");
+    }
+  }
+});
+var GET_MEMORY_CONFIG_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/config",
+  responseType: "json",
+  queryParamSchema: getMemoryConfigQuerySchema,
+  responseSchema: memoryConfigResponseSchema,
+  summary: "Get memory configuration",
+  description: "Returns the memory configuration for a specific agent or the system default",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, requestContext }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const config = memory.getMergedThreadConfig({});
+      return { config };
+    } catch (error) {
+      return handleError$1(error, "Error getting memory configuration");
+    }
+  }
+});
+var LIST_THREADS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/threads",
+  responseType: "json",
+  queryParamSchema: listThreadsQuerySchema,
+  responseSchema: listThreadsResponseSchema,
+  summary: "List memory threads",
+  description: "Returns a paginated list of conversation threads filtered by resource ID",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, resourceId, requestContext, page, perPage, orderBy }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      validateBody({ resourceId });
+      const result = await memory.listThreadsByResourceId({
+        resourceId,
+        page,
+        perPage,
+        orderBy
+      });
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error listing threads");
+    }
+  }
+});
+var GET_THREAD_BY_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: getThreadByIdQuerySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Get thread by ID",
+  description: "Returns details for a specific conversation thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, requestContext }) => {
+    try {
+      validateBody({ threadId });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      if (!thread) {
+        throw new HTTPException$1(404, { message: "Thread not found" });
+      }
+      return thread;
+    } catch (error) {
+      return handleError$1(error, "Error getting thread");
+    }
+  }
+});
+var LIST_MESSAGES_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/threads/:threadId/messages",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: listMessagesQuerySchema,
+  responseSchema: listMessagesResponseSchema,
+  summary: "List thread messages",
+  description: "Returns a paginated list of messages in a conversation thread",
+  tags: ["Memory"],
+  handler: async ({
+    mastra,
+    agentId,
+    threadId,
+    resourceId,
+    perPage,
+    page,
+    orderBy,
+    include,
+    filter,
+    requestContext
+  }) => {
+    try {
+      validateBody({ threadId });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      if (!threadId) {
+        throw new HTTPException$1(400, { message: "No threadId found" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      if (!thread) {
+        throw new HTTPException$1(404, { message: "Thread not found" });
+      }
+      const result = await memory.recall({
+        threadId,
+        resourceId,
+        perPage,
+        page,
+        orderBy,
+        include,
+        filter
+      });
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error getting messages");
+    }
+  }
+});
+var GET_WORKING_MEMORY_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/threads/:threadId/working-memory",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: getWorkingMemoryQuerySchema,
+  responseSchema: getWorkingMemoryResponseSchema,
+  summary: "Get working memory",
+  description: "Returns the working memory state for a thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, resourceId, requestContext, memoryConfig }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      validateBody({ threadId });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      const threadExists = !!thread;
+      const template = await memory.getWorkingMemoryTemplate({ memoryConfig });
+      const workingMemoryTemplate = template?.format === "json" ? { ...template, content: JSON.stringify(generateEmptyFromSchema(template.content)) } : template;
+      const workingMemory = await memory.getWorkingMemory({ threadId, resourceId, memoryConfig });
+      const config = memory.getMergedThreadConfig(memoryConfig || {});
+      const source = config.workingMemory?.scope !== "thread" && resourceId ? "resource" : "thread";
+      return { workingMemory, source, workingMemoryTemplate, threadExists };
+    } catch (error) {
+      return handleError$1(error, "Error getting working memory");
+    }
+  }
+});
+var SAVE_MESSAGES_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/save-messages",
+  responseType: "json",
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: saveMessagesBodySchema,
+  responseSchema: saveMessagesResponseSchema,
+  summary: "Save messages",
+  description: "Saves new messages to memory",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, messages, requestContext }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      if (!messages) {
+        throw new HTTPException$1(400, { message: "Messages are required" });
+      }
+      if (!Array.isArray(messages)) {
+        throw new HTTPException$1(400, { message: "Messages should be an array" });
+      }
+      const invalidMessages = messages.filter((message) => !message.threadId || !message.resourceId);
+      if (invalidMessages.length > 0) {
+        throw new HTTPException$1(400, {
+          message: `All messages must have threadId and resourceId fields. Found ${invalidMessages.length} invalid message(s).`
+        });
+      }
+      const processedMessages = messages.map((message) => ({
+        ...message,
+        id: message.id || memory.generateId(),
+        createdAt: message.createdAt ? new Date(message.createdAt) : /* @__PURE__ */ new Date()
+      }));
+      const result = await memory.saveMessages({ messages: processedMessages, memoryConfig: {} });
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error saving messages");
+    }
+  }
+});
+var CREATE_THREAD_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/threads",
+  responseType: "json",
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: createThreadBodySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Create thread",
+  description: "Creates a new conversation thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, resourceId, title, metadata, threadId, requestContext }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      validateBody({ resourceId });
+      const result = await memory.createThread({
+        resourceId,
+        title,
+        metadata,
+        threadId
+      });
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error saving thread to memory");
+    }
+  }
+});
+var UPDATE_THREAD_ROUTE = createRoute({
+  method: "PATCH",
+  path: "/api/memory/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: updateThreadBodySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Update thread",
+  description: "Updates a conversation thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, title, metadata, resourceId, requestContext }) => {
+    try {
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      const updatedAt = /* @__PURE__ */ new Date();
+      validateBody({ threadId });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      if (!thread) {
+        throw new HTTPException$1(404, { message: "Thread not found" });
+      }
+      const updatedThread = {
+        ...thread,
+        title: title || thread.title,
+        metadata: metadata || thread.metadata,
+        resourceId: resourceId || thread.resourceId,
+        createdAt: thread.createdAt,
+        updatedAt
+      };
+      const result = await memory.saveThread({ thread: updatedThread });
+      return {
+        ...result,
+        resourceId: result.resourceId ?? null
+      };
+    } catch (error) {
+      return handleError$1(error, "Error updating thread");
+    }
+  }
+});
+var DELETE_THREAD_ROUTE = createRoute({
+  method: "DELETE",
+  path: "/api/memory/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: agentIdQuerySchema,
+  responseSchema: deleteThreadResponseSchema,
+  summary: "Delete thread",
+  description: "Deletes a conversation thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, requestContext }) => {
+    try {
+      validateBody({ threadId });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      if (!thread) {
+        throw new HTTPException$1(404, { message: "Thread not found" });
+      }
+      await memory.deleteThread(threadId);
+      return { result: "Thread deleted" };
+    } catch (error) {
+      return handleError$1(error, "Error deleting thread");
+    }
+  }
+});
+var UPDATE_WORKING_MEMORY_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/threads/:threadId/working-memory",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: updateWorkingMemoryBodySchema,
+  responseSchema: updateWorkingMemoryResponseSchema,
+  summary: "Update working memory",
+  description: "Updates the working memory state for a thread",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, resourceId, memoryConfig, workingMemory, requestContext }) => {
+    try {
+      validateBody({ threadId, workingMemory });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const thread = await memory.getThreadById({ threadId });
+      if (!thread) {
+        throw new HTTPException$1(404, { message: "Thread not found" });
+      }
+      await memory.updateWorkingMemory({ threadId, resourceId, workingMemory, memoryConfig });
+      return { success: true };
+    } catch (error) {
+      return handleError$1(error, "Error updating working memory");
+    }
+  }
+});
+var DELETE_MESSAGES_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/messages/delete",
+  responseType: "json",
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: deleteMessagesBodySchema,
+  responseSchema: deleteMessagesResponseSchema,
+  summary: "Delete messages",
+  description: "Deletes specific messages from memory",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, messageIds, requestContext }) => {
+    try {
+      if (messageIds === void 0 || messageIds === null) {
+        throw new HTTPException$1(400, { message: "messageIds is required" });
+      }
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      let normalizedIds;
+      if (Array.isArray(messageIds)) {
+        normalizedIds = messageIds;
+      } else if (typeof messageIds === "string") {
+        normalizedIds = [messageIds];
+      } else {
+        normalizedIds = [messageIds];
+      }
+      await memory.deleteMessages(normalizedIds);
+      const count = Array.isArray(messageIds) ? messageIds.length : 1;
+      return { success: true, message: `${count} message${count === 1 ? "" : "s"} deleted successfully` };
+    } catch (error) {
+      return handleError$1(error, "Error deleting messages");
+    }
+  }
+});
+var SEARCH_MEMORY_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/search",
+  responseType: "json",
+  queryParamSchema: searchMemoryQuerySchema,
+  responseSchema: searchMemoryResponseSchema,
+  summary: "Search memory",
+  description: "Searches across memory using semantic or text search",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, searchQuery, resourceId, threadId, limit = 20, requestContext, memoryConfig }) => {
+    try {
+      validateBody({ searchQuery, resourceId });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+      }
+      const config = memory.getMergedThreadConfig(memoryConfig || {});
+      const hasSemanticRecall = !!config?.semanticRecall;
+      const resourceScope = typeof config?.semanticRecall === "object" ? config?.semanticRecall?.scope !== "thread" : true;
+      const searchResults = [];
+      if (threadId && !resourceScope) {
+        const thread = await memory.getThreadById({ threadId });
+        if (!thread) {
+          return {
+            results: [],
+            count: 0,
+            query: searchQuery,
+            searchScope: resourceScope ? "resource" : "thread",
+            searchType: hasSemanticRecall ? "semantic" : "text"
+          };
+        }
+        if (thread.resourceId !== resourceId) {
+          throw new HTTPException$1(403, { message: "Thread does not belong to the specified resource" });
+        }
+      }
+      if (!threadId) {
+        const { threads } = await memory.listThreadsByResourceId({
+          resourceId,
+          page: 0,
+          perPage: 1,
+          orderBy: { field: "updatedAt", direction: "DESC" }
+        });
+        if (threads.length === 0) {
+          return {
+            results: [],
+            count: 0,
+            query: searchQuery,
+            searchScope: resourceScope ? "resource" : "thread",
+            searchType: hasSemanticRecall ? "semantic" : "text"
+          };
+        }
+        threadId = threads[0].id;
+      }
+      const beforeRange = typeof config.semanticRecall === `boolean` ? 2 : typeof config.semanticRecall?.messageRange === `number` ? config.semanticRecall.messageRange : config.semanticRecall?.messageRange.before || 2;
+      const afterRange = typeof config.semanticRecall === `boolean` ? 2 : typeof config.semanticRecall?.messageRange === `number` ? config.semanticRecall.messageRange : config.semanticRecall?.messageRange.after || 2;
+      if (resourceScope && config.semanticRecall) {
+        config.semanticRecall = typeof config.semanticRecall === `boolean` ? (
+          // make message range 0 so we can highlight the matches in search, message range will include other messages, not the matching ones
+          // and we add prev/next messages in a special section on each message anyway
+          { messageRange: 0, topK: 2, scope: "resource" }
+        ) : { ...config.semanticRecall, messageRange: 0 };
+      }
+      const threadConfig = memory.getMergedThreadConfig(config || {});
+      if (!threadConfig.lastMessages && !threadConfig.semanticRecall) {
+        return { results: [], count: 0, query: searchQuery };
+      }
+      const result = await memory.recall({
+        threadId,
+        resourceId,
+        perPage: threadConfig.lastMessages,
+        threadConfig: config,
+        vectorSearchString: threadConfig.semanticRecall && searchQuery ? searchQuery : void 0
+      });
+      const threadIds = Array.from(
+        new Set(result.messages.map((m) => m.threadId || threadId).filter(Boolean))
+      );
+      const fetched = await Promise.all(threadIds.map((id) => memory.getThreadById({ threadId: id })));
+      const threadMap = new Map(fetched.filter(Boolean).map((t) => [t.id, t]));
+      for (const msg of result.messages) {
+        const content = getTextContent(msg);
+        const msgThreadId = msg.threadId || threadId;
+        const thread = threadMap.get(msgThreadId);
+        const threadMessages = (await memory.recall({ threadId: msgThreadId })).messages;
+        const messageIndex = threadMessages.findIndex((m) => m.id === msg.id);
+        const searchResult = {
+          id: msg.id,
+          role: msg.role,
+          content,
+          createdAt: msg.createdAt,
+          threadId: msgThreadId,
+          threadTitle: thread?.title || msgThreadId
+        };
+        if (messageIndex !== -1) {
+          searchResult.context = {
+            before: threadMessages.slice(Math.max(0, messageIndex - beforeRange), messageIndex).map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: getTextContent(m),
+              createdAt: m.createdAt || /* @__PURE__ */ new Date()
+            })),
+            after: threadMessages.slice(messageIndex + 1, messageIndex + afterRange + 1).map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: getTextContent(m),
+              createdAt: m.createdAt || /* @__PURE__ */ new Date()
+            }))
+          };
+        }
+        searchResults.push(searchResult);
+      }
+      const sortedResults = searchResults.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, limit);
+      return {
+        results: sortedResults,
+        count: sortedResults.length,
+        query: searchQuery,
+        searchScope: resourceScope ? "resource" : "thread",
+        searchType: hasSemanticRecall ? "semantic" : "text"
+      };
+    } catch (error) {
+      return handleError$1(error, "Error searching memory");
+    }
+  }
+});
+var GET_MEMORY_STATUS_NETWORK_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/network/status",
+  responseType: "json",
+  queryParamSchema: getMemoryStatusNetworkQuerySchema,
+  responseSchema: memoryStatusResponseSchema,
+  summary: "Get memory status (network)",
+  description: "Returns the current status of the memory system (network route)",
+  tags: ["Memory - Network"],
+  handler: GET_MEMORY_STATUS_ROUTE.handler
+});
+var LIST_THREADS_NETWORK_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/network/threads",
+  responseType: "json",
+  queryParamSchema: listThreadsNetworkQuerySchema,
+  responseSchema: listThreadsResponseSchema,
+  summary: "List memory threads (network)",
+  description: "Returns a paginated list of conversation threads (network route)",
+  tags: ["Memory - Network"],
+  handler: LIST_THREADS_ROUTE.handler
+});
+var GET_THREAD_BY_ID_NETWORK_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/network/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: getThreadByIdNetworkQuerySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Get thread by ID (network)",
+  description: "Returns details for a specific conversation thread (network route)",
+  tags: ["Memory - Network"],
+  handler: GET_THREAD_BY_ID_ROUTE.handler
+});
+var LIST_MESSAGES_NETWORK_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/memory/network/threads/:threadId/messages",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: listMessagesNetworkQuerySchema,
+  responseSchema: listMessagesResponseSchema,
+  summary: "List thread messages (network)",
+  description: "Returns a paginated list of messages in a conversation thread (network route)",
+  tags: ["Memory - Network"],
+  handler: LIST_MESSAGES_ROUTE.handler
+});
+var SAVE_MESSAGES_NETWORK_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/network/save-messages",
+  responseType: "json",
+  queryParamSchema: saveMessagesNetworkQuerySchema,
+  bodySchema: saveMessagesBodySchema,
+  responseSchema: saveMessagesResponseSchema,
+  summary: "Save messages (network)",
+  description: "Saves new messages to memory (network route)",
+  tags: ["Memory - Network"],
+  handler: SAVE_MESSAGES_ROUTE.handler
+});
+var CREATE_THREAD_NETWORK_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/network/threads",
+  responseType: "json",
+  queryParamSchema: createThreadNetworkQuerySchema,
+  bodySchema: createThreadBodySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Create thread (network)",
+  description: "Creates a new conversation thread (network route)",
+  tags: ["Memory - Network"],
+  handler: CREATE_THREAD_ROUTE.handler
+});
+var UPDATE_THREAD_NETWORK_ROUTE = createRoute({
+  method: "PATCH",
+  path: "/api/memory/network/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: updateThreadNetworkQuerySchema,
+  bodySchema: updateThreadBodySchema,
+  responseSchema: getThreadByIdResponseSchema,
+  summary: "Update thread (network)",
+  description: "Updates a conversation thread (network route)",
+  tags: ["Memory - Network"],
+  handler: UPDATE_THREAD_ROUTE.handler
+});
+var DELETE_THREAD_NETWORK_ROUTE = createRoute({
+  method: "DELETE",
+  path: "/api/memory/network/threads/:threadId",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: deleteThreadNetworkQuerySchema,
+  responseSchema: deleteThreadResponseSchema,
+  summary: "Delete thread (network)",
+  description: "Deletes a conversation thread (network route)",
+  tags: ["Memory - Network"],
+  handler: DELETE_THREAD_ROUTE.handler
+});
+var DELETE_MESSAGES_NETWORK_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/network/messages/delete",
+  responseType: "json",
+  queryParamSchema: deleteMessagesNetworkQuerySchema,
+  bodySchema: deleteMessagesBodySchema,
+  responseSchema: deleteMessagesResponseSchema,
+  summary: "Delete messages (network)",
+  description: "Deletes specific messages from memory (network route)",
+  tags: ["Memory - Network"],
+  handler: DELETE_MESSAGES_ROUTE.handler
+});
+
+// src/server/handlers/observability.ts
+var observability_exports = {};
+__export(observability_exports, {
+  GET_TRACE_ROUTE: () => GET_TRACE_ROUTE,
+  LIST_SCORES_BY_SPAN_ROUTE: () => LIST_SCORES_BY_SPAN_ROUTE,
+  LIST_TRACES_ROUTE: () => LIST_TRACES_ROUTE,
+  SCORE_TRACES_ROUTE: () => SCORE_TRACES_ROUTE
+});
+var legacyQueryParamsSchema = z.object({
+  // Old: dateRange was in pagination, now it's startedAt in filters
+  dateRange: dateRangeSchema.optional(),
+  // Old: name matched span names like "agent run: 'myAgent'"
+  name: z.string().optional(),
+  // entityType needs preprocessing to handle legacy 'workflow' value
+  entityType: z.preprocess((val) => val === "workflow" ? "workflow_run" : val, z.string().optional())
+});
+function transformLegacyParams(params) {
+  const result = { ...params };
+  if (result.entityType === "workflow") {
+    result.entityType = "workflow_run";
+  }
+  if (params.dateRange && !params.startedAt) {
+    result.startedAt = params.dateRange;
+    delete result.dateRange;
+  }
+  if (typeof params.name === "string" && !params.entityId) {
+    const agentMatch = params.name.match(/^agent run: '([^']+)'$/);
+    const workflowMatch = params.name.match(/^workflow run: '([^']+)'$/);
+    if (agentMatch) {
+      result.entityId = agentMatch[1];
+      result.entityType = "agent";
+    } else if (workflowMatch) {
+      result.entityId = workflowMatch[1];
+      result.entityType = "workflow_run";
+    }
+    delete result.name;
+  }
+  return result;
+}
+function getStorage(mastra) {
+  const storage = mastra.getStorage();
+  if (!storage) {
+    throw new HTTPException$1(500, { message: "Storage is not available" });
+  }
+  return storage;
+}
+async function getObservabilityStore(mastra) {
+  const storage = getStorage(mastra);
+  const observability = await storage.getStore("observability");
+  if (!observability) {
+    throw new HTTPException$1(500, { message: "Observability storage domain is not available" });
+  }
+  return observability;
+}
+async function getScoresStore(mastra) {
+  const storage = getStorage(mastra);
+  const scores = await storage.getStore("scores");
+  if (!scores) {
+    throw new HTTPException$1(500, { message: "Scores storage domain is not available" });
+  }
+  return scores;
+}
+var LIST_TRACES_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/observability/traces",
+  responseType: "json",
+  queryParamSchema: wrapSchemaForQueryParams(
+    tracesFilterSchema.merge(paginationArgsSchema).merge(tracesOrderBySchema).merge(legacyQueryParamsSchema).partial()
+  ),
+  responseSchema: listTracesResponseSchema,
+  summary: "List traces",
+  description: "Returns a paginated list of traces with optional filtering and sorting",
+  tags: ["Observability"],
+  handler: async ({ mastra, ...params }) => {
+    try {
+      const transformedParams = transformLegacyParams(params);
+      const filters = pickParams(tracesFilterSchema, transformedParams);
+      const pagination = pickParams(paginationArgsSchema, transformedParams);
+      const orderBy = pickParams(tracesOrderBySchema, transformedParams);
+      const observabilityStore = await getObservabilityStore(mastra);
+      return await observabilityStore.listTraces({ filters, pagination, orderBy });
+    } catch (error) {
+      handleError$1(error, "Error listing traces");
+    }
+  }
+});
+var GET_TRACE_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/observability/traces/:traceId",
+  responseType: "json",
+  pathParamSchema: getTraceArgsSchema,
+  responseSchema: getTraceResponseSchema,
+  summary: "Get AI trace by ID",
+  description: "Returns a complete AI trace with all spans by trace ID",
+  tags: ["Observability"],
+  handler: async ({ mastra, traceId }) => {
+    try {
+      const observabilityStore = await getObservabilityStore(mastra);
+      const trace = await observabilityStore.getTrace({ traceId });
+      if (!trace) {
+        throw new HTTPException$1(404, { message: `Trace with ID '${traceId}' not found` });
+      }
+      return trace;
+    } catch (error) {
+      handleError$1(error, "Error getting trace");
+    }
+  }
+});
+var SCORE_TRACES_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/observability/traces/score",
+  responseType: "json",
+  bodySchema: scoreTracesRequestSchema,
+  responseSchema: scoreTracesResponseSchema,
+  summary: "Score traces",
+  description: "Scores one or more traces using a specified scorer (fire-and-forget)",
+  tags: ["Observability"],
+  handler: async ({ mastra, ...params }) => {
+    try {
+      getStorage(mastra);
+      const { scorerName, targets } = params;
+      const scorer = mastra.getScorerById(scorerName);
+      if (!scorer) {
+        throw new HTTPException$1(404, { message: `Scorer '${scorerName}' not found` });
+      }
+      scoreTraces({
+        scorerId: scorer.config.id || scorer.config.name,
+        targets,
+        mastra
+      }).catch((error) => {
+        const logger = mastra.getLogger();
+        logger?.error(`Background trace scoring failed: ${error.message}`, error);
+      });
+      return {
+        status: "success",
+        message: `Scoring started for ${targets.length} ${targets.length === 1 ? "trace" : "traces"}`,
+        traceCount: targets.length
+      };
+    } catch (error) {
+      handleError$1(error, "Error processing trace scoring");
+    }
+  }
+});
+var LIST_SCORES_BY_SPAN_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/observability/traces/:traceId/:spanId/scores",
+  responseType: "json",
+  pathParamSchema: spanIdsSchema,
+  queryParamSchema: paginationArgsSchema,
+  responseSchema: listScoresResponseSchema,
+  summary: "List scores by span",
+  description: "Returns all scores for a specific span within a trace",
+  tags: ["Observability"],
+  handler: async ({ mastra, ...params }) => {
+    try {
+      const pagination = pickParams(paginationArgsSchema, params);
+      const spanIds = pickParams(spanIdsSchema, params);
+      const scoresStore = await getScoresStore(mastra);
+      return await scoresStore.listScoresBySpan({
+        ...spanIds,
+        pagination
+      });
+    } catch (error) {
+      handleError$1(error, "Error getting scores by span");
+    }
+  }
+});
+
+// src/server/handlers/scores.ts
+var scores_exports = {};
+__export(scores_exports, {
+  GET_SCORER_ROUTE: () => GET_SCORER_ROUTE,
+  LIST_SCORERS_ROUTE: () => LIST_SCORERS_ROUTE,
+  LIST_SCORES_BY_ENTITY_ID_ROUTE: () => LIST_SCORES_BY_ENTITY_ID_ROUTE,
+  LIST_SCORES_BY_RUN_ID_ROUTE: () => LIST_SCORES_BY_RUN_ID_ROUTE,
+  LIST_SCORES_BY_SCORER_ID_ROUTE: () => LIST_SCORES_BY_SCORER_ID_ROUTE,
+  SAVE_SCORE_ROUTE: () => SAVE_SCORE_ROUTE
+});
+var scoringSamplingConfigSchema = z$1.object({});
+var mastraScorerConfigSchema = z$1.object({
+  id: z$1.string(),
+  name: z$1.string().optional(),
+  description: z$1.string(),
+  type: z$1.unknown().optional(),
+  judge: z$1.unknown().optional()
+});
+var mastraScorerSchema = z$1.object({
+  config: mastraScorerConfigSchema
+});
+var scorerEntrySchema = z$1.object({
+  scorer: mastraScorerSchema,
+  sampling: scoringSamplingConfigSchema.optional(),
+  agentIds: z$1.array(z$1.string()),
+  agentNames: z$1.array(z$1.string()),
+  workflowIds: z$1.array(z$1.string()),
+  isRegistered: z$1.boolean()
+});
+var listScorersResponseSchema = z$1.record(z$1.string(), scorerEntrySchema);
+var scorerIdPathParams = z$1.object({
+  scorerId: z$1.string().describe("Unique identifier for the scorer")
+});
+var entityPathParams = z$1.object({
+  entityType: z$1.string().describe("Type of the entity (AGENT or WORKFLOW)"),
+  entityId: z$1.string().describe("Unique identifier for the entity")
+});
+var listScoresByRunIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10)
+});
+var listScoresByScorerIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10),
+  entityId: z$1.string().optional(),
+  entityType: z$1.string().optional()
+});
+var listScoresByEntityIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10)
+});
+var saveScoreBodySchema = z$1.object({
+  score: z$1.unknown()
+  // ScoreRowData - complex type
+});
+var scoresWithPaginationResponseSchema = z$1.object({
+  pagination: paginationInfoSchema,
+  scores: z$1.array(z$1.unknown())
+  // Array of score records
+});
+var saveScoreResponseSchema = z$1.object({
+  score: z$1.unknown()
+  // ScoreRowData
+});
+
+// src/server/handlers/scores.ts
+async function listScorersFromSystem({
+  mastra,
+  requestContext
+}) {
+  const agents = mastra.listAgents();
+  const workflows = mastra.listWorkflows();
+  const scorersMap = /* @__PURE__ */ new Map();
+  for (const [_, agent] of Object.entries(agents)) {
+    const scorers = await agent.listScorers({
+      requestContext
+    }) || {};
+    if (Object.keys(scorers).length > 0) {
+      for (const [_scorerId, scorer] of Object.entries(scorers)) {
+        const scorerId = scorer.scorer.id;
+        if (scorersMap.has(scorerId)) {
+          scorersMap.get(scorerId)?.agentIds.push(agent.id);
+          scorersMap.get(scorerId)?.agentNames.push(agent.name);
+        } else {
+          scorersMap.set(scorerId, {
+            workflowIds: [],
+            ...scorer,
+            agentNames: [agent.name],
+            agentIds: [agent.id],
+            isRegistered: false
+          });
+        }
+      }
+    }
+  }
+  for (const [workflowId, workflow] of Object.entries(workflows)) {
+    const scorers = await workflow.listScorers({
+      requestContext
+    }) || {};
+    if (Object.keys(scorers).length > 0) {
+      for (const [_scorerId, scorer] of Object.entries(scorers)) {
+        const scorerName = scorer.scorer.name;
+        if (scorersMap.has(scorerName)) {
+          scorersMap.get(scorerName)?.workflowIds.push(workflowId);
+        } else {
+          scorersMap.set(scorerName, {
+            agentIds: [],
+            agentNames: [],
+            ...scorer,
+            workflowIds: [workflowId],
+            isRegistered: false
+          });
+        }
+      }
+    }
+  }
+  const registeredScorers = await mastra.listScorers();
+  for (const [_scorerId, scorer] of Object.entries(registeredScorers || {})) {
+    const scorerId = scorer.id;
+    if (scorersMap.has(scorerId)) {
+      scorersMap.get(scorerId).isRegistered = true;
+    } else {
+      scorersMap.set(scorerId, {
+        scorer,
+        agentIds: [],
+        agentNames: [],
+        workflowIds: [],
+        isRegistered: true
+      });
+    }
+  }
+  return Object.fromEntries(scorersMap.entries());
+}
+function getTraceDetails(traceIdWithSpanId) {
+  if (!traceIdWithSpanId) {
+    return {};
+  }
+  const [traceId, spanId] = traceIdWithSpanId.split("-");
+  return {
+    ...traceId ? { traceId } : {},
+    ...spanId ? { spanId } : {}
+  };
+}
+var LIST_SCORERS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/scores/scorers",
+  responseType: "json",
+  responseSchema: listScorersResponseSchema,
+  summary: "List all scorers",
+  description: "Returns a list of all registered scorers with their configuration and associated agents and workflows",
+  tags: ["Scoring"],
+  handler: async ({ mastra, requestContext }) => {
+    const scorers = await listScorersFromSystem({
+      mastra,
+      requestContext
+    });
+    return scorers;
+  }
+});
+var GET_SCORER_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/scores/scorers/:scorerId",
+  responseType: "json",
+  pathParamSchema: scorerIdPathParams,
+  responseSchema: scorerEntrySchema.nullable(),
+  summary: "Get scorer by ID",
+  description: "Returns details for a specific scorer including its configuration and associations",
+  tags: ["Scoring"],
+  handler: async ({ mastra, scorerId, requestContext }) => {
+    const scorers = await listScorersFromSystem({
+      mastra,
+      requestContext
+    });
+    const scorer = scorers[scorerId];
+    if (!scorer) {
+      return null;
+    }
+    return scorer;
+  }
+});
+var LIST_SCORES_BY_RUN_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/scores/run/:runId",
+  responseType: "json",
+  pathParamSchema: runIdSchema,
+  queryParamSchema: listScoresByRunIdQuerySchema,
+  responseSchema: scoresWithPaginationResponseSchema,
+  summary: "List scores by run ID",
+  description: "Returns all scores for a specific execution run",
+  tags: ["Scoring"],
+  handler: async ({ mastra, runId, ...params }) => {
+    try {
+      const { page, perPage } = params;
+      const pagination = {
+        page: page ?? 0,
+        perPage: perPage ?? 10
+      };
+      const scores = await mastra.getStorage()?.getStore("scores");
+      const scoreResults = await scores?.listScoresByRunId?.({
+        runId,
+        pagination
+      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
+      return {
+        pagination: scoreResults.pagination,
+        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
+      };
+    } catch (error) {
+      return handleError$1(error, "Error getting scores by run id");
+    }
+  }
+});
+var LIST_SCORES_BY_SCORER_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/scores/scorer/:scorerId",
+  responseType: "json",
+  pathParamSchema: scorerIdPathParams,
+  queryParamSchema: listScoresByScorerIdQuerySchema,
+  responseSchema: scoresWithPaginationResponseSchema,
+  summary: "List scores by scorer ID",
+  description: "Returns all scores generated by a specific scorer",
+  tags: ["Scoring"],
+  handler: async ({ mastra, scorerId, ...params }) => {
+    try {
+      const { page, perPage, entityId, entityType } = params;
+      const filters = Object.fromEntries(Object.entries({ entityId, entityType }).filter(([_, v]) => v !== void 0));
+      const scores = await mastra.getStorage()?.getStore("scores");
+      const scoreResults = await scores?.listScoresByScorerId?.({
+        scorerId,
+        pagination: { page: page ?? 0, perPage: perPage ?? 10 },
+        ...filters
+      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
+      return {
+        pagination: scoreResults.pagination,
+        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
+      };
+    } catch (error) {
+      return handleError$1(error, "Error getting scores by scorer id");
+    }
+  }
+});
+var LIST_SCORES_BY_ENTITY_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/scores/entity/:entityType/:entityId",
+  responseType: "json",
+  pathParamSchema: entityPathParams,
+  queryParamSchema: listScoresByEntityIdQuerySchema,
+  responseSchema: scoresWithPaginationResponseSchema,
+  summary: "List scores by entity ID",
+  description: "Returns all scores for a specific entity (agent or workflow)",
+  tags: ["Scoring"],
+  handler: async ({ mastra, entityId, entityType, ...params }) => {
+    try {
+      const { page, perPage } = params;
+      let entityIdToUse = entityId;
+      if (entityType === "AGENT") {
+        const agent = mastra.getAgentById(entityId);
+        entityIdToUse = agent.id;
+      } else if (entityType === "WORKFLOW") {
+        const workflow = mastra.getWorkflowById(entityId);
+        entityIdToUse = workflow.id;
+      }
+      const pagination = {
+        page: page ?? 0,
+        perPage: perPage ?? 10
+      };
+      const scoresStore = await mastra.getStorage()?.getStore("scores");
+      const scoreResults = await scoresStore?.listScoresByEntityId?.({
+        entityId: entityIdToUse,
+        entityType,
+        pagination
+      }) || { pagination: { total: 0, page: 0, perPage: 0, hasMore: false }, scores: [] };
+      return {
+        pagination: scoreResults.pagination,
+        scores: scoreResults.scores.map((score) => ({ ...score, ...getTraceDetails(score.traceId) }))
+      };
+    } catch (error) {
+      return handleError$1(error, "Error getting scores by entity id");
+    }
+  }
+});
+var SAVE_SCORE_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/scores",
+  responseType: "json",
+  bodySchema: saveScoreBodySchema,
+  responseSchema: saveScoreResponseSchema,
+  summary: "Save score",
+  description: "Saves a new score record to storage",
+  tags: ["Scoring"],
+  handler: async ({ mastra, ...params }) => {
+    try {
+      const { score } = params;
+      const scoresStore = await mastra.getStorage()?.getStore("scores");
+      const result = await scoresStore?.saveScore?.(score);
+      if (!result) {
+        throw new HTTPException$1(500, { message: "Storage not configured" });
+      }
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error saving score");
     }
   }
 });
@@ -5489,1215 +6946,47 @@ var AGENT_EXECUTION_ROUTE = createRoute({
   }
 });
 
-// ../agent-builder/dist/chunk-E53QBCQN.js
-var __require2$1 = /* @__PURE__ */ ((x) => typeof __require !== "undefined" ? __require : typeof Proxy !== "undefined" ? new Proxy(x, {
+// ../memory/dist/chunk-DGUM43GV.js
+var __require2$3 = /* @__PURE__ */ ((x) => typeof __require !== "undefined" ? __require : typeof Proxy !== "undefined" ? new Proxy(x, {
   get: (a, b) => (typeof __require !== "undefined" ? __require : a)[b]
 }) : x)(function(x) {
   if (typeof __require !== "undefined") return __require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __create$2 = Object.create;
-var __defProp$2 = Object.defineProperty;
-var __getOwnPropDesc$2 = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames$2 = Object.getOwnPropertyNames;
-var __getProtoOf$2 = Object.getPrototypeOf;
-var __hasOwnProp$2 = Object.prototype.hasOwnProperty;
-var __require22$1 = /* @__PURE__ */ ((x) => typeof __require2$1 !== "undefined" ? __require2$1 : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof __require2$1 !== "undefined" ? __require2$1 : a)[b]
+
+// ../memory/dist/chunk-MMUHFOCG.js
+var __create$3 = Object.create;
+var __defProp$3 = Object.defineProperty;
+var __getOwnPropDesc$3 = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames$3 = Object.getOwnPropertyNames;
+var __getProtoOf$3 = Object.getPrototypeOf;
+var __hasOwnProp$3 = Object.prototype.hasOwnProperty;
+var __require2$2 = /* @__PURE__ */ ((x) => typeof __require2$3 !== "undefined" ? __require2$3 : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof __require2$3 !== "undefined" ? __require2$3 : a)[b]
 }) : x)(function(x) {
-  if (typeof __require2$1 !== "undefined") return __require2$1.apply(this, arguments);
+  if (typeof __require2$3 !== "undefined") return __require2$3.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __commonJS$1 = (cb, mod) => function __require222() {
-  return mod || (0, cb[__getOwnPropNames$2(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+var __commonJS$2 = (cb, mod) => function __require22() {
+  return mod || (0, cb[__getOwnPropNames$3(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
-var __copyProps$2 = (to, from, except, desc) => {
+var __copyProps$3 = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames$2(from))
-      if (!__hasOwnProp$2.call(to, key) && key !== except)
-        __defProp$2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$2(from, key)) || desc.enumerable });
+    for (let key of __getOwnPropNames$3(from))
+      if (!__hasOwnProp$3.call(to, key) && key !== except)
+        __defProp$3(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$3(from, key)) || desc.enumerable });
   }
   return to;
 };
-var __toESM$1 = (mod, isNodeMode, target) => (target = mod != null ? __create$2(__getProtoOf$2(mod)) : {}, __copyProps$2(
+var __toESM$2 = (mod, isNodeMode, target) => (target = mod != null ? __create$3(__getProtoOf$3(mod)) : {}, __copyProps$3(
   // If the importer is in node compatibility mode or this is not an ESM
   // file that has been converted to a CommonJS file using a Babel-
   // compatible transform (i.e. "__esModule" has not been set), then set
   // "default" to the CommonJS "module.exports" for node compatibility.
-  __defProp$2(target, "default", { value: mod, enumerable: true }) ,
+  __defProp$3(target, "default", { value: mod, enumerable: true }) ,
   mod
 ));
-var require_token_error$1 = __commonJS$1({
-  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/token-error.js"(exports, module) {
-    var __defProp2 = Object.defineProperty;
-    var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
-    var __getOwnPropNames2 = Object.getOwnPropertyNames;
-    var __hasOwnProp2 = Object.prototype.hasOwnProperty;
-    var __export = (target, all) => {
-      for (var name in all)
-        __defProp2(target, name, { get: all[name], enumerable: true });
-    };
-    var __copyProps2 = (to, from, except, desc) => {
-      if (from && typeof from === "object" || typeof from === "function") {
-        for (let key of __getOwnPropNames2(from))
-          if (!__hasOwnProp2.call(to, key) && key !== except)
-            __defProp2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc2(from, key)) || desc.enumerable });
-      }
-      return to;
-    };
-    var __toCommonJS = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
-    var token_error_exports = {};
-    __export(token_error_exports, {
-      VercelOidcTokenError: () => VercelOidcTokenError
-    });
-    module.exports = __toCommonJS(token_error_exports);
-    var VercelOidcTokenError = class extends Error {
-      constructor(message, cause) {
-        super(message);
-        this.name = "VercelOidcTokenError";
-        this.cause = cause;
-      }
-      toString() {
-        if (this.cause) {
-          return `${this.name}: ${this.message}: ${this.cause}`;
-        }
-        return `${this.name}: ${this.message}`;
-      }
-    };
-  }
-});
-
-// src/server/handlers/workflows.ts
-var workflows_exports = {};
-__export(workflows_exports, {
-  CANCEL_WORKFLOW_RUN_ROUTE: () => CANCEL_WORKFLOW_RUN_ROUTE,
-  CREATE_WORKFLOW_RUN_ROUTE: () => CREATE_WORKFLOW_RUN_ROUTE,
-  DELETE_WORKFLOW_RUN_BY_ID_ROUTE: () => DELETE_WORKFLOW_RUN_BY_ID_ROUTE,
-  GET_WORKFLOW_BY_ID_ROUTE: () => GET_WORKFLOW_BY_ID_ROUTE,
-  GET_WORKFLOW_RUN_BY_ID_ROUTE: () => GET_WORKFLOW_RUN_BY_ID_ROUTE,
-  GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE: () => GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE,
-  LIST_WORKFLOWS_ROUTE: () => LIST_WORKFLOWS_ROUTE,
-  LIST_WORKFLOW_RUNS_ROUTE: () => LIST_WORKFLOW_RUNS_ROUTE,
-  OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE: () => OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE,
-  OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE: () => OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE,
-  OBSERVE_STREAM_WORKFLOW_ROUTE: () => OBSERVE_STREAM_WORKFLOW_ROUTE,
-  RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE,
-  RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE,
-  RESTART_ASYNC_WORKFLOW_ROUTE: () => RESTART_ASYNC_WORKFLOW_ROUTE,
-  RESTART_WORKFLOW_ROUTE: () => RESTART_WORKFLOW_ROUTE,
-  RESUME_ASYNC_WORKFLOW_ROUTE: () => RESUME_ASYNC_WORKFLOW_ROUTE,
-  RESUME_STREAM_WORKFLOW_ROUTE: () => RESUME_STREAM_WORKFLOW_ROUTE,
-  RESUME_WORKFLOW_ROUTE: () => RESUME_WORKFLOW_ROUTE,
-  START_ASYNC_WORKFLOW_ROUTE: () => START_ASYNC_WORKFLOW_ROUTE,
-  START_WORKFLOW_RUN_ROUTE: () => START_WORKFLOW_RUN_ROUTE,
-  STREAM_LEGACY_WORKFLOW_ROUTE: () => STREAM_LEGACY_WORKFLOW_ROUTE,
-  STREAM_VNEXT_WORKFLOW_ROUTE: () => STREAM_VNEXT_WORKFLOW_ROUTE,
-  STREAM_WORKFLOW_ROUTE: () => STREAM_WORKFLOW_ROUTE,
-  TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE: () => TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE,
-  TIME_TRAVEL_STREAM_WORKFLOW_ROUTE: () => TIME_TRAVEL_STREAM_WORKFLOW_ROUTE,
-  TIME_TRAVEL_WORKFLOW_ROUTE: () => TIME_TRAVEL_WORKFLOW_ROUTE
-});
-var workflowRunStatusSchema = z$1.enum([
-  "running",
-  "waiting",
-  "suspended",
-  "success",
-  "failed",
-  "canceled",
-  "pending",
-  "bailed",
-  "tripwire"
-]);
-var workflowIdPathParams = z$1.object({
-  workflowId: z$1.string().describe("Unique identifier for the workflow")
-});
-var workflowRunPathParams = workflowIdPathParams.extend({
-  runId: z$1.string().describe("Unique identifier for the workflow run")
-});
-var serializedStepSchema = z$1.object({
-  id: z$1.string(),
-  description: z$1.string().optional()
-});
-var serializedStepFlowEntrySchema = z$1.object({
-  type: z$1.enum(["step", "sleep", "sleepUntil", "waitForEvent", "parallel", "conditional", "loop", "foreach"])
-});
-var workflowInfoSchema = z$1.object({
-  steps: z$1.record(z$1.string(), serializedStepSchema),
-  allSteps: z$1.record(z$1.string(), serializedStepSchema),
-  name: z$1.string().optional(),
-  description: z$1.string().optional(),
-  stepGraph: z$1.array(serializedStepFlowEntrySchema),
-  inputSchema: z$1.string().optional(),
-  outputSchema: z$1.string().optional(),
-  options: z$1.object({}).optional(),
-  isProcessorWorkflow: z$1.boolean().optional()
-});
-var listWorkflowsResponseSchema = z$1.record(z$1.string(), workflowInfoSchema);
-var workflowRunSchema = z$1.object({
-  workflowName: z$1.string(),
-  runId: z$1.string(),
-  snapshot: z$1.union([z$1.object({}), z$1.string()]),
-  createdAt: z$1.date(),
-  updatedAt: z$1.date(),
-  resourceId: z$1.string().optional()
-});
-var workflowRunsResponseSchema = z$1.object({
-  runs: z$1.array(workflowRunSchema),
-  total: z$1.number()
-});
-var workflowRunResponseSchema = workflowRunSchema;
-var listWorkflowRunsQuerySchema = createCombinedPaginationSchema().extend({
-  fromDate: z$1.coerce.date().optional(),
-  toDate: z$1.coerce.date().optional(),
-  resourceId: z$1.string().optional(),
-  status: workflowRunStatusSchema.optional()
-});
-var workflowExecutionBodySchema = z$1.object({
-  resourceId: z$1.string().optional(),
-  inputData: z$1.unknown().optional(),
-  initialState: z$1.unknown().optional(),
-  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  tracingOptions: tracingOptionsSchema.optional()
-});
-var streamLegacyWorkflowBodySchema = workflowExecutionBodySchema;
-var streamWorkflowBodySchema = workflowExecutionBodySchema.extend({
-  closeOnSuspend: z$1.boolean().optional()
-});
-var resumeBodySchema = z$1.object({
-  step: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
-  // Optional - workflow can auto-resume all suspended steps
-  resumeData: z$1.unknown().optional(),
-  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  tracingOptions: tracingOptionsSchema.optional()
-});
-var restartBodySchema = z$1.object({
-  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  tracingOptions: tracingOptionsSchema.optional()
-});
-var timeTravelBodySchema = z$1.object({
-  inputData: z$1.unknown().optional(),
-  resumeData: z$1.unknown().optional(),
-  initialState: z$1.unknown().optional(),
-  step: z$1.union([z$1.string(), z$1.array(z$1.string())]),
-  context: z$1.record(z$1.string(), z$1.any()).optional(),
-  nestedStepsContext: z$1.record(z$1.string(), z$1.record(z$1.string(), z$1.any())).optional(),
-  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
-  tracingOptions: tracingOptionsSchema.optional()
-});
-var startAsyncWorkflowBodySchema = workflowExecutionBodySchema;
-z$1.object({
-  event: z$1.string(),
-  data: z$1.unknown()
-});
-var workflowExecutionResultQuerySchema = z$1.object({
-  fields: z$1.string().optional().refine(
-    (value) => {
-      if (!value) return true;
-      const validFields = /* @__PURE__ */ new Set([
-        "status",
-        "result",
-        "error",
-        "payload",
-        "steps",
-        "activeStepsPath",
-        "serializedStepGraph"
-      ]);
-      const requestedFields = value.split(",").map((f) => f.trim());
-      return requestedFields.every((field) => validFields.has(field));
-    },
-    {
-      message: "Invalid field name. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph"
-    }
-  ).describe(
-    "Comma-separated list of fields to return. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph. If not provided, returns all fields."
-  ),
-  withNestedWorkflows: z$1.enum(["true", "false"]).optional().describe(
-    "Whether to include nested workflow data in steps. Defaults to true. Set to false for better performance."
-  )
-});
-var workflowExecutionResultSchema = z$1.object({
-  status: workflowRunStatusSchema.optional(),
-  result: z$1.unknown().optional(),
-  error: z$1.unknown().optional(),
-  payload: z$1.unknown().optional(),
-  steps: z$1.record(z$1.string(), z$1.any()).optional(),
-  activeStepsPath: z$1.record(z$1.string(), z$1.array(z$1.number())).optional(),
-  serializedStepGraph: z$1.array(serializedStepFlowEntrySchema).optional()
-});
-var workflowControlResponseSchema = messageResponseSchema;
-var createWorkflowRunResponseSchema = z$1.object({
-  runId: z$1.string()
-});
-var createWorkflowRunBodySchema = z$1.object({
-  resourceId: z$1.string().optional(),
-  disableScorers: z$1.boolean().optional()
-});
-
-// src/server/handlers/workflows.ts
-async function listWorkflowsFromSystem({ mastra, workflowId }) {
-  const logger = mastra.getLogger();
-  if (!workflowId) {
-    throw new HTTPException$2(400, { message: "Workflow ID is required" });
-  }
-  let workflow;
-  workflow = WorkflowRegistry.getWorkflow(workflowId);
-  if (!workflow) {
-    try {
-      workflow = mastra.getWorkflowById(workflowId);
-    } catch (error) {
-      logger.debug("Error getting workflow, searching agents for workflow", error);
-    }
-  }
-  if (!workflow) {
-    logger.debug("Workflow not found, searching agents for workflow", { workflowId });
-    const agents = mastra.listAgents();
-    if (Object.keys(agents || {}).length) {
-      for (const [_, agent] of Object.entries(agents)) {
-        try {
-          const workflows = await agent.listWorkflows();
-          if (workflows[workflowId]) {
-            workflow = workflows[workflowId];
-            break;
-          }
-          break;
-        } catch (error) {
-          logger.debug("Error getting workflow from agent", error);
-        }
-      }
-    }
-  }
-  if (!workflow) {
-    throw new HTTPException$2(404, { message: "Workflow not found" });
-  }
-  return { workflow };
-}
-var LIST_WORKFLOWS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows",
-  responseType: "json",
-  queryParamSchema: z.object({
-    partial: z.string().optional()
-  }),
-  responseSchema: listWorkflowsResponseSchema,
-  summary: "List all workflows",
-  description: "Returns a list of all available workflows in the system",
-  tags: ["Workflows"],
-  handler: async ({ mastra, partial }) => {
-    try {
-      const workflows = mastra.listWorkflows({ serialized: false });
-      const isPartial = partial === "true";
-      const _workflows = Object.entries(workflows).reduce((acc, [key, workflow]) => {
-        acc[key] = getWorkflowInfo(workflow, isPartial);
-        return acc;
-      }, {});
-      return _workflows;
-    } catch (error) {
-      return handleError$1(error, "Error getting workflows");
-    }
-  }
-});
-var GET_WORKFLOW_BY_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows/:workflowId",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  responseSchema: workflowInfoSchema,
-  summary: "Get workflow by ID",
-  description: "Returns details for a specific workflow",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      return getWorkflowInfo(workflow);
-    } catch (error) {
-      return handleError$1(error, "Error getting workflow");
-    }
-  }
-});
-var LIST_WORKFLOW_RUNS_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows/:workflowId/runs",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: listWorkflowRunsQuerySchema,
-  responseSchema: workflowRunsResponseSchema,
-  summary: "List workflow runs",
-  description: "Returns a paginated list of execution runs for the specified workflow",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, fromDate, toDate, page, perPage, limit, offset, resourceId, status }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      let finalPage = page;
-      let finalPerPage = perPage;
-      if (finalPerPage === void 0 && limit !== void 0) {
-        finalPerPage = limit;
-      }
-      if (finalPage === void 0 && offset !== void 0 && finalPerPage !== void 0 && finalPerPage > 0) {
-        finalPage = Math.floor(offset / finalPerPage);
-      }
-      if (finalPerPage !== void 0 && (typeof finalPerPage !== "number" || !Number.isInteger(finalPerPage) || finalPerPage <= 0)) {
-        throw new HTTPException$2(400, { message: "perPage must be a positive integer" });
-      }
-      if (finalPage !== void 0 && (!Number.isInteger(finalPage) || finalPage < 0)) {
-        throw new HTTPException$2(400, { message: "page must be a non-negative integer" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const workflowRuns = await workflow.listWorkflowRuns({
-        fromDate: fromDate ? typeof fromDate === "string" ? new Date(fromDate) : fromDate : void 0,
-        toDate: toDate ? typeof toDate === "string" ? new Date(toDate) : toDate : void 0,
-        perPage: finalPerPage,
-        page: finalPage,
-        resourceId,
-        status
-      }) || {
-        runs: [],
-        total: 0
-      };
-      return workflowRuns;
-    } catch (error) {
-      return handleError$1(error, "Error getting workflow runs");
-    }
-  }
-});
-var GET_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows/:workflowId/runs/:runId",
-  responseType: "json",
-  pathParamSchema: workflowRunPathParams,
-  responseSchema: workflowRunResponseSchema,
-  summary: "Get workflow run by ID",
-  description: "Returns details for a specific workflow run",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "Run ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      return run;
-    } catch (error) {
-      return handleError$1(error, "Error getting workflow run");
-    }
-  }
-});
-var DELETE_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
-  method: "DELETE",
-  path: "/api/workflows/:workflowId/runs/:runId",
-  responseType: "json",
-  pathParamSchema: workflowRunPathParams,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Delete workflow run by ID",
-  description: "Deletes a specific workflow run by ID",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "Run ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      await workflow.deleteWorkflowRunById(runId);
-      return { message: "Workflow run deleted" };
-    } catch (error) {
-      return handleError$1(error, "Error deleting workflow run");
-    }
-  }
-});
-var CREATE_WORKFLOW_RUN_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/create-run",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: optionalRunIdSchema,
-  bodySchema: createWorkflowRunBodySchema,
-  responseSchema: createWorkflowRunResponseSchema,
-  summary: "Create workflow run",
-  description: "Creates a new workflow execution instance with an optional custom run ID",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, resourceId, disableScorers }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.createRun({ runId, resourceId, disableScorers });
-      return { runId: run.runId };
-    } catch (error) {
-      return handleError$1(error, "Error creating workflow run");
-    }
-  }
-});
-var STREAM_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/stream",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: streamWorkflowBodySchema,
-  summary: "Stream workflow execution",
-  description: "Executes a workflow and streams the results in real-time",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, resourceId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to stream workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const serverCache = mastra.getServerCache();
-      const run = await workflow.createRun({ runId, resourceId });
-      const result = run.stream(params);
-      return result.fullStream.pipeThrough(
-        new TransformStream$1({
-          transform(chunk, controller) {
-            if (serverCache) {
-              const cacheKey = runId;
-              serverCache.listPush(cacheKey, chunk).catch(() => {
-              });
-            }
-            controller.enqueue(chunk);
-          }
-        })
-      );
-    } catch (error) {
-      return handleError$1(error, "Error streaming workflow");
-    }
-  }
-});
-var STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/streamVNext",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: streamWorkflowBodySchema,
-  summary: "Stream workflow execution (v2)",
-  description: "Executes a workflow using the v2 streaming API and streams the results in real-time",
-  tags: ["Workflows"],
-  handler: STREAM_WORKFLOW_ROUTE.handler
-});
-var RESUME_STREAM_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/resume-stream",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: resumeBodySchema,
-  responseSchema: streamResponseSchema,
-  summary: "Resume workflow stream",
-  description: "Resumes a suspended workflow execution and continues streaming results",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const serverCache = mastra.getServerCache();
-      const stream = _run.resumeStream(params).fullStream.pipeThrough(
-        new TransformStream$1({
-          transform(chunk, controller) {
-            if (serverCache) {
-              const cacheKey = runId;
-              serverCache.listPush(cacheKey, chunk).catch(() => {
-              });
-            }
-            controller.enqueue(chunk);
-          }
-        })
-      );
-      return stream;
-    } catch (error) {
-      return handleError$1(error, "Error resuming workflow");
-    }
-  }
-});
-var GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows/:workflowId/runs/:runId/execution-result",
-  responseType: "json",
-  pathParamSchema: workflowRunPathParams,
-  queryParamSchema: workflowExecutionResultQuerySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Get workflow execution result",
-  description: "Returns the final execution result of a completed workflow run. Use the fields query parameter to reduce payload size by requesting only specific fields (e.g., ?fields=status,result)",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, fields, withNestedWorkflows }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "Run ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const fieldList = fields ? fields.split(",").map((f) => f.trim()) : void 0;
-      const executionResult = await workflow.getWorkflowRunExecutionResult(runId, {
-        withNestedWorkflows: withNestedWorkflows !== "false",
-        // Default to true unless explicitly 'false'
-        fields: fieldList
-      });
-      if (!executionResult) {
-        throw new HTTPException$2(404, { message: "Workflow run execution result not found" });
-      }
-      return executionResult;
-    } catch (error) {
-      return handleError$1(error, "Error getting workflow run execution result");
-    }
-  }
-});
-var START_ASYNC_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/start-async",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: optionalRunIdSchema,
-  bodySchema: startAsyncWorkflowBodySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Start workflow asynchronously",
-  description: "Starts a workflow execution asynchronously without streaming results",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const _run = await workflow.createRun({ runId });
-      const result = await _run.start(params);
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error starting async workflow");
-    }
-  }
-});
-var START_WORKFLOW_RUN_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/start",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: startAsyncWorkflowBodySchema,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Start specific workflow run",
-  description: "Starts execution of a specific workflow run by ID",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to start run" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      void _run.start({
-        ...params
-      });
-      return { message: "Workflow run started" };
-    } catch (e) {
-      return handleError$1(e, "Error starting workflow run");
-    }
-  }
-});
-var OBSERVE_STREAM_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/observe",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  responseSchema: streamResponseSchema,
-  summary: "Observe workflow stream",
-  description: "Observes and streams updates from an already running workflow execution",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to observe workflow stream" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const serverCache = mastra.getServerCache();
-      if (!serverCache) {
-        throw new HTTPException$2(500, { message: "Server cache not found" });
-      }
-      const cachedRunChunks = await serverCache.listFromTo(runId, 0);
-      const combinedStream = new ReadableStream$1({
-        start(controller) {
-          const emitCachedChunks = async () => {
-            for (const chunk of cachedRunChunks) {
-              controller.enqueue(chunk);
-            }
-          };
-          const liveStream = _run.observeStream();
-          const reader = liveStream.getReader();
-          const pump = async () => {
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                  controller.close();
-                  break;
-                }
-                controller.enqueue(value);
-              }
-            } catch (error) {
-              controller.error(error);
-            } finally {
-              reader.releaseLock();
-            }
-          };
-          void emitCachedChunks().then(() => {
-            void pump();
-          }).catch((error) => {
-            controller.error(error);
-          });
-        }
-      });
-      return combinedStream;
-    } catch (error) {
-      return handleError$1(error, "Error observing workflow stream");
-    }
-  }
-});
-var OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/observe-streamVNext",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  responseSchema: streamResponseSchema,
-  summary: "Observe workflow stream (v2)",
-  description: "Observes and streams updates from an already running workflow execution using v2 streaming API",
-  tags: ["Workflows"],
-  handler: OBSERVE_STREAM_WORKFLOW_ROUTE.handler
-});
-var RESUME_ASYNC_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/resume-async",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: resumeBodySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Resume workflow asynchronously",
-  description: "Resumes a suspended workflow execution asynchronously without streaming",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const result = await _run.resume(params);
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error resuming workflow step");
-    }
-  }
-});
-var RESUME_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/resume",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: resumeBodySchema,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Resume workflow",
-  description: "Resumes a suspended workflow execution from a specific step",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      void _run.resume(params);
-      return { message: "Workflow run resumed" };
-    } catch (error) {
-      return handleError$1(error, "Error resuming workflow");
-    }
-  }
-});
-var RESTART_ASYNC_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/restart-async",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: restartBodySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Restart workflow asynchronously",
-  description: "Restarts an active workflow execution asynchronously",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to restart workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const result = await _run.restart(params);
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error restarting workflow");
-    }
-  }
-});
-var RESTART_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/restart",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: restartBodySchema,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Restart workflow",
-  description: "Restarts an active workflow execution",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to restart workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      void _run.restart(params);
-      return { message: "Workflow run restarted" };
-    } catch (error) {
-      return handleError$1(error, "Error restarting workflow");
-    }
-  }
-});
-var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/restart-all-active-workflow-runs-async",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Restart all active workflow runs asynchronously",
-  description: "Restarts all active workflow runs asynchronously",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      await workflow.restartAllActiveWorkflowRuns();
-      return { message: "All active workflow runs restarted" };
-    } catch (error) {
-      return handleError$1(error, "Error restarting workflow");
-    }
-  }
-});
-var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/restart-all-active-workflow-runs",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Restart all active workflow runs",
-  description: "Restarts all active workflow runs",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      void workflow.restartAllActiveWorkflowRuns();
-      return { message: "All active workflow runs restarted" };
-    } catch (error) {
-      return handleError$1(error, "Error restarting workflow");
-    }
-  }
-});
-var TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/time-travel-async",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: timeTravelBodySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Time travel workflow asynchronously",
-  description: "Time travels a workflow run asynchronously without streaming",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to time travel workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const result = await _run.timeTravel(params);
-      return result;
-    } catch (error) {
-      return handleError$1(error, "Error time traveling workflow");
-    }
-  }
-});
-var TIME_TRAVEL_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/time-travel",
-  responseType: "json",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: timeTravelBodySchema,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Time travel workflow",
-  description: "Time travels a workflow run, starting from a specific step",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to time travel workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      void _run.timeTravel(params);
-      return { message: "Workflow run time travel started" };
-    } catch (error) {
-      return handleError$1(error, "Error time traveling workflow");
-    }
-  }
-});
-var TIME_TRAVEL_STREAM_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/time-travel-stream",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: timeTravelBodySchema,
-  summary: "Time travel workflow stream",
-  description: "Time travels a workflow run, starting from a specific step, and streams the results in real-time",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to time travel workflow stream" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const serverCache = mastra.getServerCache();
-      const run = await workflow.createRun({ runId });
-      const result = run.timeTravelStream(params);
-      return result.fullStream.pipeThrough(
-        new TransformStream$1({
-          transform(chunk, controller) {
-            if (serverCache) {
-              const cacheKey = runId;
-              serverCache.listPush(cacheKey, chunk).catch(() => {
-              });
-            }
-            controller.enqueue(chunk);
-          }
-        })
-      );
-    } catch (error) {
-      return handleError$1(error, "Error time traveling workflow stream");
-    }
-  }
-});
-var CANCEL_WORKFLOW_RUN_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/runs/:runId/cancel",
-  responseType: "json",
-  pathParamSchema: workflowRunPathParams,
-  responseSchema: workflowControlResponseSchema,
-  summary: "Cancel workflow run",
-  description: "Cancels an in-progress workflow execution",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to cancel workflow run" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      await _run.cancel();
-      return { message: "Workflow run cancelled" };
-    } catch (error) {
-      return handleError$1(error, "Error canceling workflow run");
-    }
-  }
-});
-var STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/stream-legacy",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: streamWorkflowBodySchema,
-  responseSchema: streamResponseSchema,
-  summary: "[DEPRECATED] Stream workflow with legacy format",
-  description: "Legacy endpoint for streaming workflow execution. Use /api/workflows/:workflowId/stream instead.",
-  tags: ["Workflows", "Legacy"],
-  handler: async ({ mastra, workflowId, runId, ...params }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const serverCache = mastra.getServerCache();
-      const run = await workflow.createRun({ runId });
-      const result = run.streamLegacy({
-        ...params,
-        onChunk: async (chunk) => {
-          if (serverCache) {
-            const cacheKey = runId;
-            await serverCache.listPush(cacheKey, chunk);
-          }
-        }
-      });
-      return result.stream;
-    } catch (error) {
-      return handleError$1(error, "Error executing workflow");
-    }
-  }
-});
-var OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/observe-stream-legacy",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  responseSchema: streamResponseSchema,
-  summary: "[DEPRECATED] Observe workflow stream with legacy format",
-  description: "Legacy endpoint for observing workflow stream. Use /api/workflows/:workflowId/observe instead.",
-  tags: ["Workflows", "Legacy"],
-  handler: async ({ mastra, workflowId, runId }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "runId required to observe workflow stream" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const run = await workflow.getWorkflowRunById(runId);
-      if (!run) {
-        throw new HTTPException$2(404, { message: "Workflow run not found" });
-      }
-      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
-      const serverCache = mastra.getServerCache();
-      if (!serverCache) {
-        throw new HTTPException$2(500, { message: "Server cache not found" });
-      }
-      const transformStream = new TransformStream$1();
-      const writer = transformStream.writable.getWriter();
-      const cachedRunChunks = await serverCache.listFromTo(runId, 0);
-      for (const chunk of cachedRunChunks) {
-        await writer.write(chunk);
-      }
-      writer.releaseLock();
-      const result = _run.observeStreamLegacy();
-      return result.stream?.pipeThrough(transformStream);
-    } catch (error) {
-      return handleError$1(error, "Error observing workflow stream");
-    }
-  }
-});
-
-// ../memory/dist/chunk-E53QBCQN.js
-var __require2 = /* @__PURE__ */ ((x) => typeof __require !== "undefined" ? __require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof __require !== "undefined" ? __require : a)[b]
-}) : x)(function(x) {
-  if (typeof __require !== "undefined") return __require.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
-var __create$1 = Object.create;
-var __defProp$1 = Object.defineProperty;
-var __getOwnPropDesc$1 = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames$1 = Object.getOwnPropertyNames;
-var __getProtoOf$1 = Object.getPrototypeOf;
-var __hasOwnProp$1 = Object.prototype.hasOwnProperty;
-var __require22 = /* @__PURE__ */ ((x) => typeof __require2 !== "undefined" ? __require2 : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof __require2 !== "undefined" ? __require2 : a)[b]
-}) : x)(function(x) {
-  if (typeof __require2 !== "undefined") return __require2.apply(this, arguments);
-  throw Error('Dynamic require of "' + x + '" is not supported');
-});
-var __commonJS = (cb, mod) => function __require222() {
-  return mod || (0, cb[__getOwnPropNames$1(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
-};
-var __copyProps$1 = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames$1(from))
-      if (!__hasOwnProp$1.call(to, key) && key !== except)
-        __defProp$1(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$1(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create$1(__getProtoOf$1(mod)) : {}, __copyProps$1(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  __defProp$1(target, "default", { value: mod, enumerable: true }) ,
-  mod
-));
-var require_token_error = __commonJS({
+var require_token_error$2 = __commonJS$2({
   "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/token-error.js"(exports, module) {
     var __defProp2 = Object.defineProperty;
     var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
@@ -6738,7 +7027,7 @@ var require_token_error = __commonJS({
 });
 
 // ../../node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js
-var require_secure_json_parse$1 = __commonJS$2({
+var require_secure_json_parse$1 = __commonJS$3({
   "../../node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
     var hasBuffer = typeof Buffer !== "undefined";
     var suspectProtoRx = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
@@ -7142,7 +7431,7 @@ var customAlphabet$1 = (alphabet, defaultSize = 21) => {
 };
 
 // ../../node_modules/.pnpm/@ai-sdk+provider-utils@2.2.8_zod@3.25.76/node_modules/@ai-sdk/provider-utils/dist/index.mjs
-var import_secure_json_parse$1 = __toESM$2(require_secure_json_parse$1());
+var import_secure_json_parse$1 = __toESM$3(require_secure_json_parse$1());
 function combineHeaders$1(...headers) {
   return headers.reduce(
     (combinedHeaders, currentHeaders) => ({
@@ -10470,8 +10759,1254 @@ var openai = createOpenAI({
   // strict for OpenAI API
 });
 
+// ../agent-builder/dist/chunk-E53QBCQN.js
+var __require2$1 = /* @__PURE__ */ ((x) => typeof __require !== "undefined" ? __require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof __require !== "undefined" ? __require : a)[b]
+}) : x)(function(x) {
+  if (typeof __require !== "undefined") return __require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+var __create$2 = Object.create;
+var __defProp$2 = Object.defineProperty;
+var __getOwnPropDesc$2 = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames$2 = Object.getOwnPropertyNames;
+var __getProtoOf$2 = Object.getPrototypeOf;
+var __hasOwnProp$2 = Object.prototype.hasOwnProperty;
+var __require22 = /* @__PURE__ */ ((x) => typeof __require2$1 !== "undefined" ? __require2$1 : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof __require2$1 !== "undefined" ? __require2$1 : a)[b]
+}) : x)(function(x) {
+  if (typeof __require2$1 !== "undefined") return __require2$1.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+var __commonJS$1 = (cb, mod) => function __require222() {
+  return mod || (0, cb[__getOwnPropNames$2(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __copyProps$2 = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames$2(from))
+      if (!__hasOwnProp$2.call(to, key) && key !== except)
+        __defProp$2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$2(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM$1 = (mod, isNodeMode, target) => (target = mod != null ? __create$2(__getProtoOf$2(mod)) : {}, __copyProps$2(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  __defProp$2(target, "default", { value: mod, enumerable: true }) ,
+  mod
+));
+var require_token_error$1 = __commonJS$1({
+  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/token-error.js"(exports, module) {
+    var __defProp2 = Object.defineProperty;
+    var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
+    var __getOwnPropNames2 = Object.getOwnPropertyNames;
+    var __hasOwnProp2 = Object.prototype.hasOwnProperty;
+    var __export = (target, all) => {
+      for (var name in all)
+        __defProp2(target, name, { get: all[name], enumerable: true });
+    };
+    var __copyProps2 = (to, from, except, desc) => {
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (let key of __getOwnPropNames2(from))
+          if (!__hasOwnProp2.call(to, key) && key !== except)
+            __defProp2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc2(from, key)) || desc.enumerable });
+      }
+      return to;
+    };
+    var __toCommonJS = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
+    var token_error_exports = {};
+    __export(token_error_exports, {
+      VercelOidcTokenError: () => VercelOidcTokenError
+    });
+    module.exports = __toCommonJS(token_error_exports);
+    var VercelOidcTokenError = class extends Error {
+      constructor(message, cause) {
+        super(message);
+        this.name = "VercelOidcTokenError";
+        this.cause = cause;
+      }
+      toString() {
+        if (this.cause) {
+          return `${this.name}: ${this.message}: ${this.cause}`;
+        }
+        return `${this.name}: ${this.message}`;
+      }
+    };
+  }
+});
+
+// src/server/handlers/workflows.ts
+var workflows_exports = {};
+__export(workflows_exports, {
+  CANCEL_WORKFLOW_RUN_ROUTE: () => CANCEL_WORKFLOW_RUN_ROUTE,
+  CREATE_WORKFLOW_RUN_ROUTE: () => CREATE_WORKFLOW_RUN_ROUTE,
+  DELETE_WORKFLOW_RUN_BY_ID_ROUTE: () => DELETE_WORKFLOW_RUN_BY_ID_ROUTE,
+  GET_WORKFLOW_BY_ID_ROUTE: () => GET_WORKFLOW_BY_ID_ROUTE,
+  GET_WORKFLOW_RUN_BY_ID_ROUTE: () => GET_WORKFLOW_RUN_BY_ID_ROUTE,
+  GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE: () => GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE,
+  LIST_WORKFLOWS_ROUTE: () => LIST_WORKFLOWS_ROUTE,
+  LIST_WORKFLOW_RUNS_ROUTE: () => LIST_WORKFLOW_RUNS_ROUTE,
+  OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE: () => OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE,
+  OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE: () => OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE,
+  OBSERVE_STREAM_WORKFLOW_ROUTE: () => OBSERVE_STREAM_WORKFLOW_ROUTE,
+  RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE,
+  RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE,
+  RESTART_ASYNC_WORKFLOW_ROUTE: () => RESTART_ASYNC_WORKFLOW_ROUTE,
+  RESTART_WORKFLOW_ROUTE: () => RESTART_WORKFLOW_ROUTE,
+  RESUME_ASYNC_WORKFLOW_ROUTE: () => RESUME_ASYNC_WORKFLOW_ROUTE,
+  RESUME_STREAM_WORKFLOW_ROUTE: () => RESUME_STREAM_WORKFLOW_ROUTE,
+  RESUME_WORKFLOW_ROUTE: () => RESUME_WORKFLOW_ROUTE,
+  START_ASYNC_WORKFLOW_ROUTE: () => START_ASYNC_WORKFLOW_ROUTE,
+  START_WORKFLOW_RUN_ROUTE: () => START_WORKFLOW_RUN_ROUTE,
+  STREAM_LEGACY_WORKFLOW_ROUTE: () => STREAM_LEGACY_WORKFLOW_ROUTE,
+  STREAM_VNEXT_WORKFLOW_ROUTE: () => STREAM_VNEXT_WORKFLOW_ROUTE,
+  STREAM_WORKFLOW_ROUTE: () => STREAM_WORKFLOW_ROUTE,
+  TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE: () => TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE,
+  TIME_TRAVEL_STREAM_WORKFLOW_ROUTE: () => TIME_TRAVEL_STREAM_WORKFLOW_ROUTE,
+  TIME_TRAVEL_WORKFLOW_ROUTE: () => TIME_TRAVEL_WORKFLOW_ROUTE
+});
+var workflowRunStatusSchema = z$1.enum([
+  "running",
+  "waiting",
+  "suspended",
+  "success",
+  "failed",
+  "canceled",
+  "pending",
+  "bailed",
+  "tripwire",
+  "paused"
+]);
+var workflowIdPathParams = z$1.object({
+  workflowId: z$1.string().describe("Unique identifier for the workflow")
+});
+var workflowRunPathParams = workflowIdPathParams.extend({
+  runId: z$1.string().describe("Unique identifier for the workflow run")
+});
+var serializedStepSchema = z$1.object({
+  id: z$1.string(),
+  description: z$1.string().optional()
+});
+var serializedStepFlowEntrySchema = z$1.object({
+  type: z$1.enum(["step", "sleep", "sleepUntil", "waitForEvent", "parallel", "conditional", "loop", "foreach"])
+});
+var workflowInfoSchema = z$1.object({
+  steps: z$1.record(z$1.string(), serializedStepSchema),
+  allSteps: z$1.record(z$1.string(), serializedStepSchema),
+  name: z$1.string().optional(),
+  description: z$1.string().optional(),
+  stepGraph: z$1.array(serializedStepFlowEntrySchema),
+  inputSchema: z$1.string().optional(),
+  outputSchema: z$1.string().optional(),
+  options: z$1.object({}).optional(),
+  isProcessorWorkflow: z$1.boolean().optional()
+});
+var listWorkflowsResponseSchema = z$1.record(z$1.string(), workflowInfoSchema);
+var workflowRunSchema = z$1.object({
+  workflowName: z$1.string(),
+  runId: z$1.string(),
+  snapshot: z$1.union([z$1.object({}), z$1.string()]),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date(),
+  resourceId: z$1.string().optional()
+});
+var workflowRunsResponseSchema = z$1.object({
+  runs: z$1.array(workflowRunSchema),
+  total: z$1.number()
+});
+var workflowRunResponseSchema = workflowRunSchema;
+var listWorkflowRunsQuerySchema = createCombinedPaginationSchema().extend({
+  fromDate: z$1.coerce.date().optional(),
+  toDate: z$1.coerce.date().optional(),
+  resourceId: z$1.string().optional(),
+  status: workflowRunStatusSchema.optional()
+});
+var workflowExecutionBodySchema = z$1.object({
+  resourceId: z$1.string().optional(),
+  inputData: z$1.unknown().optional(),
+  initialState: z$1.unknown().optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  tracingOptions: tracingOptionsSchema.optional(),
+  perStep: z$1.boolean().optional()
+});
+var streamLegacyWorkflowBodySchema = workflowExecutionBodySchema;
+var streamWorkflowBodySchema = workflowExecutionBodySchema.extend({
+  closeOnSuspend: z$1.boolean().optional()
+});
+var resumeBodySchema = z$1.object({
+  step: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
+  // Optional - workflow can auto-resume all suspended steps
+  resumeData: z$1.unknown().optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  tracingOptions: tracingOptionsSchema.optional(),
+  perStep: z$1.boolean().optional()
+});
+var restartBodySchema = z$1.object({
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  tracingOptions: tracingOptionsSchema.optional()
+});
+var timeTravelBodySchema = z$1.object({
+  inputData: z$1.unknown().optional(),
+  resumeData: z$1.unknown().optional(),
+  initialState: z$1.unknown().optional(),
+  step: z$1.union([z$1.string(), z$1.array(z$1.string())]),
+  context: z$1.record(z$1.string(), z$1.any()).optional(),
+  nestedStepsContext: z$1.record(z$1.string(), z$1.record(z$1.string(), z$1.any())).optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  tracingOptions: tracingOptionsSchema.optional(),
+  perStep: z$1.boolean().optional()
+});
+var startAsyncWorkflowBodySchema = workflowExecutionBodySchema;
+z$1.object({
+  event: z$1.string(),
+  data: z$1.unknown()
+});
+var workflowExecutionResultQuerySchema = z$1.object({
+  fields: z$1.string().optional().refine(
+    (value) => {
+      if (!value) return true;
+      const validFields = /* @__PURE__ */ new Set([
+        "status",
+        "result",
+        "error",
+        "payload",
+        "steps",
+        "activeStepsPath",
+        "serializedStepGraph"
+      ]);
+      const requestedFields = value.split(",").map((f) => f.trim());
+      return requestedFields.every((field) => validFields.has(field));
+    },
+    {
+      message: "Invalid field name. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph"
+    }
+  ).describe(
+    "Comma-separated list of fields to return. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph. If not provided, returns all fields."
+  ),
+  withNestedWorkflows: z$1.enum(["true", "false"]).optional().describe(
+    "Whether to include nested workflow data in steps. Defaults to true. Set to false for better performance."
+  )
+});
+var workflowExecutionResultSchema = z$1.object({
+  status: workflowRunStatusSchema.optional(),
+  result: z$1.unknown().optional(),
+  error: z$1.unknown().optional(),
+  payload: z$1.unknown().optional(),
+  steps: z$1.record(z$1.string(), z$1.any()).optional(),
+  activeStepsPath: z$1.record(z$1.string(), z$1.array(z$1.number())).optional(),
+  serializedStepGraph: z$1.array(serializedStepFlowEntrySchema).optional()
+});
+var workflowControlResponseSchema = messageResponseSchema;
+var createWorkflowRunResponseSchema = z$1.object({
+  runId: z$1.string()
+});
+var createWorkflowRunBodySchema = z$1.object({
+  resourceId: z$1.string().optional(),
+  disableScorers: z$1.boolean().optional()
+});
+
+// src/server/handlers/workflows.ts
+async function listWorkflowsFromSystem({ mastra, workflowId }) {
+  const logger = mastra.getLogger();
+  if (!workflowId) {
+    throw new HTTPException$1(400, { message: "Workflow ID is required" });
+  }
+  let workflow;
+  workflow = WorkflowRegistry.getWorkflow(workflowId);
+  if (!workflow) {
+    try {
+      workflow = mastra.getWorkflowById(workflowId);
+    } catch (error) {
+      logger.debug("Error getting workflow, searching agents for workflow", error);
+    }
+  }
+  if (!workflow) {
+    logger.debug("Workflow not found, searching agents for workflow", { workflowId });
+    const agents = mastra.listAgents();
+    if (Object.keys(agents || {}).length) {
+      for (const [_, agent] of Object.entries(agents)) {
+        try {
+          const workflows = await agent.listWorkflows();
+          if (workflows[workflowId]) {
+            workflow = workflows[workflowId];
+            break;
+          }
+          break;
+        } catch (error) {
+          logger.debug("Error getting workflow from agent", error);
+        }
+      }
+    }
+  }
+  if (!workflow) {
+    throw new HTTPException$1(404, { message: "Workflow not found" });
+  }
+  return { workflow };
+}
+var LIST_WORKFLOWS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/workflows",
+  responseType: "json",
+  queryParamSchema: z.object({
+    partial: z.string().optional()
+  }),
+  responseSchema: listWorkflowsResponseSchema,
+  summary: "List all workflows",
+  description: "Returns a list of all available workflows in the system",
+  tags: ["Workflows"],
+  handler: async ({ mastra, partial }) => {
+    try {
+      const workflows = mastra.listWorkflows({ serialized: false });
+      const isPartial = partial === "true";
+      const _workflows = Object.entries(workflows).reduce((acc, [key, workflow]) => {
+        acc[key] = getWorkflowInfo(workflow, isPartial);
+        return acc;
+      }, {});
+      return _workflows;
+    } catch (error) {
+      return handleError$1(error, "Error getting workflows");
+    }
+  }
+});
+var GET_WORKFLOW_BY_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/workflows/:workflowId",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  responseSchema: workflowInfoSchema,
+  summary: "Get workflow by ID",
+  description: "Returns details for a specific workflow",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      return getWorkflowInfo(workflow);
+    } catch (error) {
+      return handleError$1(error, "Error getting workflow");
+    }
+  }
+});
+var LIST_WORKFLOW_RUNS_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/workflows/:workflowId/runs",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: listWorkflowRunsQuerySchema,
+  responseSchema: workflowRunsResponseSchema,
+  summary: "List workflow runs",
+  description: "Returns a paginated list of execution runs for the specified workflow",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, fromDate, toDate, page, perPage, limit, offset, resourceId, status }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      let finalPage = page;
+      let finalPerPage = perPage;
+      if (finalPerPage === void 0 && limit !== void 0) {
+        finalPerPage = limit;
+      }
+      if (finalPage === void 0 && offset !== void 0 && finalPerPage !== void 0 && finalPerPage > 0) {
+        finalPage = Math.floor(offset / finalPerPage);
+      }
+      if (finalPerPage !== void 0 && (typeof finalPerPage !== "number" || !Number.isInteger(finalPerPage) || finalPerPage <= 0)) {
+        throw new HTTPException$1(400, { message: "perPage must be a positive integer" });
+      }
+      if (finalPage !== void 0 && (!Number.isInteger(finalPage) || finalPage < 0)) {
+        throw new HTTPException$1(400, { message: "page must be a non-negative integer" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const workflowRuns = await workflow.listWorkflowRuns({
+        fromDate: fromDate ? typeof fromDate === "string" ? new Date(fromDate) : fromDate : void 0,
+        toDate: toDate ? typeof toDate === "string" ? new Date(toDate) : toDate : void 0,
+        perPage: finalPerPage,
+        page: finalPage,
+        resourceId,
+        status
+      }) || {
+        runs: [],
+        total: 0
+      };
+      return workflowRuns;
+    } catch (error) {
+      return handleError$1(error, "Error getting workflow runs");
+    }
+  }
+});
+var GET_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/workflows/:workflowId/runs/:runId",
+  responseType: "json",
+  pathParamSchema: workflowRunPathParams,
+  responseSchema: workflowRunResponseSchema,
+  summary: "Get workflow run by ID",
+  description: "Returns details for a specific workflow run",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "Run ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      return run;
+    } catch (error) {
+      return handleError$1(error, "Error getting workflow run");
+    }
+  }
+});
+var DELETE_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
+  method: "DELETE",
+  path: "/api/workflows/:workflowId/runs/:runId",
+  responseType: "json",
+  pathParamSchema: workflowRunPathParams,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Delete workflow run by ID",
+  description: "Deletes a specific workflow run by ID",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "Run ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      await workflow.deleteWorkflowRunById(runId);
+      return { message: "Workflow run deleted" };
+    } catch (error) {
+      return handleError$1(error, "Error deleting workflow run");
+    }
+  }
+});
+var CREATE_WORKFLOW_RUN_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/create-run",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: optionalRunIdSchema,
+  bodySchema: createWorkflowRunBodySchema,
+  responseSchema: createWorkflowRunResponseSchema,
+  summary: "Create workflow run",
+  description: "Creates a new workflow execution instance with an optional custom run ID",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, resourceId, disableScorers }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.createRun({ runId, resourceId, disableScorers });
+      return { runId: run.runId };
+    } catch (error) {
+      return handleError$1(error, "Error creating workflow run");
+    }
+  }
+});
+var STREAM_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/stream",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: streamWorkflowBodySchema,
+  summary: "Stream workflow execution",
+  description: "Executes a workflow and streams the results in real-time",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, resourceId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to stream workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const serverCache = mastra.getServerCache();
+      const run = await workflow.createRun({ runId, resourceId });
+      const result = run.stream(params);
+      return result.fullStream.pipeThrough(
+        new TransformStream$1({
+          transform(chunk, controller) {
+            if (serverCache) {
+              const cacheKey = runId;
+              serverCache.listPush(cacheKey, chunk).catch(() => {
+              });
+            }
+            controller.enqueue(chunk);
+          }
+        })
+      );
+    } catch (error) {
+      return handleError$1(error, "Error streaming workflow");
+    }
+  }
+});
+var STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/streamVNext",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: streamWorkflowBodySchema,
+  summary: "Stream workflow execution (v2)",
+  description: "Executes a workflow using the v2 streaming API and streams the results in real-time",
+  tags: ["Workflows"],
+  handler: STREAM_WORKFLOW_ROUTE.handler
+});
+var RESUME_STREAM_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/resume-stream",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: resumeBodySchema,
+  responseSchema: streamResponseSchema,
+  summary: "Resume workflow stream",
+  description: "Resumes a suspended workflow execution and continues streaming results",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const serverCache = mastra.getServerCache();
+      const stream = _run.resumeStream(params).fullStream.pipeThrough(
+        new TransformStream$1({
+          transform(chunk, controller) {
+            if (serverCache) {
+              const cacheKey = runId;
+              serverCache.listPush(cacheKey, chunk).catch(() => {
+              });
+            }
+            controller.enqueue(chunk);
+          }
+        })
+      );
+      return stream;
+    } catch (error) {
+      return handleError$1(error, "Error resuming workflow");
+    }
+  }
+});
+var GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE = createRoute({
+  method: "GET",
+  path: "/api/workflows/:workflowId/runs/:runId/execution-result",
+  responseType: "json",
+  pathParamSchema: workflowRunPathParams,
+  queryParamSchema: workflowExecutionResultQuerySchema,
+  responseSchema: workflowExecutionResultSchema,
+  summary: "Get workflow execution result",
+  description: "Returns the final execution result of a completed workflow run. Use the fields query parameter to reduce payload size by requesting only specific fields (e.g., ?fields=status,result)",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, fields, withNestedWorkflows }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "Run ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const fieldList = fields ? fields.split(",").map((f) => f.trim()) : void 0;
+      const executionResult = await workflow.getWorkflowRunExecutionResult(runId, {
+        withNestedWorkflows: withNestedWorkflows !== "false",
+        // Default to true unless explicitly 'false'
+        fields: fieldList
+      });
+      if (!executionResult) {
+        throw new HTTPException$1(404, { message: "Workflow run execution result not found" });
+      }
+      return executionResult;
+    } catch (error) {
+      return handleError$1(error, "Error getting workflow run execution result");
+    }
+  }
+});
+var START_ASYNC_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/start-async",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: optionalRunIdSchema,
+  bodySchema: startAsyncWorkflowBodySchema,
+  responseSchema: workflowExecutionResultSchema,
+  summary: "Start workflow asynchronously",
+  description: "Starts a workflow execution asynchronously without streaming results",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const _run = await workflow.createRun({ runId });
+      const result = await _run.start(params);
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error starting async workflow");
+    }
+  }
+});
+var START_WORKFLOW_RUN_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/start",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: startAsyncWorkflowBodySchema,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Start specific workflow run",
+  description: "Starts execution of a specific workflow run by ID",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to start run" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      void _run.start({
+        ...params
+      });
+      return { message: "Workflow run started" };
+    } catch (e) {
+      return handleError$1(e, "Error starting workflow run");
+    }
+  }
+});
+var OBSERVE_STREAM_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/observe",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  responseSchema: streamResponseSchema,
+  summary: "Observe workflow stream",
+  description: "Observes and streams updates from an already running workflow execution",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to observe workflow stream" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const serverCache = mastra.getServerCache();
+      if (!serverCache) {
+        throw new HTTPException$1(500, { message: "Server cache not found" });
+      }
+      const cachedRunChunks = await serverCache.listFromTo(runId, 0);
+      const combinedStream = new ReadableStream$1({
+        start(controller) {
+          const emitCachedChunks = async () => {
+            for (const chunk of cachedRunChunks) {
+              controller.enqueue(chunk);
+            }
+          };
+          const liveStream = _run.observeStream();
+          const reader = liveStream.getReader();
+          const pump = async () => {
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                  controller.close();
+                  break;
+                }
+                controller.enqueue(value);
+              }
+            } catch (error) {
+              controller.error(error);
+            } finally {
+              reader.releaseLock();
+            }
+          };
+          void emitCachedChunks().then(() => {
+            void pump();
+          }).catch((error) => {
+            controller.error(error);
+          });
+        }
+      });
+      return combinedStream;
+    } catch (error) {
+      return handleError$1(error, "Error observing workflow stream");
+    }
+  }
+});
+var OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/observe-streamVNext",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  responseSchema: streamResponseSchema,
+  summary: "Observe workflow stream (v2)",
+  description: "Observes and streams updates from an already running workflow execution using v2 streaming API",
+  tags: ["Workflows"],
+  handler: OBSERVE_STREAM_WORKFLOW_ROUTE.handler
+});
+var RESUME_ASYNC_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/resume-async",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: resumeBodySchema,
+  responseSchema: workflowExecutionResultSchema,
+  summary: "Resume workflow asynchronously",
+  description: "Resumes a suspended workflow execution asynchronously without streaming",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const result = await _run.resume(params);
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error resuming workflow step");
+    }
+  }
+});
+var RESUME_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/resume",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: resumeBodySchema,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Resume workflow",
+  description: "Resumes a suspended workflow execution from a specific step",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      void _run.resume(params);
+      return { message: "Workflow run resumed" };
+    } catch (error) {
+      return handleError$1(error, "Error resuming workflow");
+    }
+  }
+});
+var RESTART_ASYNC_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/restart-async",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: restartBodySchema,
+  responseSchema: workflowExecutionResultSchema,
+  summary: "Restart workflow asynchronously",
+  description: "Restarts an active workflow execution asynchronously",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to restart workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const result = await _run.restart(params);
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error restarting workflow");
+    }
+  }
+});
+var RESTART_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/restart",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: restartBodySchema,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Restart workflow",
+  description: "Restarts an active workflow execution",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to restart workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      void _run.restart(params);
+      return { message: "Workflow run restarted" };
+    } catch (error) {
+      return handleError$1(error, "Error restarting workflow");
+    }
+  }
+});
+var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/restart-all-active-workflow-runs-async",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Restart all active workflow runs asynchronously",
+  description: "Restarts all active workflow runs asynchronously",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      await workflow.restartAllActiveWorkflowRuns();
+      return { message: "All active workflow runs restarted" };
+    } catch (error) {
+      return handleError$1(error, "Error restarting workflow");
+    }
+  }
+});
+var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/restart-all-active-workflow-runs",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Restart all active workflow runs",
+  description: "Restarts all active workflow runs",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      void workflow.restartAllActiveWorkflowRuns();
+      return { message: "All active workflow runs restarted" };
+    } catch (error) {
+      return handleError$1(error, "Error restarting workflow");
+    }
+  }
+});
+var TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/time-travel-async",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: timeTravelBodySchema,
+  responseSchema: workflowExecutionResultSchema,
+  summary: "Time travel workflow asynchronously",
+  description: "Time travels a workflow run asynchronously without streaming",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to time travel workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const result = await _run.timeTravel(params);
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error time traveling workflow");
+    }
+  }
+});
+var TIME_TRAVEL_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/time-travel",
+  responseType: "json",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: timeTravelBodySchema,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Time travel workflow",
+  description: "Time travels a workflow run, starting from a specific step",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to time travel workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      void _run.timeTravel(params);
+      return { message: "Workflow run time travel started" };
+    } catch (error) {
+      return handleError$1(error, "Error time traveling workflow");
+    }
+  }
+});
+var TIME_TRAVEL_STREAM_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/time-travel-stream",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: timeTravelBodySchema,
+  summary: "Time travel workflow stream",
+  description: "Time travels a workflow run, starting from a specific step, and streams the results in real-time",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to time travel workflow stream" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const serverCache = mastra.getServerCache();
+      const run = await workflow.createRun({ runId });
+      const result = run.timeTravelStream(params);
+      return result.fullStream.pipeThrough(
+        new TransformStream$1({
+          transform(chunk, controller) {
+            if (serverCache) {
+              const cacheKey = runId;
+              serverCache.listPush(cacheKey, chunk).catch(() => {
+              });
+            }
+            controller.enqueue(chunk);
+          }
+        })
+      );
+    } catch (error) {
+      return handleError$1(error, "Error time traveling workflow stream");
+    }
+  }
+});
+var CANCEL_WORKFLOW_RUN_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/runs/:runId/cancel",
+  responseType: "json",
+  pathParamSchema: workflowRunPathParams,
+  responseSchema: workflowControlResponseSchema,
+  summary: "Cancel workflow run",
+  description: "Cancels an in-progress workflow execution",
+  tags: ["Workflows"],
+  handler: async ({ mastra, workflowId, runId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to cancel workflow run" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      await _run.cancel();
+      return { message: "Workflow run cancelled" };
+    } catch (error) {
+      return handleError$1(error, "Error canceling workflow run");
+    }
+  }
+});
+var STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/stream-legacy",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  bodySchema: streamWorkflowBodySchema,
+  responseSchema: streamResponseSchema,
+  summary: "[DEPRECATED] Stream workflow with legacy format",
+  description: "Legacy endpoint for streaming workflow execution. Use /api/workflows/:workflowId/stream instead.",
+  tags: ["Workflows", "Legacy"],
+  handler: async ({ mastra, workflowId, runId, ...params }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const serverCache = mastra.getServerCache();
+      const run = await workflow.createRun({ runId });
+      const result = run.streamLegacy({
+        ...params,
+        onChunk: async (chunk) => {
+          if (serverCache) {
+            const cacheKey = runId;
+            await serverCache.listPush(cacheKey, chunk);
+          }
+        }
+      });
+      return result.stream;
+    } catch (error) {
+      return handleError$1(error, "Error executing workflow");
+    }
+  }
+});
+var OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/workflows/:workflowId/observe-stream-legacy",
+  responseType: "stream",
+  pathParamSchema: workflowIdPathParams,
+  queryParamSchema: runIdSchema,
+  responseSchema: streamResponseSchema,
+  summary: "[DEPRECATED] Observe workflow stream with legacy format",
+  description: "Legacy endpoint for observing workflow stream. Use /api/workflows/:workflowId/observe instead.",
+  tags: ["Workflows", "Legacy"],
+  handler: async ({ mastra, workflowId, runId }) => {
+    try {
+      if (!workflowId) {
+        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+      }
+      if (!runId) {
+        throw new HTTPException$1(400, { message: "runId required to observe workflow stream" });
+      }
+      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
+      if (!workflow) {
+        throw new HTTPException$1(404, { message: "Workflow not found" });
+      }
+      const run = await workflow.getWorkflowRunById(runId);
+      if (!run) {
+        throw new HTTPException$1(404, { message: "Workflow run not found" });
+      }
+      const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
+      const serverCache = mastra.getServerCache();
+      if (!serverCache) {
+        throw new HTTPException$1(500, { message: "Server cache not found" });
+      }
+      const transformStream = new TransformStream$1();
+      const writer = transformStream.writable.getWriter();
+      const cachedRunChunks = await serverCache.listFromTo(runId, 0);
+      for (const chunk of cachedRunChunks) {
+        await writer.write(chunk);
+      }
+      writer.releaseLock();
+      const result = _run.observeStreamLegacy();
+      return result.stream?.pipeThrough(transformStream);
+    } catch (error) {
+      return handleError$1(error, "Error observing workflow stream");
+    }
+  }
+});
+
+// ../memory/dist/chunk-KMQS2YEC.js
+var __create$1 = Object.create;
+var __defProp$1 = Object.defineProperty;
+var __getOwnPropDesc$1 = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames$1 = Object.getOwnPropertyNames;
+var __getProtoOf$1 = Object.getPrototypeOf;
+var __hasOwnProp$1 = Object.prototype.hasOwnProperty;
+var __require2 = /* @__PURE__ */ ((x) => typeof __require2$3 !== "undefined" ? __require2$3 : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof __require2$3 !== "undefined" ? __require2$3 : a)[b]
+}) : x)(function(x) {
+  if (typeof __require2$3 !== "undefined") return __require2$3.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+var __commonJS = (cb, mod) => function __require22() {
+  return mod || (0, cb[__getOwnPropNames$1(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
+};
+var __copyProps$1 = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames$1(from))
+      if (!__hasOwnProp$1.call(to, key) && key !== except)
+        __defProp$1(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc$1(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create$1(__getProtoOf$1(mod)) : {}, __copyProps$1(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  __defProp$1(target, "default", { value: mod, enumerable: true }) ,
+  mod
+));
+var require_token_error = __commonJS({
+  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/token-error.js"(exports, module) {
+    var __defProp2 = Object.defineProperty;
+    var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
+    var __getOwnPropNames2 = Object.getOwnPropertyNames;
+    var __hasOwnProp2 = Object.prototype.hasOwnProperty;
+    var __export = (target, all) => {
+      for (var name in all)
+        __defProp2(target, name, { get: all[name], enumerable: true });
+    };
+    var __copyProps2 = (to, from, except, desc) => {
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (let key of __getOwnPropNames2(from))
+          if (!__hasOwnProp2.call(to, key) && key !== except)
+            __defProp2(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc2(from, key)) || desc.enumerable });
+      }
+      return to;
+    };
+    var __toCommonJS = (mod) => __copyProps2(__defProp2({}, "__esModule", { value: true }), mod);
+    var token_error_exports = {};
+    __export(token_error_exports, {
+      VercelOidcTokenError: () => VercelOidcTokenError
+    });
+    module.exports = __toCommonJS(token_error_exports);
+    var VercelOidcTokenError = class extends Error {
+      constructor(message, cause) {
+        super(message);
+        this.name = "VercelOidcTokenError";
+        this.cause = cause;
+      }
+      toString() {
+        if (this.cause) {
+          return `${this.name}: ${this.message}: ${this.cause}`;
+        }
+        return `${this.name}: ${this.message}`;
+      }
+    };
+  }
+});
+
 // ../../node_modules/.pnpm/ignore@7.0.5/node_modules/ignore/index.js
-var require_ignore = __commonJS$2({
+var require_ignore = __commonJS$3({
   "../../node_modules/.pnpm/ignore@7.0.5/node_modules/ignore/index.js"(exports, module) {
     function makeArray(subject) {
       return Array.isArray(subject) ? subject : [subject];
@@ -10493,8 +12028,8 @@ var require_ignore = __commonJS$2({
       TMP_KEY_IGNORE = Symbol.for("node-ignore");
     }
     var KEY_IGNORE = TMP_KEY_IGNORE;
-    var define = (object4, key, value) => {
-      Object.defineProperty(object4, key, { value });
+    var define = (object5, key, value) => {
+      Object.defineProperty(object5, key, { value });
       return value;
     };
     var REGEX_REGEXP_RANGE = /([0-z])-([0-z])/g;
@@ -11665,11 +13200,11 @@ function parseMapDef(def, refs) {
 
 // ../../node_modules/.pnpm/zod-to-json-schema@3.24.6_zod@3.25.76/node_modules/zod-to-json-schema/dist/esm/parsers/nativeEnum.js
 function parseNativeEnumDef(def) {
-  const object4 = def.values;
+  const object5 = def.values;
   const actualKeys = Object.keys(def.values).filter((key) => {
-    return typeof object4[object4[key]] !== "number";
+    return typeof object5[object5[key]] !== "number";
   });
-  const actualValues = actualKeys.map((key) => object4[key]);
+  const actualValues = actualKeys.map((key) => object5[key]);
   const parsedTypes = Array.from(new Set(actualValues.map((values) => typeof values)));
   return {
     type: parsedTypes.length === 1 ? parsedTypes[0] === "string" ? "string" : "number" : ["string", "number"],
@@ -12119,17 +13654,17 @@ function parseDef(def, refs, forceResolution = false) {
   const newItem = { def, path: refs.currentPath, jsonSchema: void 0 };
   refs.seen.set(def, newItem);
   const jsonSchemaOrGetter = selectParser(def, def.typeName, refs);
-  const jsonSchema4 = typeof jsonSchemaOrGetter === "function" ? parseDef(jsonSchemaOrGetter(), refs) : jsonSchemaOrGetter;
-  if (jsonSchema4) {
-    addMeta(def, refs, jsonSchema4);
+  const jsonSchema5 = typeof jsonSchemaOrGetter === "function" ? parseDef(jsonSchemaOrGetter(), refs) : jsonSchemaOrGetter;
+  if (jsonSchema5) {
+    addMeta(def, refs, jsonSchema5);
   }
   if (refs.postProcess) {
-    const postProcessResult = refs.postProcess(jsonSchema4, def, refs);
-    newItem.jsonSchema = jsonSchema4;
+    const postProcessResult = refs.postProcess(jsonSchema5, def, refs);
+    newItem.jsonSchema = jsonSchema5;
     return postProcessResult;
   }
-  newItem.jsonSchema = jsonSchema4;
-  return jsonSchema4;
+  newItem.jsonSchema = jsonSchema5;
+  return jsonSchema5;
 }
 var get$ref = (item, refs) => {
   switch (refs.$refStrategy) {
@@ -12147,14 +13682,14 @@ var get$ref = (item, refs) => {
     }
   }
 };
-var addMeta = (def, refs, jsonSchema4) => {
+var addMeta = (def, refs, jsonSchema5) => {
   if (def.description) {
-    jsonSchema4.description = def.description;
+    jsonSchema5.description = def.description;
     if (refs.markdownDescription) {
-      jsonSchema4.markdownDescription = def.description;
+      jsonSchema5.markdownDescription = def.description;
     }
   }
-  return jsonSchema4;
+  return jsonSchema5;
 };
 
 // ../../node_modules/.pnpm/zod-to-json-schema@3.24.6_zod@3.25.76/node_modules/zod-to-json-schema/dist/esm/zodToJsonSchema.js
@@ -12271,11 +13806,11 @@ function patchRecordSchemas(schema) {
   }
   return schema;
 }
-function zodToJsonSchema2(zodSchema4, target = "jsonSchema7", strategy = "relative") {
+function zodToJsonSchema2(zodSchema5, target = "jsonSchema7", strategy = "relative") {
   const fn = "toJSONSchema";
   if (fn in z) {
-    patchRecordSchemas(zodSchema4);
-    return z[fn](zodSchema4, {
+    patchRecordSchemas(zodSchema5);
+    return z[fn](zodSchema5, {
       unrepresentable: "any",
       override: (ctx) => {
         const def = ctx.zodSchema?._def || ctx.zodSchema?._zod?.def;
@@ -12286,7 +13821,7 @@ function zodToJsonSchema2(zodSchema4, target = "jsonSchema7", strategy = "relati
       }
     });
   } else {
-    return esm_default(zodSchema4, {
+    return esm_default(zodSchema5, {
       $refStrategy: strategy,
       target
     });
@@ -12295,11 +13830,11 @@ function zodToJsonSchema2(zodSchema4, target = "jsonSchema7", strategy = "relati
 var E_CANCELED = new Error("request for lock canceled");
 var __awaiter$2 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve3) {
-      resolve3(value);
+    return value instanceof P ? value : new P(function(resolve5) {
+      resolve5(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve3, reject) {
+  return new (P || (P = Promise))(function(resolve5, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -12315,7 +13850,7 @@ var __awaiter$2 = function(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve3(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve5(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -12330,8 +13865,8 @@ var Semaphore = class {
   acquire(weight = 1, priority = 0) {
     if (weight <= 0)
       throw new Error(`invalid weight ${weight}: must be positive`);
-    return new Promise((resolve3, reject) => {
-      const task = { resolve: resolve3, reject, weight, priority };
+    return new Promise((resolve5, reject) => {
+      const task = { resolve: resolve5, reject, weight, priority };
       const i = findIndexFromEnd(this._queue, (other) => priority <= other.priority);
       if (i === -1 && weight <= this._value) {
         this._dispatchItem(task);
@@ -12356,10 +13891,10 @@ var Semaphore = class {
     if (this._couldLockImmediately(weight, priority)) {
       return Promise.resolve();
     } else {
-      return new Promise((resolve3) => {
+      return new Promise((resolve5) => {
         if (!this._weightedWaiters[weight - 1])
           this._weightedWaiters[weight - 1] = [];
-        insertSorted(this._weightedWaiters[weight - 1], { resolve: resolve3, priority });
+        insertSorted(this._weightedWaiters[weight - 1], { resolve: resolve5, priority });
       });
     }
   }
@@ -12442,11 +13977,11 @@ function findIndexFromEnd(a, predicate) {
 }
 var __awaiter$1 = function(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve3) {
-      resolve3(value);
+    return value instanceof P ? value : new P(function(resolve5) {
+      resolve5(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve3, reject) {
+  return new (P || (P = Promise))(function(resolve5, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -12462,7 +13997,7 @@ var __awaiter$1 = function(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve3(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve5(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -12944,50 +14479,50 @@ function isValidWithSchema(schema, value) {
   return schema.safeParse(value).success;
 }
 var NotHandler = class {
-  apply(zodSchema4, schema) {
-    if (!schema.not) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (!schema.not) return zodSchema5;
     const notSchema = convertJsonSchemaToZod(schema.not);
-    return zodSchema4.refine(
+    return zodSchema5.refine(
       (value) => !isValidWithSchema(notSchema, value),
       { message: "Value must not match the 'not' schema" }
     );
   }
 };
 var UniqueItemsHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     const arraySchema = schema;
-    if (arraySchema.uniqueItems !== true) return zodSchema4;
-    return zodSchema4.refine(createUniqueItemsValidator(), {
+    if (arraySchema.uniqueItems !== true) return zodSchema5;
+    return zodSchema5.refine(createUniqueItemsValidator(), {
       message: "Array items must be unique"
     });
   }
 };
 var AllOfHandler = class {
-  apply(zodSchema4, schema) {
-    if (!schema.allOf || schema.allOf.length === 0) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (!schema.allOf || schema.allOf.length === 0) return zodSchema5;
     const allOfSchemas = schema.allOf.map((s) => convertJsonSchemaToZod(s));
     return allOfSchemas.reduce(
       (acc, s) => z$2.intersection(acc, s),
-      zodSchema4
+      zodSchema5
     );
   }
 };
 var AnyOfHandler = class {
-  apply(zodSchema4, schema) {
-    if (!schema.anyOf || schema.anyOf.length === 0) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (!schema.anyOf || schema.anyOf.length === 0) return zodSchema5;
     const anyOfSchema = schema.anyOf.length === 1 ? convertJsonSchemaToZod(schema.anyOf[0]) : z$2.union([
       convertJsonSchemaToZod(schema.anyOf[0]),
       convertJsonSchemaToZod(schema.anyOf[1]),
       ...schema.anyOf.slice(2).map((s) => convertJsonSchemaToZod(s))
     ]);
-    return z$2.intersection(zodSchema4, anyOfSchema);
+    return z$2.intersection(zodSchema5, anyOfSchema);
   }
 };
 var OneOfHandler = class {
-  apply(zodSchema4, schema) {
-    if (!schema.oneOf || schema.oneOf.length === 0) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (!schema.oneOf || schema.oneOf.length === 0) return zodSchema5;
     const oneOfSchemas = schema.oneOf.map((s) => convertJsonSchemaToZod(s));
-    return zodSchema4.refine(
+    return zodSchema5.refine(
       (value) => {
         let validCount = 0;
         for (const oneOfSchema of oneOfSchemas) {
@@ -13004,12 +14539,12 @@ var OneOfHandler = class {
   }
 };
 var PrefixItemsHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     const arraySchema = schema;
     if (arraySchema.prefixItems && Array.isArray(arraySchema.prefixItems)) {
       const prefixItems = arraySchema.prefixItems;
       const prefixSchemas = prefixItems.map((itemSchema) => convertJsonSchemaToZod(itemSchema));
-      return zodSchema4.refine(
+      return zodSchema5.refine(
         (value) => {
           if (!Array.isArray(value)) return true;
           for (let i = 0; i < Math.min(value.length, prefixSchemas.length); i++) {
@@ -13034,16 +14569,16 @@ var PrefixItemsHandler = class {
         { message: "Array does not match prefixItems schema" }
       );
     }
-    return zodSchema4;
+    return zodSchema5;
   }
 };
 var ObjectPropertiesHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     const objectSchema = schema;
     if (!objectSchema.properties && !objectSchema.required && objectSchema.additionalProperties !== false) {
-      return zodSchema4;
+      return zodSchema5;
     }
-    if (zodSchema4 instanceof z$2.ZodObject || zodSchema4 instanceof z$2.ZodRecord) {
+    if (zodSchema5 instanceof z$2.ZodObject || zodSchema5 instanceof z$2.ZodRecord) {
       const shape = {};
       if (objectSchema.properties) {
         for (const [key, propSchema] of Object.entries(objectSchema.properties)) {
@@ -13070,7 +14605,7 @@ var ObjectPropertiesHandler = class {
         return z$2.object(shape).passthrough();
       }
     }
-    return zodSchema4.refine(
+    return zodSchema5.refine(
       (value) => {
         if (typeof value !== "object" || value === null || Array.isArray(value)) {
           return true;
@@ -13112,13 +14647,13 @@ var ObjectPropertiesHandler = class {
   }
 };
 var EnumComplexHandler = class {
-  apply(zodSchema4, schema) {
-    if (!schema.enum || schema.enum.length === 0) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (!schema.enum || schema.enum.length === 0) return zodSchema5;
     const complexValues = schema.enum.filter(
       (v) => Array.isArray(v) || typeof v === "object" && v !== null
     );
-    if (complexValues.length === 0) return zodSchema4;
-    return zodSchema4.refine(
+    if (complexValues.length === 0) return zodSchema5;
+    return zodSchema5.refine(
       (value) => {
         if (typeof value !== "object" || value === null) return true;
         return complexValues.some(
@@ -13130,32 +14665,32 @@ var EnumComplexHandler = class {
   }
 };
 var ConstComplexHandler = class {
-  apply(zodSchema4, schema) {
-    if (schema.const === void 0) return zodSchema4;
+  apply(zodSchema5, schema) {
+    if (schema.const === void 0) return zodSchema5;
     const constValue = schema.const;
     if (typeof constValue !== "object" || constValue === null) {
-      return zodSchema4;
+      return zodSchema5;
     }
-    return zodSchema4.refine(
+    return zodSchema5.refine(
       (value) => deepEqual(value, constValue),
       { message: "Value must equal the const value" }
     );
   }
 };
 var MetadataHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     if (schema.description) {
-      zodSchema4 = zodSchema4.describe(schema.description);
+      zodSchema5 = zodSchema5.describe(schema.description);
     }
-    return zodSchema4;
+    return zodSchema5;
   }
 };
 var ProtoRequiredHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     var _a5;
     const objectSchema = schema;
     if (!((_a5 = objectSchema.required) == null ? void 0 : _a5.includes("__proto__")) || schema.type !== void 0) {
-      return zodSchema4;
+      return zodSchema5;
     }
     return z$2.any().refine(
       (value) => this.validateRequired(value, objectSchema.required),
@@ -13172,14 +14707,14 @@ var ProtoRequiredHandler = class {
   }
 };
 var ContainsHandler = class {
-  apply(zodSchema4, schema) {
+  apply(zodSchema5, schema) {
     var _a5;
     const arraySchema = schema;
-    if (arraySchema.contains === void 0) return zodSchema4;
+    if (arraySchema.contains === void 0) return zodSchema5;
     const containsSchema = convertJsonSchemaToZod(arraySchema.contains);
     const minContains = (_a5 = arraySchema.minContains) != null ? _a5 : 1;
     const maxContains = arraySchema.maxContains;
-    return zodSchema4.refine(
+    return zodSchema5.refine(
       (value) => {
         if (!Array.isArray(value)) {
           return true;
@@ -13288,32 +14823,32 @@ function convertJsonSchemaToZod(schema) {
       allowedSchemas.push(objectSchema);
     }
   }
-  let zodSchema4;
+  let zodSchema5;
   if (allowedSchemas.length === 0) {
-    zodSchema4 = z$2.never();
+    zodSchema5 = z$2.never();
   } else if (allowedSchemas.length === 1) {
-    zodSchema4 = allowedSchemas[0];
+    zodSchema5 = allowedSchemas[0];
   } else {
     const hasConstraints = Object.keys(schema).some(
       (key) => key !== "$schema" && key !== "title" && key !== "description"
     );
     if (!hasConstraints) {
-      zodSchema4 = z$2.any();
+      zodSchema5 = z$2.any();
     } else {
-      zodSchema4 = z$2.union(allowedSchemas);
+      zodSchema5 = z$2.union(allowedSchemas);
     }
   }
   for (const handler of refinementHandlers) {
-    zodSchema4 = handler.apply(zodSchema4, schema);
+    zodSchema5 = handler.apply(zodSchema5, schema);
   }
-  return zodSchema4;
+  return zodSchema5;
 }
 function convertJsonSchemaToZod2(schema) {
-  function addMetadata(zodSchema4, jsonSchema4) {
-    if (jsonSchema4.description) {
-      zodSchema4 = zodSchema4.describe(jsonSchema4.description);
+  function addMetadata(zodSchema5, jsonSchema5) {
+    if (jsonSchema5.description) {
+      zodSchema5 = zodSchema5.describe(jsonSchema5.description);
     }
-    return zodSchema4;
+    return zodSchema5;
   }
   if (schema.const !== void 0) {
     if (typeof schema.const === "string") {
@@ -13419,13 +14954,13 @@ function convertJsonSchemaToZod2(schema) {
               shape[key] = shape[key].optional();
             }
           }
-          let zodSchema4;
+          let zodSchema5;
           if (schema.additionalProperties !== false) {
-            zodSchema4 = z.object(shape).passthrough();
+            zodSchema5 = z.object(shape).passthrough();
           } else {
-            zodSchema4 = z.object(shape);
+            zodSchema5 = z.object(shape);
           }
-          return addMetadata(zodSchema4, schema);
+          return addMetadata(zodSchema5, schema);
         }
         return addMetadata(z.object({}), schema);
       case "array": {
@@ -13513,7 +15048,7 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __commonJS4 = (cb, mod) => function __require2() {
+var __commonJS5 = (cb, mod) => function __require2() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 var __copyProps = (to, from, except, desc) => {
@@ -13524,7 +15059,7 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM4 = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+var __toESM5 = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
   // If the importer is in node compatibility mode or this is not an ESM
   // file that has been converted to a CommonJS file using a Babel-
   // compatible transform (i.e. "__esModule" has not been set), then set
@@ -13532,12 +15067,12 @@ var __toESM4 = (mod, isNodeMode, target) => (target = mod != null ? __create(__g
   __defProp(target, "default", { value: mod, enumerable: true }),
   mod
 ));
-var require_secure_json_parse = __commonJS4({
+var require_secure_json_parse = __commonJS5({
   "../../../node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
     var hasBuffer = typeof Buffer !== "undefined";
-    var suspectProtoRx3 = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
-    var suspectConstructorRx3 = /"(?:c|\\u0063)(?:o|\\u006[Ff])(?:n|\\u006[Ee])(?:s|\\u0073)(?:t|\\u0074)(?:r|\\u0072)(?:u|\\u0075)(?:c|\\u0063)(?:t|\\u0074)(?:o|\\u006[Ff])(?:r|\\u0072)"\s*:/;
-    function _parse3(text23, reviver, options) {
+    var suspectProtoRx4 = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
+    var suspectConstructorRx4 = /"(?:c|\\u0063)(?:o|\\u006[Ff])(?:n|\\u006[Ee])(?:s|\\u0073)(?:t|\\u0074)(?:r|\\u0072)(?:u|\\u0075)(?:c|\\u0063)(?:t|\\u0074)(?:o|\\u006[Ff])(?:r|\\u0072)"\s*:/;
+    function _parse4(text23, reviver, options) {
       if (options == null) {
         if (reviver !== null && typeof reviver === "object") {
           options = reviver;
@@ -13560,21 +15095,21 @@ var require_secure_json_parse = __commonJS4({
         return obj;
       }
       if (protoAction !== "ignore" && constructorAction !== "ignore") {
-        if (suspectProtoRx3.test(text23) === false && suspectConstructorRx3.test(text23) === false) {
+        if (suspectProtoRx4.test(text23) === false && suspectConstructorRx4.test(text23) === false) {
           return obj;
         }
       } else if (protoAction !== "ignore" && constructorAction === "ignore") {
-        if (suspectProtoRx3.test(text23) === false) {
+        if (suspectProtoRx4.test(text23) === false) {
           return obj;
         }
       } else {
-        if (suspectConstructorRx3.test(text23) === false) {
+        if (suspectConstructorRx4.test(text23) === false) {
           return obj;
         }
       }
-      return filter3(obj, { protoAction, constructorAction, safe: options && options.safe });
+      return filter4(obj, { protoAction, constructorAction, safe: options && options.safe });
     }
-    function filter3(obj, { protoAction = "error", constructorAction = "error", safe } = {}) {
+    function filter4(obj, { protoAction = "error", constructorAction = "error", safe } = {}) {
       let next = [obj];
       while (next.length) {
         const nodes = next;
@@ -13610,7 +15145,7 @@ var require_secure_json_parse = __commonJS4({
       const stackTraceLimit = Error.stackTraceLimit;
       Error.stackTraceLimit = 0;
       try {
-        return _parse3(text23, reviver, options);
+        return _parse4(text23, reviver, options);
       } finally {
         Error.stackTraceLimit = stackTraceLimit;
       }
@@ -13619,7 +15154,7 @@ var require_secure_json_parse = __commonJS4({
       const stackTraceLimit = Error.stackTraceLimit;
       Error.stackTraceLimit = 0;
       try {
-        return _parse3(text23, reviver, { safe: true });
+        return _parse4(text23, reviver, { safe: true });
       } catch (_e) {
         return null;
       } finally {
@@ -13630,7 +15165,7 @@ var require_secure_json_parse = __commonJS4({
     module.exports.default = parse;
     module.exports.parse = parse;
     module.exports.safeParse = safeParse;
-    module.exports.scan = filter3;
+    module.exports.scan = filter4;
   }
 });
 var marker = "vercel.ai.error";
@@ -13768,7 +15303,7 @@ var customAlphabet = (alphabet, defaultSize = 21) => {
     return id;
   };
 };
-var import_secure_json_parse = __toESM4(require_secure_json_parse());
+var import_secure_json_parse = __toESM5(require_secure_json_parse());
 function convertAsyncIteratorToReadableStream(iterator) {
   return new ReadableStream({
     /**
@@ -15793,12 +17328,12 @@ function registerGlobal(type, instance, diag, allowOverride) {
   return true;
 }
 function getGlobal(type) {
-  var _a172, _b9;
+  var _a172, _b10;
   var globalVersion = (_a172 = _global[GLOBAL_OPENTELEMETRY_API_KEY]) === null || _a172 === void 0 ? void 0 : _a172.version;
   if (!globalVersion || !isCompatible(globalVersion)) {
     return;
   }
-  return (_b9 = _global[GLOBAL_OPENTELEMETRY_API_KEY]) === null || _b9 === void 0 ? void 0 : _b9[type];
+  return (_b10 = _global[GLOBAL_OPENTELEMETRY_API_KEY]) === null || _b10 === void 0 ? void 0 : _b10[type];
 }
 function unregisterGlobal(type, diag) {
   diag.debug("@opentelemetry/api: Unregistering a global for " + type + " v" + VERSION + ".");
@@ -15963,7 +17498,7 @@ var DiagAPI = (
       }
       var self = this;
       var setLogger = function(logger, optionsOrLogLevel) {
-        var _a172, _b9, _c;
+        var _a172, _b10, _c;
         if (optionsOrLogLevel === void 0) {
           optionsOrLogLevel = { logLevel: DiagLogLevel.INFO };
         }
@@ -15978,7 +17513,7 @@ var DiagAPI = (
           };
         }
         var oldLogger = getGlobal("diag");
-        var newLogger = createLogLevelDiagLogger((_b9 = optionsOrLogLevel.logLevel) !== null && _b9 !== void 0 ? _b9 : DiagLogLevel.INFO, logger);
+        var newLogger = createLogLevelDiagLogger((_b10 = optionsOrLogLevel.logLevel) !== null && _b10 !== void 0 ? _b10 : DiagLogLevel.INFO, logger);
         if (oldLogger && !optionsOrLogLevel.suppressOverrideMessage) {
           var stack = (_c = new Error().stack) !== null && _c !== void 0 ? _c : "<failed to generate stacktrace>";
           oldLogger.warn("Current logger will be overwritten from " + stack);
@@ -16455,8 +17990,8 @@ var dataContentSchema = z.union([
   z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
-      var _a172, _b9;
-      return (_b9 = (_a172 = globalThis.Buffer) == null ? void 0 : _a172.isBuffer(value)) != null ? _b9 : false;
+      var _a172, _b10;
+      return (_b10 = (_a172 = globalThis.Buffer) == null ? void 0 : _a172.isBuffer(value)) != null ? _b10 : false;
     },
     { message: "Must be a Buffer" }
   )
@@ -17066,7 +18601,7 @@ function trimStartOfStream() {
   };
 }
 function isZodType(value) {
-  return typeof value === "object" && value !== null && "_def" in value && "parse" in value && typeof value.parse === "function" && "safeParse" in value && typeof value.safeParse === "function";
+  return typeof value === "object" && value !== null && ("_def" in value || "_zod" in value) && "parse" in value && typeof value.parse === "function" && "safeParse" in value && typeof value.safeParse === "function";
 }
 function convertSchemaToZod(schema) {
   if (isZodType(schema)) {
@@ -17093,7 +18628,7 @@ var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames2 = Object.getOwnPropertyNames;
 var __getProtoOf2 = Object.getPrototypeOf;
 var __hasOwnProp2 = Object.prototype.hasOwnProperty;
-var __commonJS22 = (cb, mod) => function __require2() {
+var __commonJS32 = (cb, mod) => function __require2() {
   return mod || (0, cb[__getOwnPropNames2(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 var __copyProps2 = (to, from, except, desc) => {
@@ -17104,7 +18639,7 @@ var __copyProps2 = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM22 = (mod, isNodeMode, target) => (target = mod != null ? __create2(__getProtoOf2(mod)) : {}, __copyProps2(
+var __toESM32 = (mod, isNodeMode, target) => (target = mod != null ? __create2(__getProtoOf2(mod)) : {}, __copyProps2(
   // If the importer is in node compatibility mode or this is not an ESM
   // file that has been converted to a CommonJS file using a Babel-
   // compatible transform (i.e. "__esModule" has not been set), then set
@@ -17112,25 +18647,25 @@ var __toESM22 = (mod, isNodeMode, target) => (target = mod != null ? __create2(_
   __defProp3(target, "default", { value: mod, enumerable: true }),
   mod
 ));
-var require_secure_json_parse2 = __commonJS22({
+var require_secure_json_parse2 = __commonJS32({
   "../../../node_modules/.pnpm/secure-json-parse@2.7.0/node_modules/secure-json-parse/index.js"(exports, module) {
     var hasBuffer = typeof Buffer !== "undefined";
-    var suspectProtoRx22 = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
-    var suspectConstructorRx22 = /"(?:c|\\u0063)(?:o|\\u006[Ff])(?:n|\\u006[Ee])(?:s|\\u0073)(?:t|\\u0074)(?:r|\\u0072)(?:u|\\u0075)(?:c|\\u0063)(?:t|\\u0074)(?:o|\\u006[Ff])(?:r|\\u0072)"\s*:/;
-    function _parse22(text32, reviver, options) {
+    var suspectProtoRx32 = /"(?:_|\\u005[Ff])(?:_|\\u005[Ff])(?:p|\\u0070)(?:r|\\u0072)(?:o|\\u006[Ff])(?:t|\\u0074)(?:o|\\u006[Ff])(?:_|\\u005[Ff])(?:_|\\u005[Ff])"\s*:/;
+    var suspectConstructorRx32 = /"(?:c|\\u0063)(?:o|\\u006[Ff])(?:n|\\u006[Ee])(?:s|\\u0073)(?:t|\\u0074)(?:r|\\u0072)(?:u|\\u0075)(?:c|\\u0063)(?:t|\\u0074)(?:o|\\u006[Ff])(?:r|\\u0072)"\s*:/;
+    function _parse32(text42, reviver, options) {
       if (options == null) {
         if (reviver !== null && typeof reviver === "object") {
           options = reviver;
           reviver = void 0;
         }
       }
-      if (hasBuffer && Buffer.isBuffer(text32)) {
-        text32 = text32.toString();
+      if (hasBuffer && Buffer.isBuffer(text42)) {
+        text42 = text42.toString();
       }
-      if (text32 && text32.charCodeAt(0) === 65279) {
-        text32 = text32.slice(1);
+      if (text42 && text42.charCodeAt(0) === 65279) {
+        text42 = text42.slice(1);
       }
-      const obj = JSON.parse(text32, reviver);
+      const obj = JSON.parse(text42, reviver);
       if (obj === null || typeof obj !== "object") {
         return obj;
       }
@@ -17140,21 +18675,21 @@ var require_secure_json_parse2 = __commonJS22({
         return obj;
       }
       if (protoAction !== "ignore" && constructorAction !== "ignore") {
-        if (suspectProtoRx22.test(text32) === false && suspectConstructorRx22.test(text32) === false) {
+        if (suspectProtoRx32.test(text42) === false && suspectConstructorRx32.test(text42) === false) {
           return obj;
         }
       } else if (protoAction !== "ignore" && constructorAction === "ignore") {
-        if (suspectProtoRx22.test(text32) === false) {
+        if (suspectProtoRx32.test(text42) === false) {
           return obj;
         }
       } else {
-        if (suspectConstructorRx22.test(text32) === false) {
+        if (suspectConstructorRx32.test(text42) === false) {
           return obj;
         }
       }
-      return filter22(obj, { protoAction, constructorAction, safe: options && options.safe });
+      return filter32(obj, { protoAction, constructorAction, safe: options && options.safe });
     }
-    function filter22(obj, { protoAction = "error", constructorAction = "error", safe } = {}) {
+    function filter32(obj, { protoAction = "error", constructorAction = "error", safe } = {}) {
       let next = [obj];
       while (next.length) {
         const nodes = next;
@@ -17186,20 +18721,20 @@ var require_secure_json_parse2 = __commonJS22({
       }
       return obj;
     }
-    function parse(text32, reviver, options) {
+    function parse(text42, reviver, options) {
       const stackTraceLimit = Error.stackTraceLimit;
       Error.stackTraceLimit = 0;
       try {
-        return _parse22(text32, reviver, options);
+        return _parse32(text42, reviver, options);
       } finally {
         Error.stackTraceLimit = stackTraceLimit;
       }
     }
-    function safeParse(text32, reviver) {
+    function safeParse(text42, reviver) {
       const stackTraceLimit = Error.stackTraceLimit;
       Error.stackTraceLimit = 0;
       try {
-        return _parse22(text32, reviver, { safe: true });
+        return _parse32(text42, reviver, { safe: true });
       } catch (_e) {
         return null;
       } finally {
@@ -17210,7 +18745,7 @@ var require_secure_json_parse2 = __commonJS22({
     module.exports.default = parse;
     module.exports.parse = parse;
     module.exports.safeParse = safeParse;
-    module.exports.scan = filter22;
+    module.exports.scan = filter32;
   }
 });
 var marker2 = "vercel.ai.error";
@@ -17226,13 +18761,13 @@ var _AISDKError3 = class _AISDKError22 extends Error {
    * @param {unknown} [params.cause] - The underlying cause of the error.
    */
   constructor({
-    name: name143,
+    name: name144,
     message,
     cause
   }) {
     super(message);
     this[_a2] = true;
-    this.name = name143;
+    this.name = name144;
     this.cause = cause;
   }
   /**
@@ -17243,8 +18778,8 @@ var _AISDKError3 = class _AISDKError22 extends Error {
   static isInstance(error) {
     return _AISDKError22.hasMarker(error, marker2);
   }
-  static hasMarker(error, marker153) {
-    const markerSymbol = Symbol.for(marker153);
+  static hasMarker(error, marker154) {
+    const markerSymbol = Symbol.for(marker154);
     return error != null && typeof error === "object" && markerSymbol in error && typeof error[markerSymbol] === "boolean" && error[markerSymbol] === true;
   }
 };
@@ -17321,15 +18856,15 @@ var marker72 = `vercel.ai.error.${name62}`;
 var symbol72 = Symbol.for(marker72);
 var _a72;
 var JSONParseError2 = class extends AISDKError2 {
-  constructor({ text: text32, cause }) {
+  constructor({ text: text42, cause }) {
     super({
       name: name62,
-      message: `JSON parsing failed: Text: ${text32}.
+      message: `JSON parsing failed: Text: ${text42}.
 Error message: ${getErrorMessage2(cause)}`,
       cause
     });
     this[_a72] = true;
-    this.text = text32;
+    this.text = text42;
   }
   static isInstance(error) {
     return AISDKError2.hasMarker(error, marker72);
@@ -17383,7 +18918,7 @@ var customAlphabet2 = (alphabet, defaultSize = 21) => {
     return id;
   };
 };
-var import_secure_json_parse2 = __toESM22(require_secure_json_parse2());
+var import_secure_json_parse2 = __toESM32(require_secure_json_parse2());
 function convertAsyncIteratorToReadableStream2(iterator) {
   return new ReadableStream({
     /**
@@ -17458,9 +18993,9 @@ function isValidator2(value) {
 function asValidator2(value) {
   return isValidator2(value) ? value : zodValidator2(value);
 }
-function zodValidator2(zodSchema32) {
+function zodValidator2(zodSchema42) {
   return validator2((value) => {
-    const result = zodSchema32.safeParse(value);
+    const result = zodSchema42.safeParse(value);
     return result.success ? { success: true, value: result.data } : { success: false, error: result.error };
   });
 }
@@ -17489,11 +19024,11 @@ function safeValidateTypes2({
   }
 }
 function safeParseJSON2({
-  text: text32,
+  text: text42,
   schema
 }) {
   try {
-    const value = import_secure_json_parse2.default.parse(text32);
+    const value = import_secure_json_parse2.default.parse(text42);
     if (schema == null) {
       return { success: true, value, rawValue: value };
     }
@@ -17502,7 +19037,7 @@ function safeParseJSON2({
   } catch (error) {
     return {
       success: false,
-      error: JSONParseError2.isInstance(error) ? error : new JSONParseError2({ text: text32, cause: error })
+      error: JSONParseError2.isInstance(error) ? error : new JSONParseError2({ text: text42, cause: error })
     };
   }
 }
@@ -19426,12 +20961,12 @@ function registerGlobal2(type, instance, diag, allowOverride) {
   return true;
 }
 function getGlobal2(type) {
-  var _a172, _b82;
+  var _a172, _b17;
   var globalVersion = (_a172 = _global2[GLOBAL_OPENTELEMETRY_API_KEY2]) === null || _a172 === void 0 ? void 0 : _a172.version;
   if (!globalVersion || !isCompatible2(globalVersion)) {
     return;
   }
-  return (_b82 = _global2[GLOBAL_OPENTELEMETRY_API_KEY2]) === null || _b82 === void 0 ? void 0 : _b82[type];
+  return (_b17 = _global2[GLOBAL_OPENTELEMETRY_API_KEY2]) === null || _b17 === void 0 ? void 0 : _b17[type];
 }
 function unregisterGlobal2(type, diag) {
   diag.debug("@opentelemetry/api: Unregistering a global for " + type + " v" + VERSION2 + ".");
@@ -19596,7 +21131,7 @@ var DiagAPI2 = (
       }
       var self = this;
       var setLogger = function(logger, optionsOrLogLevel) {
-        var _a172, _b82, _c;
+        var _a172, _b17, _c;
         if (optionsOrLogLevel === void 0) {
           optionsOrLogLevel = { logLevel: DiagLogLevel2.INFO };
         }
@@ -19611,7 +21146,7 @@ var DiagAPI2 = (
           };
         }
         var oldLogger = getGlobal2("diag");
-        var newLogger = createLogLevelDiagLogger2((_b82 = optionsOrLogLevel.logLevel) !== null && _b82 !== void 0 ? _b82 : DiagLogLevel2.INFO, logger);
+        var newLogger = createLogLevelDiagLogger2((_b17 = optionsOrLogLevel.logLevel) !== null && _b17 !== void 0 ? _b17 : DiagLogLevel2.INFO, logger);
         if (oldLogger && !optionsOrLogLevel.suppressOverrideMessage) {
           var stack = (_c = new Error().stack) !== null && _c !== void 0 ? _c : "<failed to generate stacktrace>";
           oldLogger.warn("Current logger will be overwritten from " + stack);
@@ -20364,13 +21899,13 @@ function selectTelemetryAttributes({
     return { ...attributes2, [key]: value };
   }, {});
 }
-function splitArray(array, chunkSize) {
+function splitArray(array2, chunkSize) {
   if (chunkSize <= 0) {
     throw new Error("chunkSize must be greater than 0");
   }
   const result = [];
-  for (let i = 0; i < array.length; i += chunkSize) {
-    result.push(array.slice(i, i + chunkSize));
+  for (let i = 0; i < array2.length; i += chunkSize) {
+    result.push(array2.slice(i, i + chunkSize));
   }
   return result;
 }
@@ -20572,8 +22107,8 @@ var dataContentSchema2 = z.union([
   z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
-      var _a172, _b82;
-      return (_b82 = (_a172 = globalThis.Buffer) == null ? void 0 : _a172.isBuffer(value)) != null ? _b82 : false;
+      var _a172, _b17;
+      return (_b17 = (_a172 = globalThis.Buffer) == null ? void 0 : _a172.isBuffer(value)) != null ? _b17 : false;
     },
     { message: "Must be a Buffer" }
   )
@@ -21195,13 +22730,13 @@ var _AISDKError32 = class _AISDKError222 extends Error {
    * @param {unknown} [params.cause] - The underlying cause of the error.
    */
   constructor({
-    name: name143,
+    name: name144,
     message,
     cause
   }) {
     super(message);
     this[_a17] = true;
-    this.name = name143;
+    this.name = name144;
     this.cause = cause;
   }
   /**
@@ -21212,8 +22747,8 @@ var _AISDKError32 = class _AISDKError222 extends Error {
   static isInstance(error) {
     return _AISDKError222.hasMarker(error, marker17);
   }
-  static hasMarker(error, marker153) {
-    const markerSymbol = Symbol.for(marker153);
+  static hasMarker(error, marker154) {
+    const markerSymbol = Symbol.for(marker154);
     return error != null && typeof error === "object" && markerSymbol in error && typeof error[markerSymbol] === "boolean" && error[markerSymbol] === true;
   }
 };
@@ -21305,15 +22840,15 @@ var marker73 = `vercel.ai.error.${name63}`;
 var symbol73 = Symbol.for(marker73);
 var _a73;
 var JSONParseError22 = class extends AISDKError22 {
-  constructor({ text: text32, cause }) {
+  constructor({ text: text42, cause }) {
     super({
       name: name63,
-      message: `JSON parsing failed: Text: ${text32}.
+      message: `JSON parsing failed: Text: ${text42}.
 Error message: ${getErrorMessage3(cause)}`,
       cause
     });
     this[_a73] = true;
-    this.text = text32;
+    this.text = text42;
   }
   static isInstance(error) {
     return AISDKError22.hasMarker(error, marker73);
@@ -21587,14 +23122,14 @@ function handleFetchError$1({
   return error;
 }
 function getRuntimeEnvironmentUserAgent(globalThisAny = globalThis) {
-  var _a153, _b82, _c;
+  var _a154, _b17, _c;
   if (globalThisAny.window) {
     return `runtime/browser`;
   }
-  if ((_a153 = globalThisAny.navigator) == null ? void 0 : _a153.userAgent) {
+  if ((_a154 = globalThisAny.navigator) == null ? void 0 : _a154.userAgent) {
     return `runtime/${globalThisAny.navigator.userAgent.toLowerCase()}`;
   }
-  if ((_c = (_b82 = globalThisAny.process) == null ? void 0 : _b82.versions) == null ? void 0 : _c.node) {
+  if ((_c = (_b17 = globalThisAny.process) == null ? void 0 : _b17.versions) == null ? void 0 : _c.node) {
     return `runtime/node.js/${globalThisAny.process.version.substring(0)}`;
   }
   if (globalThisAny.EdgeRuntime) {
@@ -21719,12 +23254,12 @@ function loadOptionalSetting({
 }
 var suspectProtoRx = /"__proto__"\s*:/;
 var suspectConstructorRx = /"constructor"\s*:/;
-function _parse(text32) {
-  const obj = JSON.parse(text32);
+function _parse(text42) {
+  const obj = JSON.parse(text42);
   if (obj === null || typeof obj !== "object") {
     return obj;
   }
-  if (suspectProtoRx.test(text32) === false && suspectConstructorRx.test(text32) === false) {
+  if (suspectProtoRx.test(text42) === false && suspectConstructorRx.test(text42) === false) {
     return obj;
   }
   return filter(obj);
@@ -21751,15 +23286,15 @@ function filter(obj) {
   }
   return obj;
 }
-function secureJsonParse(text32) {
+function secureJsonParse(text42) {
   const { stackTraceLimit } = Error;
   try {
     Error.stackTraceLimit = 0;
   } catch (e2) {
-    return _parse(text32);
+    return _parse(text42);
   }
   try {
-    return _parse(text32);
+    return _parse(text42);
   } finally {
     Error.stackTraceLimit = stackTraceLimit;
   }
@@ -21783,9 +23318,9 @@ function lazyValidator(createValidator) {
 function asValidator22(value) {
   return isValidator22(value) ? value : typeof value === "function" ? value() : standardSchemaValidator(value);
 }
-function standardSchemaValidator(standardSchema) {
+function standardSchemaValidator(standardSchema2) {
   return validator22(async (value) => {
-    const result = await standardSchema["~standard"].validate(value);
+    const result = await standardSchema2["~standard"].validate(value);
     return result.issues == null ? { success: true, value: result.value } : {
       success: false,
       error: new TypeValidationError22({
@@ -21832,11 +23367,11 @@ async function safeValidateTypes22({
   }
 }
 async function parseJSON({
-  text: text32,
+  text: text42,
   schema
 }) {
   try {
-    const value = secureJsonParse(text32);
+    const value = secureJsonParse(text42);
     if (schema == null) {
       return value;
     }
@@ -21845,15 +23380,15 @@ async function parseJSON({
     if (JSONParseError22.isInstance(error) || TypeValidationError22.isInstance(error)) {
       throw error;
     }
-    throw new JSONParseError22({ text: text32, cause: error });
+    throw new JSONParseError22({ text: text42, cause: error });
   }
 }
 async function safeParseJSON22({
-  text: text32,
+  text: text42,
   schema
 }) {
   try {
-    const value = secureJsonParse(text32);
+    const value = secureJsonParse(text42);
     if (schema == null) {
       return { success: true, value, rawValue: value };
     }
@@ -21861,7 +23396,7 @@ async function safeParseJSON22({
   } catch (error) {
     return {
       success: false,
-      error: JSONParseError22.isInstance(error) ? error : new JSONParseError22({ text: text32, cause: error }),
+      error: JSONParseError22.isInstance(error) ? error : new JSONParseError22({ text: text42, cause: error }),
       rawValue: void 0
     };
   }
@@ -22113,11 +23648,11 @@ function parseAnyDef22() {
   return {};
 }
 function parseArrayDef22(def, refs) {
-  var _a153, _b82, _c;
+  var _a154, _b17, _c;
   const res = {
     type: "array"
   };
-  if (((_a153 = def.type) == null ? void 0 : _a153._def) && ((_c = (_b82 = def.type) == null ? void 0 : _b82._def) == null ? void 0 : _c.typeName) !== ZodFirstPartyTypeKind$1.ZodAny) {
+  if (((_a154 = def.type) == null ? void 0 : _a154._def) && ((_c = (_b17 = def.type) == null ? void 0 : _b17._def) == null ? void 0 : _c.typeName) !== ZodFirstPartyTypeKind$1.ZodAny) {
     res.items = parseDef22(def.type._def, {
       ...refs,
       currentPath: [...refs.currentPath, "items"]
@@ -22476,8 +24011,8 @@ function escapeNonAlphaNumeric22(source) {
   return result;
 }
 function addFormat22(schema, value, message, refs) {
-  var _a153;
-  if (schema.format || ((_a153 = schema.anyOf) == null ? void 0 : _a153.some((x) => x.format))) {
+  var _a154;
+  if (schema.format || ((_a154 = schema.anyOf) == null ? void 0 : _a154.some((x) => x.format))) {
     if (!schema.anyOf) {
       schema.anyOf = [];
     }
@@ -22496,8 +24031,8 @@ function addFormat22(schema, value, message, refs) {
   }
 }
 function addPattern22(schema, regex, message, refs) {
-  var _a153;
-  if (schema.pattern || ((_a153 = schema.allOf) == null ? void 0 : _a153.some((x) => x.pattern))) {
+  var _a154;
+  if (schema.pattern || ((_a154 = schema.allOf) == null ? void 0 : _a154.some((x) => x.pattern))) {
     if (!schema.allOf) {
       schema.allOf = [];
     }
@@ -22516,7 +24051,7 @@ function addPattern22(schema, regex, message, refs) {
   }
 }
 function stringifyRegExpWithFlags22(regex, refs) {
-  var _a153;
+  var _a154;
   if (!refs.applyRegexFlags || !regex.flags) {
     return regex.source;
   }
@@ -22546,7 +24081,7 @@ function stringifyRegExpWithFlags22(regex, refs) {
             pattern += source[i];
             pattern += `${source[i - 2]}-${source[i]}`.toUpperCase();
             inCharRange = false;
-          } else if (source[i + 1] === "-" && ((_a153 = source[i + 2]) == null ? void 0 : _a153.match(/[a-z]/))) {
+          } else if (source[i + 1] === "-" && ((_a154 = source[i + 2]) == null ? void 0 : _a154.match(/[a-z]/))) {
             pattern += source[i];
             inCharRange = true;
           } else {
@@ -22588,15 +24123,15 @@ function stringifyRegExpWithFlags22(regex, refs) {
   return pattern;
 }
 function parseRecordDef22(def, refs) {
-  var _a153, _b82, _c, _d, _e, _f;
+  var _a154, _b17, _c, _d, _e, _f;
   const schema = {
     type: "object",
-    additionalProperties: (_a153 = parseDef22(def.valueType._def, {
+    additionalProperties: (_a154 = parseDef22(def.valueType._def, {
       ...refs,
       currentPath: [...refs.currentPath, "additionalProperties"]
-    })) != null ? _a153 : refs.allowedAdditionalProperties
+    })) != null ? _a154 : refs.allowedAdditionalProperties
   };
-  if (((_b82 = def.keyType) == null ? void 0 : _b82._def.typeName) === ZodFirstPartyTypeKind$1.ZodString && ((_c = def.keyType._def.checks) == null ? void 0 : _c.length)) {
+  if (((_b17 = def.keyType) == null ? void 0 : _b17._def.typeName) === ZodFirstPartyTypeKind$1.ZodString && ((_c = def.keyType._def.checks) == null ? void 0 : _c.length)) {
     const { type, ...keyType } = parseStringDef22(def.keyType._def, refs);
     return {
       ...schema,
@@ -22645,11 +24180,11 @@ function parseMapDef22(def, refs) {
   };
 }
 function parseNativeEnumDef22(def) {
-  const object32 = def.values;
+  const object42 = def.values;
   const actualKeys = Object.keys(def.values).filter((key) => {
-    return typeof object32[object32[key]] !== "number";
+    return typeof object42[object42[key]] !== "number";
   });
-  const actualValues = actualKeys.map((key) => object32[key]);
+  const actualValues = actualKeys.map((key) => object42[key]);
   const parsedTypes = Array.from(
     new Set(actualValues.map((values) => typeof values))
   );
@@ -22851,8 +24386,8 @@ function safeIsOptional22(schema) {
   }
 }
 var parseOptionalDef22 = (def, refs) => {
-  var _a153;
-  if (refs.currentPath.toString() === ((_a153 = refs.propertyPath) == null ? void 0 : _a153.toString())) {
+  var _a154;
+  if (refs.currentPath.toString() === ((_a154 = refs.propertyPath) == null ? void 0 : _a154.toString())) {
     return parseDef22(def.innerType._def, refs);
   }
   const innerSchema = parseDef22(def.innerType._def, {
@@ -23022,10 +24557,10 @@ var selectParser22 = (def, typeName, refs) => {
   }
 };
 function parseDef22(def, refs, forceResolution = false) {
-  var _a153;
+  var _a154;
   const seenItem = refs.seen.get(def);
   if (refs.override) {
-    const overrideResult = (_a153 = refs.override) == null ? void 0 : _a153.call(
+    const overrideResult = (_a154 = refs.override) == null ? void 0 : _a154.call(
       refs,
       def,
       refs,
@@ -23091,11 +24626,11 @@ var getRefs22 = (options) => {
     currentPath,
     propertyPath: void 0,
     seen: new Map(
-      Object.entries(_options.definitions).map(([name143, def]) => [
+      Object.entries(_options.definitions).map(([name144, def]) => [
         def._def,
         {
           def: def._def,
-          path: [..._options.basePath, _options.definitionPath, name143],
+          path: [..._options.basePath, _options.definitionPath, name144],
           // Resolution of references will be forced even though seen, so it's ok that the schema is undefined here for now.
           jsonSchema: void 0
         }
@@ -23104,50 +24639,50 @@ var getRefs22 = (options) => {
   };
 };
 var zodToJsonSchema23 = (schema, options) => {
-  var _a153;
+  var _a154;
   const refs = getRefs22(options);
   let definitions = typeof options === "object" && options.definitions ? Object.entries(options.definitions).reduce(
-    (acc, [name2232, schema2]) => {
-      var _a2232;
+    (acc, [name224, schema2]) => {
+      var _a224;
       return {
         ...acc,
-        [name2232]: (_a2232 = parseDef22(
+        [name224]: (_a224 = parseDef22(
           schema2._def,
           {
             ...refs,
-            currentPath: [...refs.basePath, refs.definitionPath, name2232]
+            currentPath: [...refs.basePath, refs.definitionPath, name224]
           },
           true
-        )) != null ? _a2232 : parseAnyDef22()
+        )) != null ? _a224 : parseAnyDef22()
       };
     },
     {}
   ) : void 0;
-  const name143 = typeof options === "string" ? options : (options == null ? void 0 : options.nameStrategy) === "title" ? void 0 : options == null ? void 0 : options.name;
-  const main = (_a153 = parseDef22(
+  const name144 = typeof options === "string" ? options : (options == null ? void 0 : options.nameStrategy) === "title" ? void 0 : options == null ? void 0 : options.name;
+  const main = (_a154 = parseDef22(
     schema._def,
-    name143 === void 0 ? refs : {
+    name144 === void 0 ? refs : {
       ...refs,
-      currentPath: [...refs.basePath, refs.definitionPath, name143]
+      currentPath: [...refs.basePath, refs.definitionPath, name144]
     },
     false
-  )) != null ? _a153 : parseAnyDef22();
+  )) != null ? _a154 : parseAnyDef22();
   const title = typeof options === "object" && options.name !== void 0 && options.nameStrategy === "title" ? options.name : void 0;
   if (title !== void 0) {
     main.title = title;
   }
-  const combined = name143 === void 0 ? definitions ? {
+  const combined = name144 === void 0 ? definitions ? {
     ...main,
     [refs.definitionPath]: definitions
   } : main : {
     $ref: [
       ...refs.$refStrategy === "relative" ? [] : refs.basePath,
       refs.definitionPath,
-      name143
+      name144
     ].join("/"),
     [refs.definitionPath]: {
       ...definitions,
-      [name143]: main
+      [name144]: main
     }
   };
   combined.$schema = "http://json-schema.org/draft-07/schema#";
@@ -23155,8 +24690,8 @@ var zodToJsonSchema23 = (schema, options) => {
 };
 var zod_to_json_schema_default = zodToJsonSchema23;
 function zod3Schema(zodSchema222, options) {
-  var _a153;
-  const useReferences = (_a153 = void 0) != null ? _a153 : false;
+  var _a154;
+  const useReferences = (_a154 = void 0) != null ? _a154 : false;
   return jsonSchema22(
     // defer json schema creation to avoid unnecessary computation when only validation is needed
     () => zod_to_json_schema_default(zodSchema222, {
@@ -23171,8 +24706,8 @@ function zod3Schema(zodSchema222, options) {
   );
 }
 function zod4Schema(zodSchema222, options) {
-  var _a153;
-  const useReferences = (_a153 = void 0) != null ? _a153 : false;
+  var _a154;
+  const useReferences = (_a154 = void 0) != null ? _a154 : false;
   return jsonSchema22(
     // defer json schema creation to avoid unnecessary computation when only validation is needed
     () => z42.toJSONSchema(zodSchema222, {
@@ -23297,8 +24832,8 @@ var require_get_vercel_oidc_token = __commonJS({
       }
       try {
         const [{ getTokenPayload, isExpired }, { refreshToken }] = await Promise.all([
-          await import('./token-util-NEHG7TUY-DJYRKLRD-BSQMRUEW.mjs'),
-          await import('./token-6GSAFR2W-KVDFAJ2M-LNX5VF3I.mjs')
+          await import('./token-util-NEHG7TUY-TIJ3LMSH-SGVKOKXF.mjs'),
+          await import('./token-6GSAFR2W-VLY2XUPA-NCSASMWN.mjs')
         ]);
         if (!token || isExpired(getTokenPayload(token))) {
           await refreshToken();
@@ -24071,12 +25606,12 @@ async function getVercelRequestId() {
 var VERSION3 = "2.0.15";
 var AI_GATEWAY_PROTOCOL_VERSION = "0.0.1";
 function createGatewayProvider(options = {}) {
-  var _a832, _b82;
+  var _a832, _b83;
   let pendingMetadata = null;
   let metadataCache = null;
   const cacheRefreshMillis = (_a832 = options.metadataCacheRefreshMillis) != null ? _a832 : 1e3 * 60 * 5;
   let lastFetchTime = 0;
-  const baseURL = (_b82 = withoutTrailingSlash(options.baseURL)) != null ? _b82 : "https://ai-gateway.vercel.sh/v1/ai";
+  const baseURL = (_b83 = withoutTrailingSlash(options.baseURL)) != null ? _b83 : "https://ai-gateway.vercel.sh/v1/ai";
   const getHeaders = async () => {
     const auth = await getGatewayAuthToken(options);
     if (auth) {
@@ -24129,8 +25664,8 @@ function createGatewayProvider(options = {}) {
     });
   };
   const getAvailableModels = async () => {
-    var _a922, _b9, _c;
-    const now2 = (_c = (_b9 = (_a922 = options._internal) == null ? void 0 : _a922.currentDate) == null ? void 0 : _b9.call(_a922).getTime()) != null ? _c : Date.now();
+    var _a922, _b92, _c;
+    const now2 = (_c = (_b92 = (_a922 = options._internal) == null ? void 0 : _a922.currentDate) == null ? void 0 : _b92.call(_a922).getTime()) != null ? _c : Date.now();
     if (!pendingMetadata || now2 - lastFetchTime > cacheRefreshMillis) {
       lastFetchTime = now2;
       pendingMetadata = new GatewayFetchMetadata({
@@ -24307,12 +25842,12 @@ function registerGlobal22(type, instance, diag, allowOverride) {
   return true;
 }
 function getGlobal22(type) {
-  var _a162, _b82;
+  var _a162, _b83;
   var globalVersion = (_a162 = _global22[GLOBAL_OPENTELEMETRY_API_KEY22]) === null || _a162 === void 0 ? void 0 : _a162.version;
   if (!globalVersion || !isCompatible22(globalVersion)) {
     return;
   }
-  return (_b82 = _global22[GLOBAL_OPENTELEMETRY_API_KEY22]) === null || _b82 === void 0 ? void 0 : _b82[type];
+  return (_b83 = _global22[GLOBAL_OPENTELEMETRY_API_KEY22]) === null || _b83 === void 0 ? void 0 : _b83[type];
 }
 function unregisterGlobal22(type, diag) {
   diag.debug("@opentelemetry/api: Unregistering a global for " + type + " v" + VERSION222 + ".");
@@ -24477,7 +26012,7 @@ var DiagAPI22 = (
       }
       var self = this;
       var setLogger = function(logger, optionsOrLogLevel) {
-        var _a162, _b82, _c;
+        var _a162, _b83, _c;
         if (optionsOrLogLevel === void 0) {
           optionsOrLogLevel = { logLevel: DiagLogLevel22.INFO };
         }
@@ -24492,7 +26027,7 @@ var DiagAPI22 = (
           };
         }
         var oldLogger = getGlobal22("diag");
-        var newLogger = createLogLevelDiagLogger22((_b82 = optionsOrLogLevel.logLevel) !== null && _b82 !== void 0 ? _b82 : DiagLogLevel22.INFO, logger);
+        var newLogger = createLogLevelDiagLogger22((_b83 = optionsOrLogLevel.logLevel) !== null && _b83 !== void 0 ? _b83 : DiagLogLevel22.INFO, logger);
         if (oldLogger && !optionsOrLogLevel.suppressOverrideMessage) {
           var stack = (_c = new Error().stack) !== null && _c !== void 0 ? _c : "<failed to generate stacktrace>";
           oldLogger.warn("Current logger will be overwritten from " + stack);
@@ -25031,8 +26566,8 @@ var dataContentSchema22 = z$2.union([
   z$2.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
-      var _a162, _b82;
-      return (_b82 = (_a162 = globalThis.Buffer) == null ? void 0 : _a162.isBuffer(value)) != null ? _b82 : false;
+      var _a162, _b83;
+      return (_b83 = (_a162 = globalThis.Buffer) == null ? void 0 : _a162.isBuffer(value)) != null ? _b83 : false;
     },
     { message: "Must be a Buffer" }
   )
@@ -25806,13 +27341,13 @@ createIdGenerator22({
   prefix: "aitxt",
   size: 24
 });
-function splitArray2(array, chunkSize) {
+function splitArray2(array2, chunkSize) {
   if (chunkSize <= 0) {
     throw new Error("chunkSize must be greater than 0");
   }
   const result = [];
-  for (let i = 0; i < array.length; i += chunkSize) {
-    result.push(array.slice(i, i + chunkSize));
+  for (let i = 0; i < array2.length; i += chunkSize) {
+    result.push(array2.slice(i, i + chunkSize));
   }
   return result;
 }
@@ -26123,6 +27658,5361 @@ var object22 = ({
     }
   };
 };
+var marker19 = "vercel.ai.error";
+var symbol19 = Symbol.for(marker19);
+var _a19;
+var _b8;
+var AISDKError3 = class _AISDKError4 extends (_b8 = Error, _a19 = symbol19, _b8) {
+  /**
+   * Creates an AI SDK Error.
+   *
+   * @param {Object} params - The parameters for creating the error.
+   * @param {string} params.name - The name of the error.
+   * @param {string} params.message - The error message.
+   * @param {unknown} [params.cause] - The underlying cause of the error.
+   */
+  constructor({
+    name: name1422,
+    message,
+    cause
+  }) {
+    super(message);
+    this[_a19] = true;
+    this.name = name1422;
+    this.cause = cause;
+  }
+  /**
+   * Checks if the given error is an AI SDK Error.
+   * @param {unknown} error - The error to check.
+   * @returns {boolean} True if the error is an AI SDK Error, false otherwise.
+   */
+  static isInstance(error) {
+    return _AISDKError4.hasMarker(error, marker19);
+  }
+  static hasMarker(error, marker1522) {
+    const markerSymbol = Symbol.for(marker1522);
+    return error != null && typeof error === "object" && markerSymbol in error && typeof error[markerSymbol] === "boolean" && error[markerSymbol] === true;
+  }
+};
+var name19 = "AI_APICallError";
+var marker25 = `vercel.ai.error.${name19}`;
+var symbol25 = Symbol.for(marker25);
+var _a25;
+var _b22;
+var APICallError3 = class extends (_b22 = AISDKError3, _a25 = symbol25, _b22) {
+  constructor({
+    message,
+    url,
+    requestBodyValues,
+    statusCode,
+    responseHeaders,
+    responseBody,
+    cause,
+    isRetryable = statusCode != null && (statusCode === 408 || // request timeout
+    statusCode === 409 || // conflict
+    statusCode === 429 || // too many requests
+    statusCode >= 500),
+    // server error
+    data
+  }) {
+    super({ name: name19, message, cause });
+    this[_a25] = true;
+    this.url = url;
+    this.requestBodyValues = requestBodyValues;
+    this.statusCode = statusCode;
+    this.responseHeaders = responseHeaders;
+    this.responseBody = responseBody;
+    this.isRetryable = isRetryable;
+    this.data = data;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker25);
+  }
+};
+var name25 = "AI_EmptyResponseBodyError";
+var marker35 = `vercel.ai.error.${name25}`;
+var symbol35 = Symbol.for(marker35);
+var _a35;
+var _b32;
+var EmptyResponseBodyError2 = class extends (_b32 = AISDKError3, _a35 = symbol35, _b32) {
+  // used in isInstance
+  constructor({ message = "Empty response body" } = {}) {
+    super({ name: name25, message });
+    this[_a35] = true;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker35);
+  }
+};
+function getErrorMessage4(error) {
+  if (error == null) {
+    return "unknown error";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return JSON.stringify(error);
+}
+var name35 = "AI_InvalidArgumentError";
+var marker45 = `vercel.ai.error.${name35}`;
+var symbol45 = Symbol.for(marker45);
+var _a45;
+var _b42;
+var InvalidArgumentError4 = class extends (_b42 = AISDKError3, _a45 = symbol45, _b42) {
+  constructor({
+    message,
+    cause,
+    argument
+  }) {
+    super({ name: name35, message, cause });
+    this[_a45] = true;
+    this.argument = argument;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker45);
+  }
+};
+var name65 = "AI_JSONParseError";
+var marker75 = `vercel.ai.error.${name65}`;
+var symbol75 = Symbol.for(marker75);
+var _a75;
+var _b72;
+var JSONParseError3 = class extends (_b72 = AISDKError3, _a75 = symbol75, _b72) {
+  constructor({ text: text42, cause }) {
+    super({
+      name: name65,
+      message: `JSON parsing failed: Text: ${text42}.
+Error message: ${getErrorMessage4(cause)}`,
+      cause
+    });
+    this[_a75] = true;
+    this.text = text42;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker75);
+  }
+};
+var name125 = "AI_TypeValidationError";
+var marker135 = `vercel.ai.error.${name125}`;
+var symbol135 = Symbol.for(marker135);
+var _a135;
+var _b13;
+var TypeValidationError3 = class _TypeValidationError4 extends (_b13 = AISDKError3, _a135 = symbol135, _b13) {
+  constructor({ value, cause }) {
+    super({
+      name: name125,
+      message: `Type validation failed: Value: ${JSON.stringify(value)}.
+Error message: ${getErrorMessage4(cause)}`,
+      cause
+    });
+    this[_a135] = true;
+    this.value = value;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker135);
+  }
+  /**
+   * Wraps an error into a TypeValidationError.
+   * If the cause is already a TypeValidationError with the same value, it returns the cause.
+   * Otherwise, it creates a new TypeValidationError.
+   *
+   * @param {Object} params - The parameters for wrapping the error.
+   * @param {unknown} params.value - The value that failed validation.
+   * @param {unknown} params.cause - The original error or cause of the validation failure.
+   * @returns {TypeValidationError} A TypeValidationError instance.
+   */
+  static wrap({
+    value,
+    cause
+  }) {
+    return _TypeValidationError4.isInstance(cause) && cause.value === value ? cause : new _TypeValidationError4({ value, cause });
+  }
+};
+var ParseError2 = class extends Error {
+  constructor(message, options) {
+    super(message), this.name = "ParseError", this.type = options.type, this.field = options.field, this.value = options.value, this.line = options.line;
+  }
+};
+function noop2(_arg) {
+}
+function createParser2(callbacks) {
+  if (typeof callbacks == "function")
+    throw new TypeError(
+      "`callbacks` must be an object, got a function instead. Did you mean `{onEvent: fn}`?"
+    );
+  const { onEvent = noop2, onError = noop2, onRetry = noop2, onComment } = callbacks;
+  let incompleteLine = "", isFirstChunk = true, id, data = "", eventType = "";
+  function feed(newChunk) {
+    const chunk = isFirstChunk ? newChunk.replace(/^\xEF\xBB\xBF/, "") : newChunk, [complete, incomplete] = splitLines2(`${incompleteLine}${chunk}`);
+    for (const line of complete)
+      parseLine(line);
+    incompleteLine = incomplete, isFirstChunk = false;
+  }
+  function parseLine(line) {
+    if (line === "") {
+      dispatchEvent();
+      return;
+    }
+    if (line.startsWith(":")) {
+      onComment && onComment(line.slice(line.startsWith(": ") ? 2 : 1));
+      return;
+    }
+    const fieldSeparatorIndex = line.indexOf(":");
+    if (fieldSeparatorIndex !== -1) {
+      const field = line.slice(0, fieldSeparatorIndex), offset = line[fieldSeparatorIndex + 1] === " " ? 2 : 1, value = line.slice(fieldSeparatorIndex + offset);
+      processField(field, value, line);
+      return;
+    }
+    processField(line, "", line);
+  }
+  function processField(field, value, line) {
+    switch (field) {
+      case "event":
+        eventType = value;
+        break;
+      case "data":
+        data = `${data}${value}
+`;
+        break;
+      case "id":
+        id = value.includes("\0") ? void 0 : value;
+        break;
+      case "retry":
+        /^\d+$/.test(value) ? onRetry(parseInt(value, 10)) : onError(
+          new ParseError2(`Invalid \`retry\` value: "${value}"`, {
+            type: "invalid-retry",
+            value,
+            line
+          })
+        );
+        break;
+      default:
+        onError(
+          new ParseError2(
+            `Unknown field "${field.length > 20 ? `${field.slice(0, 20)}\u2026` : field}"`,
+            { type: "unknown-field", field, value, line }
+          )
+        );
+        break;
+    }
+  }
+  function dispatchEvent() {
+    data.length > 0 && onEvent({
+      id,
+      event: eventType || void 0,
+      // If the data buffer's last character is a U+000A LINE FEED (LF) character,
+      // then remove the last character from the data buffer.
+      data: data.endsWith(`
+`) ? data.slice(0, -1) : data
+    }), id = void 0, data = "", eventType = "";
+  }
+  function reset(options = {}) {
+    incompleteLine && options.consume && parseLine(incompleteLine), isFirstChunk = true, id = void 0, data = "", eventType = "", incompleteLine = "";
+  }
+  return { feed, reset };
+}
+function splitLines2(chunk) {
+  const lines = [];
+  let incompleteLine = "", searchIndex = 0;
+  for (; searchIndex < chunk.length; ) {
+    const crIndex = chunk.indexOf("\r", searchIndex), lfIndex = chunk.indexOf(`
+`, searchIndex);
+    let lineEnd = -1;
+    if (crIndex !== -1 && lfIndex !== -1 ? lineEnd = Math.min(crIndex, lfIndex) : crIndex !== -1 ? crIndex === chunk.length - 1 ? lineEnd = -1 : lineEnd = crIndex : lfIndex !== -1 && (lineEnd = lfIndex), lineEnd === -1) {
+      incompleteLine = chunk.slice(searchIndex);
+      break;
+    } else {
+      const line = chunk.slice(searchIndex, lineEnd);
+      lines.push(line), searchIndex = lineEnd + 1, chunk[searchIndex - 1] === "\r" && chunk[searchIndex] === `
+` && searchIndex++;
+    }
+  }
+  return [lines, incompleteLine];
+}
+var EventSourceParserStream2 = class extends TransformStream {
+  constructor({ onError, onRetry, onComment } = {}) {
+    let parser;
+    super({
+      start(controller) {
+        parser = createParser2({
+          onEvent: (event) => {
+            controller.enqueue(event);
+          },
+          onError(error) {
+            onError === "terminate" ? controller.error(error) : typeof onError == "function" && onError(error);
+          },
+          onRetry,
+          onComment
+        });
+      },
+      transform(chunk) {
+        parser.feed(chunk);
+      }
+    });
+  }
+};
+function combineHeaders2(...headers) {
+  return headers.reduce(
+    (combinedHeaders, currentHeaders) => ({
+      ...combinedHeaders,
+      ...currentHeaders != null ? currentHeaders : {}
+    }),
+    {}
+  );
+}
+async function delay3(delayInMs, options) {
+  if (delayInMs == null) {
+    return Promise.resolve();
+  }
+  const signal = options == null ? void 0 : options.abortSignal;
+  return new Promise((resolve22, reject) => {
+    if (signal == null ? void 0 : signal.aborted) {
+      reject(createAbortError2());
+      return;
+    }
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      resolve22();
+    }, delayInMs);
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      signal == null ? void 0 : signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(createAbortError2());
+    };
+    signal == null ? void 0 : signal.addEventListener("abort", onAbort);
+  });
+}
+function createAbortError2() {
+  return new DOMException("Delay was aborted", "AbortError");
+}
+function extractResponseHeaders2(response) {
+  return Object.fromEntries([...response.headers]);
+}
+var createIdGenerator3 = ({
+  prefix,
+  size = 16,
+  alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+  separator = "-"
+} = {}) => {
+  const generator = () => {
+    const alphabetLength = alphabet.length;
+    const chars = new Array(size);
+    for (let i = 0; i < size; i++) {
+      chars[i] = alphabet[Math.random() * alphabetLength | 0];
+    }
+    return chars.join("");
+  };
+  if (prefix == null) {
+    return generator;
+  }
+  if (alphabet.includes(separator)) {
+    throw new InvalidArgumentError4({
+      argument: "separator",
+      message: `The separator "${separator}" must not be part of the alphabet "${alphabet}".`
+    });
+  }
+  return () => `${prefix}${separator}${generator()}`;
+};
+createIdGenerator3();
+function getErrorMessage23(error) {
+  if (error == null) {
+    return "unknown error";
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return JSON.stringify(error);
+}
+function isAbortError3(error) {
+  return (error instanceof Error || error instanceof DOMException) && (error.name === "AbortError" || error.name === "ResponseAborted" || // Next.js
+  error.name === "TimeoutError");
+}
+var FETCH_FAILED_ERROR_MESSAGES2 = ["fetch failed", "failed to fetch"];
+function handleFetchError2({
+  error,
+  url,
+  requestBodyValues
+}) {
+  if (isAbortError3(error)) {
+    return error;
+  }
+  if (error instanceof TypeError && FETCH_FAILED_ERROR_MESSAGES2.includes(error.message.toLowerCase())) {
+    const cause = error.cause;
+    if (cause != null) {
+      return new APICallError3({
+        message: `Cannot connect to API: ${cause.message}`,
+        cause,
+        url,
+        requestBodyValues,
+        isRetryable: true
+        // retry when network error
+      });
+    }
+  }
+  return error;
+}
+function getRuntimeEnvironmentUserAgent2(globalThisAny = globalThis) {
+  var _a224, _b222, _c;
+  if (globalThisAny.window) {
+    return `runtime/browser`;
+  }
+  if ((_a224 = globalThisAny.navigator) == null ? void 0 : _a224.userAgent) {
+    return `runtime/${globalThisAny.navigator.userAgent.toLowerCase()}`;
+  }
+  if ((_c = (_b222 = globalThisAny.process) == null ? void 0 : _b222.versions) == null ? void 0 : _c.node) {
+    return `runtime/node.js/${globalThisAny.process.version.substring(0)}`;
+  }
+  if (globalThisAny.EdgeRuntime) {
+    return `runtime/vercel-edge`;
+  }
+  return "runtime/unknown";
+}
+function normalizeHeaders2(headers) {
+  if (headers == null) {
+    return {};
+  }
+  const normalized = {};
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      normalized[key.toLowerCase()] = value;
+    });
+  } else {
+    if (!Array.isArray(headers)) {
+      headers = Object.entries(headers);
+    }
+    for (const [key, value] of headers) {
+      if (value != null) {
+        normalized[key.toLowerCase()] = value;
+      }
+    }
+  }
+  return normalized;
+}
+function withUserAgentSuffix2(headers, ...userAgentSuffixParts) {
+  const normalizedHeaders = new Headers(normalizeHeaders2(headers));
+  const currentUserAgentHeader = normalizedHeaders.get("user-agent") || "";
+  normalizedHeaders.set(
+    "user-agent",
+    [currentUserAgentHeader, ...userAgentSuffixParts].filter(Boolean).join(" ")
+  );
+  return Object.fromEntries(normalizedHeaders.entries());
+}
+var VERSION4 = "4.0.0";
+var getOriginalFetch3 = () => globalThis.fetch;
+var getFromApi2 = async ({
+  url,
+  headers = {},
+  successfulResponseHandler,
+  failedResponseHandler,
+  abortSignal,
+  fetch: fetch2 = getOriginalFetch3()
+}) => {
+  try {
+    const response = await fetch2(url, {
+      method: "GET",
+      headers: withUserAgentSuffix2(
+        headers,
+        `ai-sdk/provider-utils/${VERSION4}`,
+        getRuntimeEnvironmentUserAgent2()
+      ),
+      signal: abortSignal
+    });
+    const responseHeaders = extractResponseHeaders2(response);
+    if (!response.ok) {
+      let errorInformation;
+      try {
+        errorInformation = await failedResponseHandler({
+          response,
+          url,
+          requestBodyValues: {}
+        });
+      } catch (error) {
+        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+          throw error;
+        }
+        throw new APICallError3({
+          message: "Failed to process error response",
+          cause: error,
+          statusCode: response.status,
+          url,
+          responseHeaders,
+          requestBodyValues: {}
+        });
+      }
+      throw errorInformation.value;
+    }
+    try {
+      return await successfulResponseHandler({
+        response,
+        url,
+        requestBodyValues: {}
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+          throw error;
+        }
+      }
+      throw new APICallError3({
+        message: "Failed to process successful response",
+        cause: error,
+        statusCode: response.status,
+        url,
+        responseHeaders,
+        requestBodyValues: {}
+      });
+    }
+  } catch (error) {
+    throw handleFetchError2({ error, url, requestBodyValues: {} });
+  }
+};
+function loadOptionalSetting2({
+  settingValue,
+  environmentVariableName
+}) {
+  if (typeof settingValue === "string") {
+    return settingValue;
+  }
+  if (settingValue != null || typeof process === "undefined") {
+    return void 0;
+  }
+  settingValue = process.env[environmentVariableName];
+  if (settingValue == null || typeof settingValue !== "string") {
+    return void 0;
+  }
+  return settingValue;
+}
+var suspectProtoRx2 = /"__proto__"\s*:/;
+var suspectConstructorRx2 = /"constructor"\s*:/;
+function _parse2(text42) {
+  const obj = JSON.parse(text42);
+  if (obj === null || typeof obj !== "object") {
+    return obj;
+  }
+  if (suspectProtoRx2.test(text42) === false && suspectConstructorRx2.test(text42) === false) {
+    return obj;
+  }
+  return filter2(obj);
+}
+function filter2(obj) {
+  let next = [obj];
+  while (next.length) {
+    const nodes = next;
+    next = [];
+    for (const node of nodes) {
+      if (Object.prototype.hasOwnProperty.call(node, "__proto__")) {
+        throw new SyntaxError("Object contains forbidden prototype property");
+      }
+      if (Object.prototype.hasOwnProperty.call(node, "constructor") && Object.prototype.hasOwnProperty.call(node.constructor, "prototype")) {
+        throw new SyntaxError("Object contains forbidden prototype property");
+      }
+      for (const key in node) {
+        const value = node[key];
+        if (value && typeof value === "object") {
+          next.push(value);
+        }
+      }
+    }
+  }
+  return obj;
+}
+function secureJsonParse2(text42) {
+  const { stackTraceLimit } = Error;
+  try {
+    Error.stackTraceLimit = 0;
+  } catch (e2) {
+    return _parse2(text42);
+  }
+  try {
+    return _parse2(text42);
+  } finally {
+    Error.stackTraceLimit = stackTraceLimit;
+  }
+}
+function addAdditionalPropertiesToJsonSchema(jsonSchema222) {
+  if (jsonSchema222.type === "object") {
+    jsonSchema222.additionalProperties = false;
+    const properties = jsonSchema222.properties;
+    if (properties != null) {
+      for (const property in properties) {
+        properties[property] = addAdditionalPropertiesToJsonSchema(
+          properties[property]
+        );
+      }
+    }
+  }
+  if (jsonSchema222.type === "array" && jsonSchema222.items != null) {
+    if (Array.isArray(jsonSchema222.items)) {
+      jsonSchema222.items = jsonSchema222.items.map(
+        (item) => addAdditionalPropertiesToJsonSchema(item)
+      );
+    } else {
+      jsonSchema222.items = addAdditionalPropertiesToJsonSchema(
+        jsonSchema222.items
+      );
+    }
+  }
+  return jsonSchema222;
+}
+var ignoreOverride32 = Symbol(
+  "Let zodToJsonSchema decide on which parser to use"
+);
+var defaultOptions32 = {
+  name: void 0,
+  $refStrategy: "root",
+  basePath: ["#"],
+  effectStrategy: "input",
+  pipeStrategy: "all",
+  dateStrategy: "format:date-time",
+  mapStrategy: "entries",
+  removeAdditionalStrategy: "passthrough",
+  allowedAdditionalProperties: true,
+  rejectedAdditionalProperties: false,
+  definitionPath: "definitions",
+  strictUnions: false,
+  definitions: {},
+  errorMessages: false,
+  patternStrategy: "escape",
+  applyRegexFlags: false,
+  emailStrategy: "format:email",
+  base64Strategy: "contentEncoding:base64",
+  nameStrategy: "ref"
+};
+var getDefaultOptions32 = (options) => typeof options === "string" ? {
+  ...defaultOptions32,
+  name: options
+} : {
+  ...defaultOptions32,
+  ...options
+};
+function parseAnyDef32() {
+  return {};
+}
+function parseArrayDef32(def, refs) {
+  var _a224, _b222, _c;
+  const res = {
+    type: "array"
+  };
+  if (((_a224 = def.type) == null ? void 0 : _a224._def) && ((_c = (_b222 = def.type) == null ? void 0 : _b222._def) == null ? void 0 : _c.typeName) !== ZodFirstPartyTypeKind$1.ZodAny) {
+    res.items = parseDef32(def.type._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "items"]
+    });
+  }
+  if (def.minLength) {
+    res.minItems = def.minLength.value;
+  }
+  if (def.maxLength) {
+    res.maxItems = def.maxLength.value;
+  }
+  if (def.exactLength) {
+    res.minItems = def.exactLength.value;
+    res.maxItems = def.exactLength.value;
+  }
+  return res;
+}
+function parseBigintDef32(def) {
+  const res = {
+    type: "integer",
+    format: "int64"
+  };
+  if (!def.checks) return res;
+  for (const check of def.checks) {
+    switch (check.kind) {
+      case "min":
+        if (check.inclusive) {
+          res.minimum = check.value;
+        } else {
+          res.exclusiveMinimum = check.value;
+        }
+        break;
+      case "max":
+        if (check.inclusive) {
+          res.maximum = check.value;
+        } else {
+          res.exclusiveMaximum = check.value;
+        }
+        break;
+      case "multipleOf":
+        res.multipleOf = check.value;
+        break;
+    }
+  }
+  return res;
+}
+function parseBooleanDef32() {
+  return { type: "boolean" };
+}
+function parseBrandedDef32(_def, refs) {
+  return parseDef32(_def.type._def, refs);
+}
+var parseCatchDef32 = (def, refs) => {
+  return parseDef32(def.innerType._def, refs);
+};
+function parseDateDef32(def, refs, overrideDateStrategy) {
+  const strategy = overrideDateStrategy != null ? overrideDateStrategy : refs.dateStrategy;
+  if (Array.isArray(strategy)) {
+    return {
+      anyOf: strategy.map((item, i) => parseDateDef32(def, refs, item))
+    };
+  }
+  switch (strategy) {
+    case "string":
+    case "format:date-time":
+      return {
+        type: "string",
+        format: "date-time"
+      };
+    case "format:date":
+      return {
+        type: "string",
+        format: "date"
+      };
+    case "integer":
+      return integerDateParser32(def);
+  }
+}
+var integerDateParser32 = (def) => {
+  const res = {
+    type: "integer",
+    format: "unix-time"
+  };
+  for (const check of def.checks) {
+    switch (check.kind) {
+      case "min":
+        res.minimum = check.value;
+        break;
+      case "max":
+        res.maximum = check.value;
+        break;
+    }
+  }
+  return res;
+};
+function parseDefaultDef32(_def, refs) {
+  return {
+    ...parseDef32(_def.innerType._def, refs),
+    default: _def.defaultValue()
+  };
+}
+function parseEffectsDef32(_def, refs) {
+  return refs.effectStrategy === "input" ? parseDef32(_def.schema._def, refs) : parseAnyDef32();
+}
+function parseEnumDef32(def) {
+  return {
+    type: "string",
+    enum: Array.from(def.values)
+  };
+}
+var isJsonSchema7AllOfType32 = (type) => {
+  if ("type" in type && type.type === "string") return false;
+  return "allOf" in type;
+};
+function parseIntersectionDef32(def, refs) {
+  const allOf = [
+    parseDef32(def.left._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "allOf", "0"]
+    }),
+    parseDef32(def.right._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "allOf", "1"]
+    })
+  ].filter((x) => !!x);
+  const mergedAllOf = [];
+  allOf.forEach((schema) => {
+    if (isJsonSchema7AllOfType32(schema)) {
+      mergedAllOf.push(...schema.allOf);
+    } else {
+      let nestedSchema = schema;
+      if ("additionalProperties" in schema && schema.additionalProperties === false) {
+        const { additionalProperties, ...rest } = schema;
+        nestedSchema = rest;
+      }
+      mergedAllOf.push(nestedSchema);
+    }
+  });
+  return mergedAllOf.length ? { allOf: mergedAllOf } : void 0;
+}
+function parseLiteralDef32(def) {
+  const parsedType = typeof def.value;
+  if (parsedType !== "bigint" && parsedType !== "number" && parsedType !== "boolean" && parsedType !== "string") {
+    return {
+      type: Array.isArray(def.value) ? "array" : "object"
+    };
+  }
+  return {
+    type: parsedType === "bigint" ? "integer" : parsedType,
+    const: def.value
+  };
+}
+var emojiRegex32 = void 0;
+var zodPatterns32 = {
+  /**
+   * `c` was changed to `[cC]` to replicate /i flag
+   */
+  cuid: /^[cC][^\s-]{8,}$/,
+  cuid2: /^[0-9a-z]+$/,
+  ulid: /^[0-9A-HJKMNP-TV-Z]{26}$/,
+  /**
+   * `a-z` was added to replicate /i flag
+   */
+  email: /^(?!\.)(?!.*\.\.)([a-zA-Z0-9_'+\-\.]*)[a-zA-Z0-9_+-]@([a-zA-Z0-9][a-zA-Z0-9\-]*\.)+[a-zA-Z]{2,}$/,
+  /**
+   * Constructed a valid Unicode RegExp
+   *
+   * Lazily instantiate since this type of regex isn't supported
+   * in all envs (e.g. React Native).
+   *
+   * See:
+   * https://github.com/colinhacks/zod/issues/2433
+   * Fix in Zod:
+   * https://github.com/colinhacks/zod/commit/9340fd51e48576a75adc919bff65dbc4a5d4c99b
+   */
+  emoji: () => {
+    if (emojiRegex32 === void 0) {
+      emojiRegex32 = RegExp(
+        "^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$",
+        "u"
+      );
+    }
+    return emojiRegex32;
+  },
+  /**
+   * Unused
+   */
+  uuid: /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/,
+  /**
+   * Unused
+   */
+  ipv4: /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/,
+  ipv4Cidr: /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/(3[0-2]|[12]?[0-9])$/,
+  /**
+   * Unused
+   */
+  ipv6: /^(([a-f0-9]{1,4}:){7}|::([a-f0-9]{1,4}:){0,6}|([a-f0-9]{1,4}:){1}:([a-f0-9]{1,4}:){0,5}|([a-f0-9]{1,4}:){2}:([a-f0-9]{1,4}:){0,4}|([a-f0-9]{1,4}:){3}:([a-f0-9]{1,4}:){0,3}|([a-f0-9]{1,4}:){4}:([a-f0-9]{1,4}:){0,2}|([a-f0-9]{1,4}:){5}:([a-f0-9]{1,4}:){0,1})([a-f0-9]{1,4}|(((25[0-5])|(2[0-4][0-9])|(1[0-9]{2})|([0-9]{1,2}))\.){3}((25[0-5])|(2[0-4][0-9])|(1[0-9]{2})|([0-9]{1,2})))$/,
+  ipv6Cidr: /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/,
+  base64: /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/,
+  base64url: /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/,
+  nanoid: /^[a-zA-Z0-9_-]{21}$/,
+  jwt: /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/
+};
+function parseStringDef32(def, refs) {
+  const res = {
+    type: "string"
+  };
+  if (def.checks) {
+    for (const check of def.checks) {
+      switch (check.kind) {
+        case "min":
+          res.minLength = typeof res.minLength === "number" ? Math.max(res.minLength, check.value) : check.value;
+          break;
+        case "max":
+          res.maxLength = typeof res.maxLength === "number" ? Math.min(res.maxLength, check.value) : check.value;
+          break;
+        case "email":
+          switch (refs.emailStrategy) {
+            case "format:email":
+              addFormat32(res, "email", check.message, refs);
+              break;
+            case "format:idn-email":
+              addFormat32(res, "idn-email", check.message, refs);
+              break;
+            case "pattern:zod":
+              addPattern32(res, zodPatterns32.email, check.message, refs);
+              break;
+          }
+          break;
+        case "url":
+          addFormat32(res, "uri", check.message, refs);
+          break;
+        case "uuid":
+          addFormat32(res, "uuid", check.message, refs);
+          break;
+        case "regex":
+          addPattern32(res, check.regex, check.message, refs);
+          break;
+        case "cuid":
+          addPattern32(res, zodPatterns32.cuid, check.message, refs);
+          break;
+        case "cuid2":
+          addPattern32(res, zodPatterns32.cuid2, check.message, refs);
+          break;
+        case "startsWith":
+          addPattern32(
+            res,
+            RegExp(`^${escapeLiteralCheckValue32(check.value, refs)}`),
+            check.message,
+            refs
+          );
+          break;
+        case "endsWith":
+          addPattern32(
+            res,
+            RegExp(`${escapeLiteralCheckValue32(check.value, refs)}$`),
+            check.message,
+            refs
+          );
+          break;
+        case "datetime":
+          addFormat32(res, "date-time", check.message, refs);
+          break;
+        case "date":
+          addFormat32(res, "date", check.message, refs);
+          break;
+        case "time":
+          addFormat32(res, "time", check.message, refs);
+          break;
+        case "duration":
+          addFormat32(res, "duration", check.message, refs);
+          break;
+        case "length":
+          res.minLength = typeof res.minLength === "number" ? Math.max(res.minLength, check.value) : check.value;
+          res.maxLength = typeof res.maxLength === "number" ? Math.min(res.maxLength, check.value) : check.value;
+          break;
+        case "includes": {
+          addPattern32(
+            res,
+            RegExp(escapeLiteralCheckValue32(check.value, refs)),
+            check.message,
+            refs
+          );
+          break;
+        }
+        case "ip": {
+          if (check.version !== "v6") {
+            addFormat32(res, "ipv4", check.message, refs);
+          }
+          if (check.version !== "v4") {
+            addFormat32(res, "ipv6", check.message, refs);
+          }
+          break;
+        }
+        case "base64url":
+          addPattern32(res, zodPatterns32.base64url, check.message, refs);
+          break;
+        case "jwt":
+          addPattern32(res, zodPatterns32.jwt, check.message, refs);
+          break;
+        case "cidr": {
+          if (check.version !== "v6") {
+            addPattern32(res, zodPatterns32.ipv4Cidr, check.message, refs);
+          }
+          if (check.version !== "v4") {
+            addPattern32(res, zodPatterns32.ipv6Cidr, check.message, refs);
+          }
+          break;
+        }
+        case "emoji":
+          addPattern32(res, zodPatterns32.emoji(), check.message, refs);
+          break;
+        case "ulid": {
+          addPattern32(res, zodPatterns32.ulid, check.message, refs);
+          break;
+        }
+        case "base64": {
+          switch (refs.base64Strategy) {
+            case "format:binary": {
+              addFormat32(res, "binary", check.message, refs);
+              break;
+            }
+            case "contentEncoding:base64": {
+              res.contentEncoding = "base64";
+              break;
+            }
+            case "pattern:zod": {
+              addPattern32(res, zodPatterns32.base64, check.message, refs);
+              break;
+            }
+          }
+          break;
+        }
+        case "nanoid": {
+          addPattern32(res, zodPatterns32.nanoid, check.message, refs);
+        }
+      }
+    }
+  }
+  return res;
+}
+function escapeLiteralCheckValue32(literal, refs) {
+  return refs.patternStrategy === "escape" ? escapeNonAlphaNumeric32(literal) : literal;
+}
+var ALPHA_NUMERIC32 = new Set(
+  "ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvxyz0123456789"
+);
+function escapeNonAlphaNumeric32(source) {
+  let result = "";
+  for (let i = 0; i < source.length; i++) {
+    if (!ALPHA_NUMERIC32.has(source[i])) {
+      result += "\\";
+    }
+    result += source[i];
+  }
+  return result;
+}
+function addFormat32(schema, value, message, refs) {
+  var _a224;
+  if (schema.format || ((_a224 = schema.anyOf) == null ? void 0 : _a224.some((x) => x.format))) {
+    if (!schema.anyOf) {
+      schema.anyOf = [];
+    }
+    if (schema.format) {
+      schema.anyOf.push({
+        format: schema.format
+      });
+      delete schema.format;
+    }
+    schema.anyOf.push({
+      format: value,
+      ...message && refs.errorMessages && { errorMessage: { format: message } }
+    });
+  } else {
+    schema.format = value;
+  }
+}
+function addPattern32(schema, regex, message, refs) {
+  var _a224;
+  if (schema.pattern || ((_a224 = schema.allOf) == null ? void 0 : _a224.some((x) => x.pattern))) {
+    if (!schema.allOf) {
+      schema.allOf = [];
+    }
+    if (schema.pattern) {
+      schema.allOf.push({
+        pattern: schema.pattern
+      });
+      delete schema.pattern;
+    }
+    schema.allOf.push({
+      pattern: stringifyRegExpWithFlags32(regex, refs),
+      ...message && refs.errorMessages && { errorMessage: { pattern: message } }
+    });
+  } else {
+    schema.pattern = stringifyRegExpWithFlags32(regex, refs);
+  }
+}
+function stringifyRegExpWithFlags32(regex, refs) {
+  var _a224;
+  if (!refs.applyRegexFlags || !regex.flags) {
+    return regex.source;
+  }
+  const flags = {
+    i: regex.flags.includes("i"),
+    // Case-insensitive
+    m: regex.flags.includes("m"),
+    // `^` and `$` matches adjacent to newline characters
+    s: regex.flags.includes("s")
+    // `.` matches newlines
+  };
+  const source = flags.i ? regex.source.toLowerCase() : regex.source;
+  let pattern = "";
+  let isEscaped = false;
+  let inCharGroup = false;
+  let inCharRange = false;
+  for (let i = 0; i < source.length; i++) {
+    if (isEscaped) {
+      pattern += source[i];
+      isEscaped = false;
+      continue;
+    }
+    if (flags.i) {
+      if (inCharGroup) {
+        if (source[i].match(/[a-z]/)) {
+          if (inCharRange) {
+            pattern += source[i];
+            pattern += `${source[i - 2]}-${source[i]}`.toUpperCase();
+            inCharRange = false;
+          } else if (source[i + 1] === "-" && ((_a224 = source[i + 2]) == null ? void 0 : _a224.match(/[a-z]/))) {
+            pattern += source[i];
+            inCharRange = true;
+          } else {
+            pattern += `${source[i]}${source[i].toUpperCase()}`;
+          }
+          continue;
+        }
+      } else if (source[i].match(/[a-z]/)) {
+        pattern += `[${source[i]}${source[i].toUpperCase()}]`;
+        continue;
+      }
+    }
+    if (flags.m) {
+      if (source[i] === "^") {
+        pattern += `(^|(?<=[\r
+]))`;
+        continue;
+      } else if (source[i] === "$") {
+        pattern += `($|(?=[\r
+]))`;
+        continue;
+      }
+    }
+    if (flags.s && source[i] === ".") {
+      pattern += inCharGroup ? `${source[i]}\r
+` : `[${source[i]}\r
+]`;
+      continue;
+    }
+    pattern += source[i];
+    if (source[i] === "\\") {
+      isEscaped = true;
+    } else if (inCharGroup && source[i] === "]") {
+      inCharGroup = false;
+    } else if (!inCharGroup && source[i] === "[") {
+      inCharGroup = true;
+    }
+  }
+  return pattern;
+}
+function parseRecordDef32(def, refs) {
+  var _a224, _b222, _c, _d, _e, _f;
+  const schema = {
+    type: "object",
+    additionalProperties: (_a224 = parseDef32(def.valueType._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "additionalProperties"]
+    })) != null ? _a224 : refs.allowedAdditionalProperties
+  };
+  if (((_b222 = def.keyType) == null ? void 0 : _b222._def.typeName) === ZodFirstPartyTypeKind$1.ZodString && ((_c = def.keyType._def.checks) == null ? void 0 : _c.length)) {
+    const { type, ...keyType } = parseStringDef32(def.keyType._def, refs);
+    return {
+      ...schema,
+      propertyNames: keyType
+    };
+  } else if (((_d = def.keyType) == null ? void 0 : _d._def.typeName) === ZodFirstPartyTypeKind$1.ZodEnum) {
+    return {
+      ...schema,
+      propertyNames: {
+        enum: def.keyType._def.values
+      }
+    };
+  } else if (((_e = def.keyType) == null ? void 0 : _e._def.typeName) === ZodFirstPartyTypeKind$1.ZodBranded && def.keyType._def.type._def.typeName === ZodFirstPartyTypeKind$1.ZodString && ((_f = def.keyType._def.type._def.checks) == null ? void 0 : _f.length)) {
+    const { type, ...keyType } = parseBrandedDef32(
+      def.keyType._def,
+      refs
+    );
+    return {
+      ...schema,
+      propertyNames: keyType
+    };
+  }
+  return schema;
+}
+function parseMapDef32(def, refs) {
+  if (refs.mapStrategy === "record") {
+    return parseRecordDef32(def, refs);
+  }
+  const keys = parseDef32(def.keyType._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "items", "items", "0"]
+  }) || parseAnyDef32();
+  const values = parseDef32(def.valueType._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "items", "items", "1"]
+  }) || parseAnyDef32();
+  return {
+    type: "array",
+    maxItems: 125,
+    items: {
+      type: "array",
+      items: [keys, values],
+      minItems: 2,
+      maxItems: 2
+    }
+  };
+}
+function parseNativeEnumDef32(def) {
+  const object42 = def.values;
+  const actualKeys = Object.keys(def.values).filter((key) => {
+    return typeof object42[object42[key]] !== "number";
+  });
+  const actualValues = actualKeys.map((key) => object42[key]);
+  const parsedTypes = Array.from(
+    new Set(actualValues.map((values) => typeof values))
+  );
+  return {
+    type: parsedTypes.length === 1 ? parsedTypes[0] === "string" ? "string" : "number" : ["string", "number"],
+    enum: actualValues
+  };
+}
+function parseNeverDef32() {
+  return { not: parseAnyDef32() };
+}
+function parseNullDef32() {
+  return {
+    type: "null"
+  };
+}
+var primitiveMappings32 = {
+  ZodString: "string",
+  ZodNumber: "number",
+  ZodBigInt: "integer",
+  ZodBoolean: "boolean",
+  ZodNull: "null"
+};
+function parseUnionDef32(def, refs) {
+  const options = def.options instanceof Map ? Array.from(def.options.values()) : def.options;
+  if (options.every(
+    (x) => x._def.typeName in primitiveMappings32 && (!x._def.checks || !x._def.checks.length)
+  )) {
+    const types = options.reduce((types2, x) => {
+      const type = primitiveMappings32[x._def.typeName];
+      return type && !types2.includes(type) ? [...types2, type] : types2;
+    }, []);
+    return {
+      type: types.length > 1 ? types : types[0]
+    };
+  } else if (options.every((x) => x._def.typeName === "ZodLiteral" && !x.description)) {
+    const types = options.reduce(
+      (acc, x) => {
+        const type = typeof x._def.value;
+        switch (type) {
+          case "string":
+          case "number":
+          case "boolean":
+            return [...acc, type];
+          case "bigint":
+            return [...acc, "integer"];
+          case "object":
+            if (x._def.value === null) return [...acc, "null"];
+          case "symbol":
+          case "undefined":
+          case "function":
+          default:
+            return acc;
+        }
+      },
+      []
+    );
+    if (types.length === options.length) {
+      const uniqueTypes = types.filter((x, i, a) => a.indexOf(x) === i);
+      return {
+        type: uniqueTypes.length > 1 ? uniqueTypes : uniqueTypes[0],
+        enum: options.reduce(
+          (acc, x) => {
+            return acc.includes(x._def.value) ? acc : [...acc, x._def.value];
+          },
+          []
+        )
+      };
+    }
+  } else if (options.every((x) => x._def.typeName === "ZodEnum")) {
+    return {
+      type: "string",
+      enum: options.reduce(
+        (acc, x) => [
+          ...acc,
+          ...x._def.values.filter((x2) => !acc.includes(x2))
+        ],
+        []
+      )
+    };
+  }
+  return asAnyOf32(def, refs);
+}
+var asAnyOf32 = (def, refs) => {
+  const anyOf = (def.options instanceof Map ? Array.from(def.options.values()) : def.options).map(
+    (x, i) => parseDef32(x._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "anyOf", `${i}`]
+    })
+  ).filter(
+    (x) => !!x && (!refs.strictUnions || typeof x === "object" && Object.keys(x).length > 0)
+  );
+  return anyOf.length ? { anyOf } : void 0;
+};
+function parseNullableDef32(def, refs) {
+  if (["ZodString", "ZodNumber", "ZodBigInt", "ZodBoolean", "ZodNull"].includes(
+    def.innerType._def.typeName
+  ) && (!def.innerType._def.checks || !def.innerType._def.checks.length)) {
+    return {
+      type: [
+        primitiveMappings32[def.innerType._def.typeName],
+        "null"
+      ]
+    };
+  }
+  const base = parseDef32(def.innerType._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "anyOf", "0"]
+  });
+  return base && { anyOf: [base, { type: "null" }] };
+}
+function parseNumberDef32(def) {
+  const res = {
+    type: "number"
+  };
+  if (!def.checks) return res;
+  for (const check of def.checks) {
+    switch (check.kind) {
+      case "int":
+        res.type = "integer";
+        break;
+      case "min":
+        if (check.inclusive) {
+          res.minimum = check.value;
+        } else {
+          res.exclusiveMinimum = check.value;
+        }
+        break;
+      case "max":
+        if (check.inclusive) {
+          res.maximum = check.value;
+        } else {
+          res.exclusiveMaximum = check.value;
+        }
+        break;
+      case "multipleOf":
+        res.multipleOf = check.value;
+        break;
+    }
+  }
+  return res;
+}
+function parseObjectDef32(def, refs) {
+  const result = {
+    type: "object",
+    properties: {}
+  };
+  const required = [];
+  const shape = def.shape();
+  for (const propName in shape) {
+    let propDef = shape[propName];
+    if (propDef === void 0 || propDef._def === void 0) {
+      continue;
+    }
+    const propOptional = safeIsOptional32(propDef);
+    const parsedDef = parseDef32(propDef._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "properties", propName],
+      propertyPath: [...refs.currentPath, "properties", propName]
+    });
+    if (parsedDef === void 0) {
+      continue;
+    }
+    result.properties[propName] = parsedDef;
+    if (!propOptional) {
+      required.push(propName);
+    }
+  }
+  if (required.length) {
+    result.required = required;
+  }
+  const additionalProperties = decideAdditionalProperties32(def, refs);
+  if (additionalProperties !== void 0) {
+    result.additionalProperties = additionalProperties;
+  }
+  return result;
+}
+function decideAdditionalProperties32(def, refs) {
+  if (def.catchall._def.typeName !== "ZodNever") {
+    return parseDef32(def.catchall._def, {
+      ...refs,
+      currentPath: [...refs.currentPath, "additionalProperties"]
+    });
+  }
+  switch (def.unknownKeys) {
+    case "passthrough":
+      return refs.allowedAdditionalProperties;
+    case "strict":
+      return refs.rejectedAdditionalProperties;
+    case "strip":
+      return refs.removeAdditionalStrategy === "strict" ? refs.allowedAdditionalProperties : refs.rejectedAdditionalProperties;
+  }
+}
+function safeIsOptional32(schema) {
+  try {
+    return schema.isOptional();
+  } catch (e2) {
+    return true;
+  }
+}
+var parseOptionalDef32 = (def, refs) => {
+  var _a224;
+  if (refs.currentPath.toString() === ((_a224 = refs.propertyPath) == null ? void 0 : _a224.toString())) {
+    return parseDef32(def.innerType._def, refs);
+  }
+  const innerSchema = parseDef32(def.innerType._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "anyOf", "1"]
+  });
+  return innerSchema ? { anyOf: [{ not: parseAnyDef32() }, innerSchema] } : parseAnyDef32();
+};
+var parsePipelineDef32 = (def, refs) => {
+  if (refs.pipeStrategy === "input") {
+    return parseDef32(def.in._def, refs);
+  } else if (refs.pipeStrategy === "output") {
+    return parseDef32(def.out._def, refs);
+  }
+  const a = parseDef32(def.in._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "allOf", "0"]
+  });
+  const b = parseDef32(def.out._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "allOf", a ? "1" : "0"]
+  });
+  return {
+    allOf: [a, b].filter((x) => x !== void 0)
+  };
+};
+function parsePromiseDef32(def, refs) {
+  return parseDef32(def.type._def, refs);
+}
+function parseSetDef32(def, refs) {
+  const items = parseDef32(def.valueType._def, {
+    ...refs,
+    currentPath: [...refs.currentPath, "items"]
+  });
+  const schema = {
+    type: "array",
+    uniqueItems: true,
+    items
+  };
+  if (def.minSize) {
+    schema.minItems = def.minSize.value;
+  }
+  if (def.maxSize) {
+    schema.maxItems = def.maxSize.value;
+  }
+  return schema;
+}
+function parseTupleDef32(def, refs) {
+  if (def.rest) {
+    return {
+      type: "array",
+      minItems: def.items.length,
+      items: def.items.map(
+        (x, i) => parseDef32(x._def, {
+          ...refs,
+          currentPath: [...refs.currentPath, "items", `${i}`]
+        })
+      ).reduce(
+        (acc, x) => x === void 0 ? acc : [...acc, x],
+        []
+      ),
+      additionalItems: parseDef32(def.rest._def, {
+        ...refs,
+        currentPath: [...refs.currentPath, "additionalItems"]
+      })
+    };
+  } else {
+    return {
+      type: "array",
+      minItems: def.items.length,
+      maxItems: def.items.length,
+      items: def.items.map(
+        (x, i) => parseDef32(x._def, {
+          ...refs,
+          currentPath: [...refs.currentPath, "items", `${i}`]
+        })
+      ).reduce(
+        (acc, x) => x === void 0 ? acc : [...acc, x],
+        []
+      )
+    };
+  }
+}
+function parseUndefinedDef32() {
+  return {
+    not: parseAnyDef32()
+  };
+}
+function parseUnknownDef32() {
+  return parseAnyDef32();
+}
+var parseReadonlyDef32 = (def, refs) => {
+  return parseDef32(def.innerType._def, refs);
+};
+var selectParser32 = (def, typeName, refs) => {
+  switch (typeName) {
+    case ZodFirstPartyTypeKind$1.ZodString:
+      return parseStringDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodNumber:
+      return parseNumberDef32(def);
+    case ZodFirstPartyTypeKind$1.ZodObject:
+      return parseObjectDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodBigInt:
+      return parseBigintDef32(def);
+    case ZodFirstPartyTypeKind$1.ZodBoolean:
+      return parseBooleanDef32();
+    case ZodFirstPartyTypeKind$1.ZodDate:
+      return parseDateDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodUndefined:
+      return parseUndefinedDef32();
+    case ZodFirstPartyTypeKind$1.ZodNull:
+      return parseNullDef32();
+    case ZodFirstPartyTypeKind$1.ZodArray:
+      return parseArrayDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodUnion:
+    case ZodFirstPartyTypeKind$1.ZodDiscriminatedUnion:
+      return parseUnionDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodIntersection:
+      return parseIntersectionDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodTuple:
+      return parseTupleDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodRecord:
+      return parseRecordDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodLiteral:
+      return parseLiteralDef32(def);
+    case ZodFirstPartyTypeKind$1.ZodEnum:
+      return parseEnumDef32(def);
+    case ZodFirstPartyTypeKind$1.ZodNativeEnum:
+      return parseNativeEnumDef32(def);
+    case ZodFirstPartyTypeKind$1.ZodNullable:
+      return parseNullableDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodOptional:
+      return parseOptionalDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodMap:
+      return parseMapDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodSet:
+      return parseSetDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodLazy:
+      return () => def.getter()._def;
+    case ZodFirstPartyTypeKind$1.ZodPromise:
+      return parsePromiseDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodNaN:
+    case ZodFirstPartyTypeKind$1.ZodNever:
+      return parseNeverDef32();
+    case ZodFirstPartyTypeKind$1.ZodEffects:
+      return parseEffectsDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodAny:
+      return parseAnyDef32();
+    case ZodFirstPartyTypeKind$1.ZodUnknown:
+      return parseUnknownDef32();
+    case ZodFirstPartyTypeKind$1.ZodDefault:
+      return parseDefaultDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodBranded:
+      return parseBrandedDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodReadonly:
+      return parseReadonlyDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodCatch:
+      return parseCatchDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodPipeline:
+      return parsePipelineDef32(def, refs);
+    case ZodFirstPartyTypeKind$1.ZodFunction:
+    case ZodFirstPartyTypeKind$1.ZodVoid:
+    case ZodFirstPartyTypeKind$1.ZodSymbol:
+      return void 0;
+    default:
+      return /* @__PURE__ */ ((_) => void 0)();
+  }
+};
+var getRelativePath32 = (pathA, pathB) => {
+  let i = 0;
+  for (; i < pathA.length && i < pathB.length; i++) {
+    if (pathA[i] !== pathB[i]) break;
+  }
+  return [(pathA.length - i).toString(), ...pathB.slice(i)].join("/");
+};
+function parseDef32(def, refs, forceResolution = false) {
+  var _a224;
+  const seenItem = refs.seen.get(def);
+  if (refs.override) {
+    const overrideResult = (_a224 = refs.override) == null ? void 0 : _a224.call(
+      refs,
+      def,
+      refs,
+      seenItem,
+      forceResolution
+    );
+    if (overrideResult !== ignoreOverride32) {
+      return overrideResult;
+    }
+  }
+  if (seenItem && !forceResolution) {
+    const seenSchema = get$ref32(seenItem, refs);
+    if (seenSchema !== void 0) {
+      return seenSchema;
+    }
+  }
+  const newItem = { def, path: refs.currentPath, jsonSchema: void 0 };
+  refs.seen.set(def, newItem);
+  const jsonSchemaOrGetter = selectParser32(def, def.typeName, refs);
+  const jsonSchema222 = typeof jsonSchemaOrGetter === "function" ? parseDef32(jsonSchemaOrGetter(), refs) : jsonSchemaOrGetter;
+  if (jsonSchema222) {
+    addMeta32(def, refs, jsonSchema222);
+  }
+  if (refs.postProcess) {
+    const postProcessResult = refs.postProcess(jsonSchema222, def, refs);
+    newItem.jsonSchema = jsonSchema222;
+    return postProcessResult;
+  }
+  newItem.jsonSchema = jsonSchema222;
+  return jsonSchema222;
+}
+var get$ref32 = (item, refs) => {
+  switch (refs.$refStrategy) {
+    case "root":
+      return { $ref: item.path.join("/") };
+    case "relative":
+      return { $ref: getRelativePath32(refs.currentPath, item.path) };
+    case "none":
+    case "seen": {
+      if (item.path.length < refs.currentPath.length && item.path.every((value, index) => refs.currentPath[index] === value)) {
+        console.warn(
+          `Recursive reference detected at ${refs.currentPath.join(
+            "/"
+          )}! Defaulting to any`
+        );
+        return parseAnyDef32();
+      }
+      return refs.$refStrategy === "seen" ? parseAnyDef32() : void 0;
+    }
+  }
+};
+var addMeta32 = (def, refs, jsonSchema222) => {
+  if (def.description) {
+    jsonSchema222.description = def.description;
+  }
+  return jsonSchema222;
+};
+var getRefs32 = (options) => {
+  const _options = getDefaultOptions32(options);
+  const currentPath = _options.name !== void 0 ? [..._options.basePath, _options.definitionPath, _options.name] : _options.basePath;
+  return {
+    ..._options,
+    currentPath,
+    propertyPath: void 0,
+    seen: new Map(
+      Object.entries(_options.definitions).map(([name224, def]) => [
+        def._def,
+        {
+          def: def._def,
+          path: [..._options.basePath, _options.definitionPath, name224],
+          // Resolution of references will be forced even though seen, so it's ok that the schema is undefined here for now.
+          jsonSchema: void 0
+        }
+      ])
+    )
+  };
+};
+var zod3ToJsonSchema = (schema, options) => {
+  var _a224;
+  const refs = getRefs32(options);
+  let definitions = typeof options === "object" && options.definitions ? Object.entries(options.definitions).reduce(
+    (acc, [name324, schema2]) => {
+      var _a324;
+      return {
+        ...acc,
+        [name324]: (_a324 = parseDef32(
+          schema2._def,
+          {
+            ...refs,
+            currentPath: [...refs.basePath, refs.definitionPath, name324]
+          },
+          true
+        )) != null ? _a324 : parseAnyDef32()
+      };
+    },
+    {}
+  ) : void 0;
+  const name224 = typeof options === "string" ? options : (options == null ? void 0 : options.nameStrategy) === "title" ? void 0 : options == null ? void 0 : options.name;
+  const main = (_a224 = parseDef32(
+    schema._def,
+    name224 === void 0 ? refs : {
+      ...refs,
+      currentPath: [...refs.basePath, refs.definitionPath, name224]
+    },
+    false
+  )) != null ? _a224 : parseAnyDef32();
+  const title = typeof options === "object" && options.name !== void 0 && options.nameStrategy === "title" ? options.name : void 0;
+  if (title !== void 0) {
+    main.title = title;
+  }
+  const combined = name224 === void 0 ? definitions ? {
+    ...main,
+    [refs.definitionPath]: definitions
+  } : main : {
+    $ref: [
+      ...refs.$refStrategy === "relative" ? [] : refs.basePath,
+      refs.definitionPath,
+      name224
+    ].join("/"),
+    [refs.definitionPath]: {
+      ...definitions,
+      [name224]: main
+    }
+  };
+  combined.$schema = "http://json-schema.org/draft-07/schema#";
+  return combined;
+};
+var schemaSymbol3 = Symbol.for("vercel.ai.schema");
+function lazySchema(createSchema) {
+  let schema;
+  return () => {
+    if (schema == null) {
+      schema = createSchema();
+    }
+    return schema;
+  };
+}
+function jsonSchema3(jsonSchema222, {
+  validate
+} = {}) {
+  return {
+    [schemaSymbol3]: true,
+    _type: void 0,
+    // should never be used directly
+    get jsonSchema() {
+      if (typeof jsonSchema222 === "function") {
+        jsonSchema222 = jsonSchema222();
+      }
+      return jsonSchema222;
+    },
+    validate
+  };
+}
+function isSchema3(value) {
+  return typeof value === "object" && value !== null && schemaSymbol3 in value && value[schemaSymbol3] === true && "jsonSchema" in value && "validate" in value;
+}
+function asSchema3(schema) {
+  return schema == null ? jsonSchema3({ properties: {}, additionalProperties: false }) : isSchema3(schema) ? schema : "~standard" in schema ? schema["~standard"].vendor === "zod" ? zodSchema3(schema) : standardSchema(schema) : schema();
+}
+function standardSchema(standardSchema2) {
+  return jsonSchema3(
+    () => standardSchema2["~standard"].jsonSchema.input({
+      target: "draft-07"
+    }),
+    {
+      validate: async (value) => {
+        const result = await standardSchema2["~standard"].validate(value);
+        return "value" in result ? { success: true, value: result.value } : {
+          success: false,
+          error: new TypeValidationError3({
+            value,
+            cause: result.issues
+          })
+        };
+      }
+    }
+  );
+}
+function zod3Schema2(zodSchema222, options) {
+  var _a224;
+  const useReferences = (_a224 = void 0) != null ? _a224 : false;
+  return jsonSchema3(
+    // defer json schema creation to avoid unnecessary computation when only validation is needed
+    () => zod3ToJsonSchema(zodSchema222, {
+      $refStrategy: useReferences ? "root" : "none"
+    }),
+    {
+      validate: async (value) => {
+        const result = await zodSchema222.safeParseAsync(value);
+        return result.success ? { success: true, value: result.data } : { success: false, error: result.error };
+      }
+    }
+  );
+}
+function zod4Schema2(zodSchema222, options) {
+  var _a224;
+  const useReferences = (_a224 = void 0) != null ? _a224 : false;
+  return jsonSchema3(
+    // defer json schema creation to avoid unnecessary computation when only validation is needed
+    () => addAdditionalPropertiesToJsonSchema(
+      z42.toJSONSchema(zodSchema222, {
+        target: "draft-7",
+        io: "input",
+        reused: useReferences ? "ref" : "inline"
+      })
+    ),
+    {
+      validate: async (value) => {
+        const result = await z42.safeParseAsync(zodSchema222, value);
+        return result.success ? { success: true, value: result.data } : { success: false, error: result.error };
+      }
+    }
+  );
+}
+function isZod4Schema2(zodSchema222) {
+  return "_zod" in zodSchema222;
+}
+function zodSchema3(zodSchema222, options) {
+  if (isZod4Schema2(zodSchema222)) {
+    return zod4Schema2(zodSchema222);
+  } else {
+    return zod3Schema2(zodSchema222);
+  }
+}
+async function validateTypes2({
+  value,
+  schema
+}) {
+  const result = await safeValidateTypes3({ value, schema });
+  if (!result.success) {
+    throw TypeValidationError3.wrap({ value, cause: result.error });
+  }
+  return result.value;
+}
+async function safeValidateTypes3({
+  value,
+  schema
+}) {
+  const actualSchema = asSchema3(schema);
+  try {
+    if (actualSchema.validate == null) {
+      return { success: true, value, rawValue: value };
+    }
+    const result = await actualSchema.validate(value);
+    if (result.success) {
+      return { success: true, value: result.value, rawValue: value };
+    }
+    return {
+      success: false,
+      error: TypeValidationError3.wrap({ value, cause: result.error }),
+      rawValue: value
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: TypeValidationError3.wrap({ value, cause: error }),
+      rawValue: value
+    };
+  }
+}
+async function parseJSON2({
+  text: text42,
+  schema
+}) {
+  try {
+    const value = secureJsonParse2(text42);
+    if (schema == null) {
+      return value;
+    }
+    return validateTypes2({ value, schema });
+  } catch (error) {
+    if (JSONParseError3.isInstance(error) || TypeValidationError3.isInstance(error)) {
+      throw error;
+    }
+    throw new JSONParseError3({ text: text42, cause: error });
+  }
+}
+async function safeParseJSON3({
+  text: text42,
+  schema
+}) {
+  try {
+    const value = secureJsonParse2(text42);
+    if (schema == null) {
+      return { success: true, value, rawValue: value };
+    }
+    return await safeValidateTypes3({ value, schema });
+  } catch (error) {
+    return {
+      success: false,
+      error: JSONParseError3.isInstance(error) ? error : new JSONParseError3({ text: text42, cause: error }),
+      rawValue: void 0
+    };
+  }
+}
+function parseJsonEventStream2({
+  stream,
+  schema
+}) {
+  return stream.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream2()).pipeThrough(
+    new TransformStream({
+      async transform({ data }, controller) {
+        if (data === "[DONE]") {
+          return;
+        }
+        controller.enqueue(await safeParseJSON3({ text: data, schema }));
+      }
+    })
+  );
+}
+var getOriginalFetch22 = () => globalThis.fetch;
+var postJsonToApi2 = async ({
+  url,
+  headers,
+  body,
+  failedResponseHandler,
+  successfulResponseHandler,
+  abortSignal,
+  fetch: fetch2
+}) => postToApi2({
+  url,
+  headers: {
+    "Content-Type": "application/json",
+    ...headers
+  },
+  body: {
+    content: JSON.stringify(body),
+    values: body
+  },
+  failedResponseHandler,
+  successfulResponseHandler,
+  abortSignal,
+  fetch: fetch2
+});
+var postToApi2 = async ({
+  url,
+  headers = {},
+  body,
+  successfulResponseHandler,
+  failedResponseHandler,
+  abortSignal,
+  fetch: fetch2 = getOriginalFetch22()
+}) => {
+  try {
+    const response = await fetch2(url, {
+      method: "POST",
+      headers: withUserAgentSuffix2(
+        headers,
+        `ai-sdk/provider-utils/${VERSION4}`,
+        getRuntimeEnvironmentUserAgent2()
+      ),
+      body: body.content,
+      signal: abortSignal
+    });
+    const responseHeaders = extractResponseHeaders2(response);
+    if (!response.ok) {
+      let errorInformation;
+      try {
+        errorInformation = await failedResponseHandler({
+          response,
+          url,
+          requestBodyValues: body.values
+        });
+      } catch (error) {
+        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+          throw error;
+        }
+        throw new APICallError3({
+          message: "Failed to process error response",
+          cause: error,
+          statusCode: response.status,
+          url,
+          responseHeaders,
+          requestBodyValues: body.values
+        });
+      }
+      throw errorInformation.value;
+    }
+    try {
+      return await successfulResponseHandler({
+        response,
+        url,
+        requestBodyValues: body.values
+      });
+    } catch (error) {
+      if (error instanceof Error) {
+        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+          throw error;
+        }
+      }
+      throw new APICallError3({
+        message: "Failed to process successful response",
+        cause: error,
+        statusCode: response.status,
+        url,
+        responseHeaders,
+        requestBodyValues: body.values
+      });
+    }
+  } catch (error) {
+    throw handleFetchError2({ error, url, requestBodyValues: body.values });
+  }
+};
+async function resolve2(value) {
+  if (typeof value === "function") {
+    value = value();
+  }
+  return Promise.resolve(value);
+}
+var createJsonErrorResponseHandler2 = ({
+  errorSchema,
+  errorToMessage,
+  isRetryable
+}) => async ({ response, url, requestBodyValues }) => {
+  const responseBody = await response.text();
+  const responseHeaders = extractResponseHeaders2(response);
+  if (responseBody.trim() === "") {
+    return {
+      responseHeaders,
+      value: new APICallError3({
+        message: response.statusText,
+        url,
+        requestBodyValues,
+        statusCode: response.status,
+        responseHeaders,
+        responseBody,
+        isRetryable: isRetryable == null ? void 0 : isRetryable(response)
+      })
+    };
+  }
+  try {
+    const parsedError = await parseJSON2({
+      text: responseBody,
+      schema: errorSchema
+    });
+    return {
+      responseHeaders,
+      value: new APICallError3({
+        message: errorToMessage(parsedError),
+        url,
+        requestBodyValues,
+        statusCode: response.status,
+        responseHeaders,
+        responseBody,
+        data: parsedError,
+        isRetryable: isRetryable == null ? void 0 : isRetryable(response, parsedError)
+      })
+    };
+  } catch (parseError) {
+    return {
+      responseHeaders,
+      value: new APICallError3({
+        message: response.statusText,
+        url,
+        requestBodyValues,
+        statusCode: response.status,
+        responseHeaders,
+        responseBody,
+        isRetryable: isRetryable == null ? void 0 : isRetryable(response)
+      })
+    };
+  }
+};
+var createEventSourceResponseHandler2 = (chunkSchema) => async ({ response }) => {
+  const responseHeaders = extractResponseHeaders2(response);
+  if (response.body == null) {
+    throw new EmptyResponseBodyError2({});
+  }
+  return {
+    responseHeaders,
+    value: parseJsonEventStream2({
+      stream: response.body,
+      schema: chunkSchema
+    })
+  };
+};
+var createJsonResponseHandler2 = (responseSchema) => async ({ response, url, requestBodyValues }) => {
+  const responseBody = await response.text();
+  const parsedResult = await safeParseJSON3({
+    text: responseBody,
+    schema: responseSchema
+  });
+  const responseHeaders = extractResponseHeaders2(response);
+  if (!parsedResult.success) {
+    throw new APICallError3({
+      message: "Invalid JSON response",
+      cause: parsedResult.error,
+      statusCode: response.status,
+      responseHeaders,
+      responseBody,
+      url,
+      requestBodyValues
+    });
+  }
+  return {
+    responseHeaders,
+    value: parsedResult.value,
+    rawValue: parsedResult.rawValue
+  };
+};
+function withoutTrailingSlash2(url) {
+  return url == null ? void 0 : url.replace(/\/$/, "");
+}
+var require_get_context2 = __commonJS$2({
+  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/get-context.js"(exports, module) {
+    var __defProp222 = Object.defineProperty;
+    var __getOwnPropDesc22 = Object.getOwnPropertyDescriptor;
+    var __getOwnPropNames22 = Object.getOwnPropertyNames;
+    var __hasOwnProp22 = Object.prototype.hasOwnProperty;
+    var __export222 = (target, all) => {
+      for (var name144 in all)
+        __defProp222(target, name144, { get: all[name144], enumerable: true });
+    };
+    var __copyProps22 = (to, from, except, desc) => {
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (let key of __getOwnPropNames22(from))
+          if (!__hasOwnProp22.call(to, key) && key !== except)
+            __defProp222(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc22(from, key)) || desc.enumerable });
+      }
+      return to;
+    };
+    var __toCommonJS = (mod) => __copyProps22(__defProp222({}, "__esModule", { value: true }), mod);
+    var get_context_exports = {};
+    __export222(get_context_exports, {
+      SYMBOL_FOR_REQ_CONTEXT: () => SYMBOL_FOR_REQ_CONTEXT,
+      getContext: () => getContext3
+    });
+    module.exports = __toCommonJS(get_context_exports);
+    var SYMBOL_FOR_REQ_CONTEXT = Symbol.for("@vercel/request-context");
+    function getContext3() {
+      const fromSymbol = globalThis;
+      return fromSymbol[SYMBOL_FOR_REQ_CONTEXT]?.get?.() ?? {};
+    }
+  }
+});
+var require_get_vercel_oidc_token2 = __commonJS$2({
+  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/get-vercel-oidc-token.js"(exports, module) {
+    var __defProp222 = Object.defineProperty;
+    var __getOwnPropDesc22 = Object.getOwnPropertyDescriptor;
+    var __getOwnPropNames22 = Object.getOwnPropertyNames;
+    var __hasOwnProp22 = Object.prototype.hasOwnProperty;
+    var __export222 = (target, all) => {
+      for (var name144 in all)
+        __defProp222(target, name144, { get: all[name144], enumerable: true });
+    };
+    var __copyProps22 = (to, from, except, desc) => {
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (let key of __getOwnPropNames22(from))
+          if (!__hasOwnProp22.call(to, key) && key !== except)
+            __defProp222(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc22(from, key)) || desc.enumerable });
+      }
+      return to;
+    };
+    var __toCommonJS = (mod) => __copyProps22(__defProp222({}, "__esModule", { value: true }), mod);
+    var get_vercel_oidc_token_exports = {};
+    __export222(get_vercel_oidc_token_exports, {
+      getVercelOidcToken: () => getVercelOidcToken3,
+      getVercelOidcTokenSync: () => getVercelOidcTokenSync2
+    });
+    module.exports = __toCommonJS(get_vercel_oidc_token_exports);
+    var import_get_context = require_get_context2();
+    var import_token_error = require_token_error$2();
+    async function getVercelOidcToken3() {
+      let token = "";
+      let err;
+      try {
+        token = getVercelOidcTokenSync2();
+      } catch (error) {
+        err = error;
+      }
+      try {
+        const [{ getTokenPayload, isExpired }, { refreshToken }] = await Promise.all([
+          await import('./token-util-NEHG7TUY-KSXDO2NO-WH6I3PH3.mjs'),
+          await import('./token-6GSAFR2W-K2BTU23I-NW33N3NU.mjs')
+        ]);
+        if (!token || isExpired(getTokenPayload(token))) {
+          await refreshToken();
+          token = getVercelOidcTokenSync2();
+        }
+      } catch (error) {
+        if (err?.message && error instanceof Error) {
+          error.message = `${err.message}
+${error.message}`;
+        }
+        throw new import_token_error.VercelOidcTokenError(`Failed to refresh OIDC token`, error);
+      }
+      return token;
+    }
+    function getVercelOidcTokenSync2() {
+      const token = (0, import_get_context.getContext)().headers?.["x-vercel-oidc-token"] ?? process.env.VERCEL_OIDC_TOKEN;
+      if (!token) {
+        throw new Error(
+          `The 'x-vercel-oidc-token' header is missing from the request. Do you have the OIDC option enabled in the Vercel project settings?`
+        );
+      }
+      return token;
+    }
+  }
+});
+var require_dist2 = __commonJS$2({
+  "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/index.js"(exports, module) {
+    var __defProp222 = Object.defineProperty;
+    var __getOwnPropDesc22 = Object.getOwnPropertyDescriptor;
+    var __getOwnPropNames22 = Object.getOwnPropertyNames;
+    var __hasOwnProp22 = Object.prototype.hasOwnProperty;
+    var __export222 = (target, all) => {
+      for (var name144 in all)
+        __defProp222(target, name144, { get: all[name144], enumerable: true });
+    };
+    var __copyProps22 = (to, from, except, desc) => {
+      if (from && typeof from === "object" || typeof from === "function") {
+        for (let key of __getOwnPropNames22(from))
+          if (!__hasOwnProp22.call(to, key) && key !== except)
+            __defProp222(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc22(from, key)) || desc.enumerable });
+      }
+      return to;
+    };
+    var __toCommonJS = (mod) => __copyProps22(__defProp222({}, "__esModule", { value: true }), mod);
+    var src_exports = {};
+    __export222(src_exports, {
+      getContext: () => import_get_context.getContext,
+      getVercelOidcToken: () => import_get_vercel_oidc_token.getVercelOidcToken,
+      getVercelOidcTokenSync: () => import_get_vercel_oidc_token.getVercelOidcTokenSync
+    });
+    module.exports = __toCommonJS(src_exports);
+    var import_get_vercel_oidc_token = require_get_vercel_oidc_token2();
+    var import_get_context = require_get_context2();
+  }
+});
+var import_oidc3 = __toESM$2(require_dist2());
+var import_oidc22 = __toESM$2(require_dist2());
+var marker20 = "vercel.ai.gateway.error";
+var symbol20 = Symbol.for(marker20);
+var _a20;
+var _b16;
+var GatewayError2 = class _GatewayError2 extends (_b16 = Error, _a20 = symbol20, _b16) {
+  constructor({
+    message,
+    statusCode = 500,
+    cause
+  }) {
+    super(message);
+    this[_a20] = true;
+    this.statusCode = statusCode;
+    this.cause = cause;
+  }
+  /**
+   * Checks if the given error is a Gateway Error.
+   * @param {unknown} error - The error to check.
+   * @returns {boolean} True if the error is a Gateway Error, false otherwise.
+   */
+  static isInstance(error) {
+    return _GatewayError2.hasMarker(error);
+  }
+  static hasMarker(error) {
+    return typeof error === "object" && error !== null && symbol20 in error && error[symbol20] === true;
+  }
+};
+var name20 = "GatewayAuthenticationError";
+var marker26 = `vercel.ai.gateway.error.${name20}`;
+var symbol26 = Symbol.for(marker26);
+var _a26;
+var _b23;
+var GatewayAuthenticationError2 = class _GatewayAuthenticationError2 extends (_b23 = GatewayError2, _a26 = symbol26, _b23) {
+  constructor({
+    message = "Authentication failed",
+    statusCode = 401,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a26] = true;
+    this.name = name20;
+    this.type = "authentication_error";
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol26 in error;
+  }
+  /**
+   * Creates a contextual error message when authentication fails
+   */
+  static createContextualError({
+    apiKeyProvided,
+    oidcTokenProvided,
+    message = "Authentication failed",
+    statusCode = 401,
+    cause
+  }) {
+    let contextualMessage;
+    if (apiKeyProvided) {
+      contextualMessage = `AI Gateway authentication failed: Invalid API key.
+
+Create a new API key: https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys
+
+Provide via 'apiKey' option or 'AI_GATEWAY_API_KEY' environment variable.`;
+    } else if (oidcTokenProvided) {
+      contextualMessage = `AI Gateway authentication failed: Invalid OIDC token.
+
+Run 'npx vercel link' to link your project, then 'vc env pull' to fetch the token.
+
+Alternatively, use an API key: https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys`;
+    } else {
+      contextualMessage = `AI Gateway authentication failed: No authentication provided.
+
+Option 1 - API key:
+Create an API key: https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys
+Provide via 'apiKey' option or 'AI_GATEWAY_API_KEY' environment variable.
+
+Option 2 - OIDC token:
+Run 'npx vercel link' to link your project, then 'vc env pull' to fetch the token.`;
+    }
+    return new _GatewayAuthenticationError2({
+      message: contextualMessage,
+      statusCode,
+      cause
+    });
+  }
+};
+var name26 = "GatewayInvalidRequestError";
+var marker36 = `vercel.ai.gateway.error.${name26}`;
+var symbol36 = Symbol.for(marker36);
+var _a36;
+var _b33;
+var GatewayInvalidRequestError2 = class extends (_b33 = GatewayError2, _a36 = symbol36, _b33) {
+  constructor({
+    message = "Invalid request",
+    statusCode = 400,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a36] = true;
+    this.name = name26;
+    this.type = "invalid_request_error";
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol36 in error;
+  }
+};
+var name36 = "GatewayRateLimitError";
+var marker46 = `vercel.ai.gateway.error.${name36}`;
+var symbol46 = Symbol.for(marker46);
+var _a46;
+var _b43;
+var GatewayRateLimitError2 = class extends (_b43 = GatewayError2, _a46 = symbol46, _b43) {
+  constructor({
+    message = "Rate limit exceeded",
+    statusCode = 429,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a46] = true;
+    this.name = name36;
+    this.type = "rate_limit_exceeded";
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol46 in error;
+  }
+};
+var name46 = "GatewayModelNotFoundError";
+var marker56 = `vercel.ai.gateway.error.${name46}`;
+var symbol56 = Symbol.for(marker56);
+var modelNotFoundParamSchema2 = lazySchema(
+  () => zodSchema3(
+    z$2.object({
+      modelId: z$2.string()
+    })
+  )
+);
+var _a56;
+var _b53;
+var GatewayModelNotFoundError2 = class extends (_b53 = GatewayError2, _a56 = symbol56, _b53) {
+  constructor({
+    message = "Model not found",
+    statusCode = 404,
+    modelId,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a56] = true;
+    this.name = name46;
+    this.type = "model_not_found";
+    this.modelId = modelId;
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol56 in error;
+  }
+};
+var name56 = "GatewayInternalServerError";
+var marker66 = `vercel.ai.gateway.error.${name56}`;
+var symbol66 = Symbol.for(marker66);
+var _a66;
+var _b63;
+var GatewayInternalServerError2 = class extends (_b63 = GatewayError2, _a66 = symbol66, _b63) {
+  constructor({
+    message = "Internal server error",
+    statusCode = 500,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a66] = true;
+    this.name = name56;
+    this.type = "internal_server_error";
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol66 in error;
+  }
+};
+var name66 = "GatewayResponseError";
+var marker76 = `vercel.ai.gateway.error.${name66}`;
+var symbol76 = Symbol.for(marker76);
+var _a76;
+var _b73;
+var GatewayResponseError2 = class extends (_b73 = GatewayError2, _a76 = symbol76, _b73) {
+  constructor({
+    message = "Invalid response from Gateway",
+    statusCode = 502,
+    response,
+    validationError,
+    cause
+  } = {}) {
+    super({ message, statusCode, cause });
+    this[_a76] = true;
+    this.name = name66;
+    this.type = "response_error";
+    this.response = response;
+    this.validationError = validationError;
+  }
+  static isInstance(error) {
+    return GatewayError2.hasMarker(error) && symbol76 in error;
+  }
+};
+async function createGatewayErrorFromResponse2({
+  response,
+  statusCode,
+  defaultMessage = "Gateway request failed",
+  cause,
+  authMethod
+}) {
+  const parseResult = await safeValidateTypes3({
+    value: response,
+    schema: gatewayErrorResponseSchema2
+  });
+  if (!parseResult.success) {
+    return new GatewayResponseError2({
+      message: `Invalid error response format: ${defaultMessage}`,
+      statusCode,
+      response,
+      validationError: parseResult.error,
+      cause
+    });
+  }
+  const validatedResponse = parseResult.value;
+  const errorType = validatedResponse.error.type;
+  const message = validatedResponse.error.message;
+  switch (errorType) {
+    case "authentication_error":
+      return GatewayAuthenticationError2.createContextualError({
+        apiKeyProvided: authMethod === "api-key",
+        oidcTokenProvided: authMethod === "oidc",
+        statusCode,
+        cause
+      });
+    case "invalid_request_error":
+      return new GatewayInvalidRequestError2({ message, statusCode, cause });
+    case "rate_limit_exceeded":
+      return new GatewayRateLimitError2({ message, statusCode, cause });
+    case "model_not_found": {
+      const modelResult = await safeValidateTypes3({
+        value: validatedResponse.error.param,
+        schema: modelNotFoundParamSchema2
+      });
+      return new GatewayModelNotFoundError2({
+        message,
+        statusCode,
+        modelId: modelResult.success ? modelResult.value.modelId : void 0,
+        cause
+      });
+    }
+    case "internal_server_error":
+      return new GatewayInternalServerError2({ message, statusCode, cause });
+    default:
+      return new GatewayInternalServerError2({ message, statusCode, cause });
+  }
+}
+var gatewayErrorResponseSchema2 = lazySchema(
+  () => zodSchema3(
+    z$2.object({
+      error: z$2.object({
+        message: z$2.string(),
+        type: z$2.string().nullish(),
+        param: z$2.unknown().nullish(),
+        code: z$2.union([z$2.string(), z$2.number()]).nullish()
+      })
+    })
+  )
+);
+function asGatewayError2(error, authMethod) {
+  var _a832;
+  if (GatewayError2.isInstance(error)) {
+    return error;
+  }
+  if (APICallError3.isInstance(error)) {
+    return createGatewayErrorFromResponse2({
+      response: extractApiCallResponse2(error),
+      statusCode: (_a832 = error.statusCode) != null ? _a832 : 500,
+      defaultMessage: "Gateway request failed",
+      cause: error,
+      authMethod
+    });
+  }
+  return createGatewayErrorFromResponse2({
+    response: {},
+    statusCode: 500,
+    defaultMessage: error instanceof Error ? `Gateway request failed: ${error.message}` : "Unknown Gateway error",
+    cause: error,
+    authMethod
+  });
+}
+function extractApiCallResponse2(error) {
+  if (error.data !== void 0) {
+    return error.data;
+  }
+  if (error.responseBody != null) {
+    try {
+      return JSON.parse(error.responseBody);
+    } catch (e2) {
+      return error.responseBody;
+    }
+  }
+  return {};
+}
+var GATEWAY_AUTH_METHOD_HEADER2 = "ai-gateway-auth-method";
+async function parseAuthMethod2(headers) {
+  const result = await safeValidateTypes3({
+    value: headers[GATEWAY_AUTH_METHOD_HEADER2],
+    schema: gatewayAuthMethodSchema2
+  });
+  return result.success ? result.value : void 0;
+}
+var gatewayAuthMethodSchema2 = lazySchema(
+  () => zodSchema3(z$2.union([z$2.literal("api-key"), z$2.literal("oidc")]))
+);
+var GatewayFetchMetadata2 = class {
+  constructor(config) {
+    this.config = config;
+  }
+  async getAvailableModels() {
+    try {
+      const { value } = await getFromApi2({
+        url: `${this.config.baseURL}/config`,
+        headers: await resolve2(this.config.headers()),
+        successfulResponseHandler: createJsonResponseHandler2(
+          gatewayAvailableModelsResponseSchema2
+        ),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        fetch: this.config.fetch
+      });
+      return value;
+    } catch (error) {
+      throw await asGatewayError2(error);
+    }
+  }
+  async getCredits() {
+    try {
+      const baseUrl = new URL(this.config.baseURL);
+      const { value } = await getFromApi2({
+        url: `${baseUrl.origin}/v1/credits`,
+        headers: await resolve2(this.config.headers()),
+        successfulResponseHandler: createJsonResponseHandler2(
+          gatewayCreditsResponseSchema2
+        ),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        fetch: this.config.fetch
+      });
+      return value;
+    } catch (error) {
+      throw await asGatewayError2(error);
+    }
+  }
+};
+var gatewayAvailableModelsResponseSchema2 = lazySchema(
+  () => zodSchema3(
+    z$2.object({
+      models: z$2.array(
+        z$2.object({
+          id: z$2.string(),
+          name: z$2.string(),
+          description: z$2.string().nullish(),
+          pricing: z$2.object({
+            input: z$2.string(),
+            output: z$2.string(),
+            input_cache_read: z$2.string().nullish(),
+            input_cache_write: z$2.string().nullish()
+          }).transform(
+            ({ input, output, input_cache_read, input_cache_write }) => ({
+              input,
+              output,
+              ...input_cache_read ? { cachedInputTokens: input_cache_read } : {},
+              ...input_cache_write ? { cacheCreationInputTokens: input_cache_write } : {}
+            })
+          ).nullish(),
+          specification: z$2.object({
+            specificationVersion: z$2.literal("v3"),
+            provider: z$2.string(),
+            modelId: z$2.string()
+          }),
+          modelType: z$2.enum(["language", "embedding", "image"]).nullish()
+        })
+      )
+    })
+  )
+);
+var gatewayCreditsResponseSchema2 = lazySchema(
+  () => zodSchema3(
+    z$2.object({
+      balance: z$2.string(),
+      total_used: z$2.string()
+    }).transform(({ balance, total_used }) => ({
+      balance,
+      totalUsed: total_used
+    }))
+  )
+);
+var GatewayLanguageModel2 = class {
+  constructor(modelId, config) {
+    this.modelId = modelId;
+    this.config = config;
+    this.specificationVersion = "v3";
+    this.supportedUrls = { "*/*": [/.*/] };
+  }
+  get provider() {
+    return this.config.provider;
+  }
+  async getArgs(options) {
+    const { abortSignal: _abortSignal, ...optionsWithoutSignal } = options;
+    return {
+      args: this.maybeEncodeFileParts(optionsWithoutSignal),
+      warnings: []
+    };
+  }
+  async doGenerate(options) {
+    const { args, warnings } = await this.getArgs(options);
+    const { abortSignal } = options;
+    const resolvedHeaders = await resolve2(this.config.headers());
+    try {
+      const {
+        responseHeaders,
+        value: responseBody,
+        rawValue: rawResponse
+      } = await postJsonToApi2({
+        url: this.getUrl(),
+        headers: combineHeaders2(
+          resolvedHeaders,
+          options.headers,
+          this.getModelConfigHeaders(this.modelId, false),
+          await resolve2(this.config.o11yHeaders)
+        ),
+        body: args,
+        successfulResponseHandler: createJsonResponseHandler2(z$2.any()),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        ...abortSignal && { abortSignal },
+        fetch: this.config.fetch
+      });
+      return {
+        ...responseBody,
+        request: { body: args },
+        response: { headers: responseHeaders, body: rawResponse },
+        warnings
+      };
+    } catch (error) {
+      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+    }
+  }
+  async doStream(options) {
+    const { args, warnings } = await this.getArgs(options);
+    const { abortSignal } = options;
+    const resolvedHeaders = await resolve2(this.config.headers());
+    try {
+      const { value: response, responseHeaders } = await postJsonToApi2({
+        url: this.getUrl(),
+        headers: combineHeaders2(
+          resolvedHeaders,
+          options.headers,
+          this.getModelConfigHeaders(this.modelId, true),
+          await resolve2(this.config.o11yHeaders)
+        ),
+        body: args,
+        successfulResponseHandler: createEventSourceResponseHandler2(z$2.any()),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        ...abortSignal && { abortSignal },
+        fetch: this.config.fetch
+      });
+      return {
+        stream: response.pipeThrough(
+          new TransformStream({
+            start(controller) {
+              if (warnings.length > 0) {
+                controller.enqueue({ type: "stream-start", warnings });
+              }
+            },
+            transform(chunk, controller) {
+              if (chunk.success) {
+                const streamPart = chunk.value;
+                if (streamPart.type === "raw" && !options.includeRawChunks) {
+                  return;
+                }
+                if (streamPart.type === "response-metadata" && streamPart.timestamp && typeof streamPart.timestamp === "string") {
+                  streamPart.timestamp = new Date(streamPart.timestamp);
+                }
+                controller.enqueue(streamPart);
+              } else {
+                controller.error(
+                  chunk.error
+                );
+              }
+            }
+          })
+        ),
+        request: { body: args },
+        response: { headers: responseHeaders }
+      };
+    } catch (error) {
+      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+    }
+  }
+  isFilePart(part) {
+    return part && typeof part === "object" && "type" in part && part.type === "file";
+  }
+  /**
+   * Encodes file parts in the prompt to base64. Mutates the passed options
+   * instance directly to avoid copying the file data.
+   * @param options - The options to encode.
+   * @returns The options with the file parts encoded.
+   */
+  maybeEncodeFileParts(options) {
+    for (const message of options.prompt) {
+      for (const part of message.content) {
+        if (this.isFilePart(part)) {
+          const filePart = part;
+          if (filePart.data instanceof Uint8Array) {
+            const buffer = Uint8Array.from(filePart.data);
+            const base64Data = Buffer.from(buffer).toString("base64");
+            filePart.data = new URL(
+              `data:${filePart.mediaType || "application/octet-stream"};base64,${base64Data}`
+            );
+          }
+        }
+      }
+    }
+    return options;
+  }
+  getUrl() {
+    return `${this.config.baseURL}/language-model`;
+  }
+  getModelConfigHeaders(modelId, streaming) {
+    return {
+      "ai-language-model-specification-version": "2",
+      "ai-language-model-id": modelId,
+      "ai-language-model-streaming": String(streaming)
+    };
+  }
+};
+var GatewayEmbeddingModel2 = class {
+  constructor(modelId, config) {
+    this.modelId = modelId;
+    this.config = config;
+    this.specificationVersion = "v3";
+    this.maxEmbeddingsPerCall = 2048;
+    this.supportsParallelCalls = true;
+  }
+  get provider() {
+    return this.config.provider;
+  }
+  async doEmbed({
+    values,
+    headers,
+    abortSignal,
+    providerOptions
+  }) {
+    var _a832;
+    const resolvedHeaders = await resolve2(this.config.headers());
+    try {
+      const {
+        responseHeaders,
+        value: responseBody,
+        rawValue
+      } = await postJsonToApi2({
+        url: this.getUrl(),
+        headers: combineHeaders2(
+          resolvedHeaders,
+          headers != null ? headers : {},
+          this.getModelConfigHeaders(),
+          await resolve2(this.config.o11yHeaders)
+        ),
+        body: {
+          values,
+          ...providerOptions ? { providerOptions } : {}
+        },
+        successfulResponseHandler: createJsonResponseHandler2(
+          gatewayEmbeddingResponseSchema2
+        ),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        ...abortSignal && { abortSignal },
+        fetch: this.config.fetch
+      });
+      return {
+        embeddings: responseBody.embeddings,
+        usage: (_a832 = responseBody.usage) != null ? _a832 : void 0,
+        providerMetadata: responseBody.providerMetadata,
+        response: { headers: responseHeaders, body: rawValue },
+        warnings: []
+      };
+    } catch (error) {
+      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+    }
+  }
+  getUrl() {
+    return `${this.config.baseURL}/embedding-model`;
+  }
+  getModelConfigHeaders() {
+    return {
+      "ai-embedding-model-specification-version": "2",
+      "ai-model-id": this.modelId
+    };
+  }
+};
+var gatewayEmbeddingResponseSchema2 = lazySchema(
+  () => zodSchema3(
+    z$2.object({
+      embeddings: z$2.array(z$2.array(z$2.number())),
+      usage: z$2.object({ tokens: z$2.number() }).nullish(),
+      providerMetadata: z$2.record(z$2.string(), z$2.record(z$2.string(), z$2.unknown())).optional()
+    })
+  )
+);
+var GatewayImageModel2 = class {
+  constructor(modelId, config) {
+    this.modelId = modelId;
+    this.config = config;
+    this.specificationVersion = "v3";
+    this.maxImagesPerCall = Number.MAX_SAFE_INTEGER;
+  }
+  get provider() {
+    return this.config.provider;
+  }
+  async doGenerate({
+    prompt,
+    n,
+    size,
+    aspectRatio,
+    seed,
+    providerOptions,
+    headers,
+    abortSignal
+  }) {
+    var _a832;
+    const resolvedHeaders = await resolve2(this.config.headers());
+    try {
+      const {
+        responseHeaders,
+        value: responseBody
+      } = await postJsonToApi2({
+        url: this.getUrl(),
+        headers: combineHeaders2(
+          resolvedHeaders,
+          headers != null ? headers : {},
+          this.getModelConfigHeaders(),
+          await resolve2(this.config.o11yHeaders)
+        ),
+        body: {
+          prompt,
+          n,
+          ...size && { size },
+          ...aspectRatio && { aspectRatio },
+          ...seed && { seed },
+          ...providerOptions && { providerOptions }
+        },
+        successfulResponseHandler: createJsonResponseHandler2(
+          gatewayImageResponseSchema2
+        ),
+        failedResponseHandler: createJsonErrorResponseHandler2({
+          errorSchema: z$2.any(),
+          errorToMessage: (data) => data
+        }),
+        ...abortSignal && { abortSignal },
+        fetch: this.config.fetch
+      });
+      return {
+        images: responseBody.images,
+        // Always base64 strings from server
+        warnings: (_a832 = responseBody.warnings) != null ? _a832 : [],
+        providerMetadata: responseBody.providerMetadata,
+        response: {
+          timestamp: /* @__PURE__ */ new Date(),
+          modelId: this.modelId,
+          headers: responseHeaders
+        }
+      };
+    } catch (error) {
+      throw asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+    }
+  }
+  getUrl() {
+    return `${this.config.baseURL}/image-model`;
+  }
+  getModelConfigHeaders() {
+    return {
+      "ai-image-model-specification-version": "2",
+      "ai-model-id": this.modelId
+    };
+  }
+};
+var providerMetadataEntrySchema2 = z$2.object({
+  images: z$2.array(z$2.unknown()).optional()
+}).catchall(z$2.unknown());
+var gatewayImageResponseSchema2 = z$2.object({
+  images: z$2.array(z$2.string()),
+  // Always base64 strings over the wire
+  warnings: z$2.array(
+    z$2.object({
+      type: z$2.literal("other"),
+      message: z$2.string()
+    })
+  ).optional(),
+  providerMetadata: z$2.record(z$2.string(), providerMetadataEntrySchema2).optional()
+});
+async function getVercelRequestId2() {
+  var _a832;
+  return (_a832 = (0, import_oidc3.getContext)().headers) == null ? void 0 : _a832["x-vercel-id"];
+}
+var VERSION5 = "3.0.0";
+var AI_GATEWAY_PROTOCOL_VERSION2 = "0.0.1";
+function createGatewayProvider2(options = {}) {
+  var _a832, _b83;
+  let pendingMetadata = null;
+  let metadataCache = null;
+  const cacheRefreshMillis = (_a832 = options.metadataCacheRefreshMillis) != null ? _a832 : 1e3 * 60 * 5;
+  let lastFetchTime = 0;
+  const baseURL = (_b83 = withoutTrailingSlash2(options.baseURL)) != null ? _b83 : "https://ai-gateway.vercel.sh/v3/ai";
+  const getHeaders = async () => {
+    const auth = await getGatewayAuthToken2(options);
+    if (auth) {
+      return withUserAgentSuffix2(
+        {
+          Authorization: `Bearer ${auth.token}`,
+          "ai-gateway-protocol-version": AI_GATEWAY_PROTOCOL_VERSION2,
+          [GATEWAY_AUTH_METHOD_HEADER2]: auth.authMethod,
+          ...options.headers
+        },
+        `ai-sdk/gateway/${VERSION5}`
+      );
+    }
+    throw GatewayAuthenticationError2.createContextualError({
+      apiKeyProvided: false,
+      oidcTokenProvided: false,
+      statusCode: 401
+    });
+  };
+  const createO11yHeaders = () => {
+    const deploymentId = loadOptionalSetting2({
+      settingValue: void 0,
+      environmentVariableName: "VERCEL_DEPLOYMENT_ID"
+    });
+    const environment = loadOptionalSetting2({
+      settingValue: void 0,
+      environmentVariableName: "VERCEL_ENV"
+    });
+    const region = loadOptionalSetting2({
+      settingValue: void 0,
+      environmentVariableName: "VERCEL_REGION"
+    });
+    return async () => {
+      const requestId = await getVercelRequestId2();
+      return {
+        ...deploymentId && { "ai-o11y-deployment-id": deploymentId },
+        ...environment && { "ai-o11y-environment": environment },
+        ...region && { "ai-o11y-region": region },
+        ...requestId && { "ai-o11y-request-id": requestId }
+      };
+    };
+  };
+  const createLanguageModel = (modelId) => {
+    return new GatewayLanguageModel2(modelId, {
+      provider: "gateway",
+      baseURL,
+      headers: getHeaders,
+      fetch: options.fetch,
+      o11yHeaders: createO11yHeaders()
+    });
+  };
+  const getAvailableModels = async () => {
+    var _a922, _b92, _c;
+    const now2 = (_c = (_b92 = (_a922 = options._internal) == null ? void 0 : _a922.currentDate) == null ? void 0 : _b92.call(_a922).getTime()) != null ? _c : Date.now();
+    if (!pendingMetadata || now2 - lastFetchTime > cacheRefreshMillis) {
+      lastFetchTime = now2;
+      pendingMetadata = new GatewayFetchMetadata2({
+        baseURL,
+        headers: getHeaders,
+        fetch: options.fetch
+      }).getAvailableModels().then((metadata) => {
+        metadataCache = metadata;
+        return metadata;
+      }).catch(async (error) => {
+        throw await asGatewayError2(
+          error,
+          await parseAuthMethod2(await getHeaders())
+        );
+      });
+    }
+    return metadataCache ? Promise.resolve(metadataCache) : pendingMetadata;
+  };
+  const getCredits = async () => {
+    return new GatewayFetchMetadata2({
+      baseURL,
+      headers: getHeaders,
+      fetch: options.fetch
+    }).getCredits().catch(async (error) => {
+      throw await asGatewayError2(
+        error,
+        await parseAuthMethod2(await getHeaders())
+      );
+    });
+  };
+  const provider = function(modelId) {
+    if (new.target) {
+      throw new Error(
+        "The Gateway Provider model function cannot be called with the new keyword."
+      );
+    }
+    return createLanguageModel(modelId);
+  };
+  provider.specificationVersion = "v3";
+  provider.getAvailableModels = getAvailableModels;
+  provider.getCredits = getCredits;
+  provider.imageModel = (modelId) => {
+    return new GatewayImageModel2(modelId, {
+      provider: "gateway",
+      baseURL,
+      headers: getHeaders,
+      fetch: options.fetch,
+      o11yHeaders: createO11yHeaders()
+    });
+  };
+  provider.languageModel = createLanguageModel;
+  const createEmbeddingModel = (modelId) => {
+    return new GatewayEmbeddingModel2(modelId, {
+      provider: "gateway",
+      baseURL,
+      headers: getHeaders,
+      fetch: options.fetch,
+      o11yHeaders: createO11yHeaders()
+    });
+  };
+  provider.embeddingModel = createEmbeddingModel;
+  provider.textEmbeddingModel = createEmbeddingModel;
+  return provider;
+}
+var gateway2 = createGatewayProvider2();
+async function getGatewayAuthToken2(options) {
+  const apiKey = loadOptionalSetting2({
+    settingValue: options.apiKey,
+    environmentVariableName: "AI_GATEWAY_API_KEY"
+  });
+  if (apiKey) {
+    return {
+      token: apiKey,
+      authMethod: "api-key"
+    };
+  }
+  try {
+    const oidcToken = await (0, import_oidc22.getVercelOidcToken)();
+    return {
+      token: oidcToken,
+      authMethod: "oidc"
+    };
+  } catch (e2) {
+    return null;
+  }
+}
+var _globalThis3 = typeof globalThis === "object" ? globalThis : global;
+var VERSION23 = "1.9.0";
+var re3 = /^(\d+)\.(\d+)\.(\d+)(-(.+))?$/;
+function _makeCompatibilityCheck3(ownVersion) {
+  var acceptedVersions = /* @__PURE__ */ new Set([ownVersion]);
+  var rejectedVersions = /* @__PURE__ */ new Set();
+  var myVersionMatch = ownVersion.match(re3);
+  if (!myVersionMatch) {
+    return function() {
+      return false;
+    };
+  }
+  var ownVersionParsed = {
+    major: +myVersionMatch[1],
+    minor: +myVersionMatch[2],
+    patch: +myVersionMatch[3],
+    prerelease: myVersionMatch[4]
+  };
+  if (ownVersionParsed.prerelease != null) {
+    return function isExactmatch(globalVersion) {
+      return globalVersion === ownVersion;
+    };
+  }
+  function _reject(v) {
+    rejectedVersions.add(v);
+    return false;
+  }
+  function _accept(v) {
+    acceptedVersions.add(v);
+    return true;
+  }
+  return function isCompatible222(globalVersion) {
+    if (acceptedVersions.has(globalVersion)) {
+      return true;
+    }
+    if (rejectedVersions.has(globalVersion)) {
+      return false;
+    }
+    var globalVersionMatch = globalVersion.match(re3);
+    if (!globalVersionMatch) {
+      return _reject(globalVersion);
+    }
+    var globalVersionParsed = {
+      major: +globalVersionMatch[1],
+      minor: +globalVersionMatch[2],
+      patch: +globalVersionMatch[3],
+      prerelease: globalVersionMatch[4]
+    };
+    if (globalVersionParsed.prerelease != null) {
+      return _reject(globalVersion);
+    }
+    if (ownVersionParsed.major !== globalVersionParsed.major) {
+      return _reject(globalVersion);
+    }
+    if (ownVersionParsed.major === 0) {
+      if (ownVersionParsed.minor === globalVersionParsed.minor && ownVersionParsed.patch <= globalVersionParsed.patch) {
+        return _accept(globalVersion);
+      }
+      return _reject(globalVersion);
+    }
+    if (ownVersionParsed.minor <= globalVersionParsed.minor) {
+      return _accept(globalVersion);
+    }
+    return _reject(globalVersion);
+  };
+}
+var isCompatible3 = _makeCompatibilityCheck3(VERSION23);
+var major3 = VERSION23.split(".")[0];
+var GLOBAL_OPENTELEMETRY_API_KEY3 = Symbol.for("opentelemetry.js.api." + major3);
+var _global3 = _globalThis3;
+function registerGlobal3(type, instance, diag, allowOverride) {
+  var _a146;
+  if (allowOverride === void 0) {
+    allowOverride = false;
+  }
+  var api = _global3[GLOBAL_OPENTELEMETRY_API_KEY3] = (_a146 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) !== null && _a146 !== void 0 ? _a146 : {
+    version: VERSION23
+  };
+  if (!allowOverride && api[type]) {
+    var err = new Error("@opentelemetry/api: Attempted duplicate registration of API: " + type);
+    diag.error(err.stack || err.message);
+    return false;
+  }
+  if (api.version !== VERSION23) {
+    var err = new Error("@opentelemetry/api: Registration of version v" + api.version + " for " + type + " does not match previously registered API v" + VERSION23);
+    diag.error(err.stack || err.message);
+    return false;
+  }
+  api[type] = instance;
+  diag.debug("@opentelemetry/api: Registered a global for " + type + " v" + VERSION23 + ".");
+  return true;
+}
+function getGlobal3(type) {
+  var _a146, _b83;
+  var globalVersion = (_a146 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) === null || _a146 === void 0 ? void 0 : _a146.version;
+  if (!globalVersion || !isCompatible3(globalVersion)) {
+    return;
+  }
+  return (_b83 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) === null || _b83 === void 0 ? void 0 : _b83[type];
+}
+function unregisterGlobal3(type, diag) {
+  diag.debug("@opentelemetry/api: Unregistering a global for " + type + " v" + VERSION23 + ".");
+  var api = _global3[GLOBAL_OPENTELEMETRY_API_KEY3];
+  if (api) {
+    delete api[type];
+  }
+}
+var __read6 = function(o, n) {
+  var m = typeof Symbol === "function" && o[Symbol.iterator];
+  if (!m) return o;
+  var i = m.call(o), r, ar = [], e2;
+  try {
+    while (!(r = i.next()).done) ar.push(r.value);
+  } catch (error) {
+    e2 = { error };
+  } finally {
+    try {
+      if (r && !r.done && (m = i["return"])) m.call(i);
+    } finally {
+      if (e2) throw e2.error;
+    }
+  }
+  return ar;
+};
+var __spreadArray6 = function(to, from, pack) {
+  if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+    if (ar || !(i in from)) {
+      if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+      ar[i] = from[i];
+    }
+  }
+  return to.concat(ar || Array.prototype.slice.call(from));
+};
+var DiagComponentLogger3 = (
+  /** @class */
+  (function() {
+    function DiagComponentLogger222(props) {
+      this._namespace = props.namespace || "DiagComponentLogger";
+    }
+    DiagComponentLogger222.prototype.debug = function() {
+      var args = [];
+      for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i] = arguments[_i];
+      }
+      return logProxy3("debug", this._namespace, args);
+    };
+    DiagComponentLogger222.prototype.error = function() {
+      var args = [];
+      for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i] = arguments[_i];
+      }
+      return logProxy3("error", this._namespace, args);
+    };
+    DiagComponentLogger222.prototype.info = function() {
+      var args = [];
+      for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i] = arguments[_i];
+      }
+      return logProxy3("info", this._namespace, args);
+    };
+    DiagComponentLogger222.prototype.warn = function() {
+      var args = [];
+      for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i] = arguments[_i];
+      }
+      return logProxy3("warn", this._namespace, args);
+    };
+    DiagComponentLogger222.prototype.verbose = function() {
+      var args = [];
+      for (var _i = 0; _i < arguments.length; _i++) {
+        args[_i] = arguments[_i];
+      }
+      return logProxy3("verbose", this._namespace, args);
+    };
+    return DiagComponentLogger222;
+  })()
+);
+function logProxy3(funcName, namespace, args) {
+  var logger = getGlobal3("diag");
+  if (!logger) {
+    return;
+  }
+  args.unshift(namespace);
+  return logger[funcName].apply(logger, __spreadArray6([], __read6(args), false));
+}
+var DiagLogLevel3;
+(function(DiagLogLevel222) {
+  DiagLogLevel222[DiagLogLevel222["NONE"] = 0] = "NONE";
+  DiagLogLevel222[DiagLogLevel222["ERROR"] = 30] = "ERROR";
+  DiagLogLevel222[DiagLogLevel222["WARN"] = 50] = "WARN";
+  DiagLogLevel222[DiagLogLevel222["INFO"] = 60] = "INFO";
+  DiagLogLevel222[DiagLogLevel222["DEBUG"] = 70] = "DEBUG";
+  DiagLogLevel222[DiagLogLevel222["VERBOSE"] = 80] = "VERBOSE";
+  DiagLogLevel222[DiagLogLevel222["ALL"] = 9999] = "ALL";
+})(DiagLogLevel3 || (DiagLogLevel3 = {}));
+function createLogLevelDiagLogger3(maxLevel, logger) {
+  if (maxLevel < DiagLogLevel3.NONE) {
+    maxLevel = DiagLogLevel3.NONE;
+  } else if (maxLevel > DiagLogLevel3.ALL) {
+    maxLevel = DiagLogLevel3.ALL;
+  }
+  logger = logger || {};
+  function _filterFunc(funcName, theLevel) {
+    var theFunc = logger[funcName];
+    if (typeof theFunc === "function" && maxLevel >= theLevel) {
+      return theFunc.bind(logger);
+    }
+    return function() {
+    };
+  }
+  return {
+    error: _filterFunc("error", DiagLogLevel3.ERROR),
+    warn: _filterFunc("warn", DiagLogLevel3.WARN),
+    info: _filterFunc("info", DiagLogLevel3.INFO),
+    debug: _filterFunc("debug", DiagLogLevel3.DEBUG),
+    verbose: _filterFunc("verbose", DiagLogLevel3.VERBOSE)
+  };
+}
+var __read23 = function(o, n) {
+  var m = typeof Symbol === "function" && o[Symbol.iterator];
+  if (!m) return o;
+  var i = m.call(o), r, ar = [], e2;
+  try {
+    while (!(r = i.next()).done) ar.push(r.value);
+  } catch (error) {
+    e2 = { error };
+  } finally {
+    try {
+      if (r && !r.done && (m = i["return"])) m.call(i);
+    } finally {
+      if (e2) throw e2.error;
+    }
+  }
+  return ar;
+};
+var __spreadArray23 = function(to, from, pack) {
+  if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+    if (ar || !(i in from)) {
+      if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+      ar[i] = from[i];
+    }
+  }
+  return to.concat(ar || Array.prototype.slice.call(from));
+};
+var API_NAME5 = "diag";
+var DiagAPI3 = (
+  /** @class */
+  (function() {
+    function DiagAPI222() {
+      function _logProxy(funcName) {
+        return function() {
+          var args = [];
+          for (var _i = 0; _i < arguments.length; _i++) {
+            args[_i] = arguments[_i];
+          }
+          var logger = getGlobal3("diag");
+          if (!logger)
+            return;
+          return logger[funcName].apply(logger, __spreadArray23([], __read23(args), false));
+        };
+      }
+      var self = this;
+      var setLogger = function(logger, optionsOrLogLevel) {
+        var _a146, _b83, _c;
+        if (optionsOrLogLevel === void 0) {
+          optionsOrLogLevel = { logLevel: DiagLogLevel3.INFO };
+        }
+        if (logger === self) {
+          var err = new Error("Cannot use diag as the logger for itself. Please use a DiagLogger implementation like ConsoleDiagLogger or a custom implementation");
+          self.error((_a146 = err.stack) !== null && _a146 !== void 0 ? _a146 : err.message);
+          return false;
+        }
+        if (typeof optionsOrLogLevel === "number") {
+          optionsOrLogLevel = {
+            logLevel: optionsOrLogLevel
+          };
+        }
+        var oldLogger = getGlobal3("diag");
+        var newLogger = createLogLevelDiagLogger3((_b83 = optionsOrLogLevel.logLevel) !== null && _b83 !== void 0 ? _b83 : DiagLogLevel3.INFO, logger);
+        if (oldLogger && !optionsOrLogLevel.suppressOverrideMessage) {
+          var stack = (_c = new Error().stack) !== null && _c !== void 0 ? _c : "<failed to generate stacktrace>";
+          oldLogger.warn("Current logger will be overwritten from " + stack);
+          newLogger.warn("Current logger will overwrite one already registered from " + stack);
+        }
+        return registerGlobal3("diag", newLogger, self, true);
+      };
+      self.setLogger = setLogger;
+      self.disable = function() {
+        unregisterGlobal3(API_NAME5, self);
+      };
+      self.createComponentLogger = function(options) {
+        return new DiagComponentLogger3(options);
+      };
+      self.verbose = _logProxy("verbose");
+      self.debug = _logProxy("debug");
+      self.info = _logProxy("info");
+      self.warn = _logProxy("warn");
+      self.error = _logProxy("error");
+    }
+    DiagAPI222.instance = function() {
+      if (!this._instance) {
+        this._instance = new DiagAPI222();
+      }
+      return this._instance;
+    };
+    return DiagAPI222;
+  })()
+);
+function createContextKey3(description) {
+  return Symbol.for(description);
+}
+var BaseContext3 = (
+  /** @class */
+  /* @__PURE__ */ (function() {
+    function BaseContext222(parentContext) {
+      var self = this;
+      self._currentContext = parentContext ? new Map(parentContext) : /* @__PURE__ */ new Map();
+      self.getValue = function(key) {
+        return self._currentContext.get(key);
+      };
+      self.setValue = function(key, value) {
+        var context = new BaseContext222(self._currentContext);
+        context._currentContext.set(key, value);
+        return context;
+      };
+      self.deleteValue = function(key) {
+        var context = new BaseContext222(self._currentContext);
+        context._currentContext.delete(key);
+        return context;
+      };
+    }
+    return BaseContext222;
+  })()
+);
+var ROOT_CONTEXT3 = new BaseContext3();
+var __read33 = function(o, n) {
+  var m = typeof Symbol === "function" && o[Symbol.iterator];
+  if (!m) return o;
+  var i = m.call(o), r, ar = [], e2;
+  try {
+    while (!(r = i.next()).done) ar.push(r.value);
+  } catch (error) {
+    e2 = { error };
+  } finally {
+    try {
+      if (r && !r.done && (m = i["return"])) m.call(i);
+    } finally {
+      if (e2) throw e2.error;
+    }
+  }
+  return ar;
+};
+var __spreadArray33 = function(to, from, pack) {
+  if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+    if (ar || !(i in from)) {
+      if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+      ar[i] = from[i];
+    }
+  }
+  return to.concat(ar || Array.prototype.slice.call(from));
+};
+var NoopContextManager3 = (
+  /** @class */
+  (function() {
+    function NoopContextManager222() {
+    }
+    NoopContextManager222.prototype.active = function() {
+      return ROOT_CONTEXT3;
+    };
+    NoopContextManager222.prototype.with = function(_context, fn, thisArg) {
+      var args = [];
+      for (var _i = 3; _i < arguments.length; _i++) {
+        args[_i - 3] = arguments[_i];
+      }
+      return fn.call.apply(fn, __spreadArray33([thisArg], __read33(args), false));
+    };
+    NoopContextManager222.prototype.bind = function(_context, target) {
+      return target;
+    };
+    NoopContextManager222.prototype.enable = function() {
+      return this;
+    };
+    NoopContextManager222.prototype.disable = function() {
+      return this;
+    };
+    return NoopContextManager222;
+  })()
+);
+var __read43 = function(o, n) {
+  var m = typeof Symbol === "function" && o[Symbol.iterator];
+  if (!m) return o;
+  var i = m.call(o), r, ar = [], e2;
+  try {
+    while (!(r = i.next()).done) ar.push(r.value);
+  } catch (error) {
+    e2 = { error };
+  } finally {
+    try {
+      if (r && !r.done && (m = i["return"])) m.call(i);
+    } finally {
+      if (e2) throw e2.error;
+    }
+  }
+  return ar;
+};
+var __spreadArray43 = function(to, from, pack) {
+  if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+    if (ar || !(i in from)) {
+      if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+      ar[i] = from[i];
+    }
+  }
+  return to.concat(ar || Array.prototype.slice.call(from));
+};
+var API_NAME23 = "context";
+var NOOP_CONTEXT_MANAGER3 = new NoopContextManager3();
+var ContextAPI3 = (
+  /** @class */
+  (function() {
+    function ContextAPI222() {
+    }
+    ContextAPI222.getInstance = function() {
+      if (!this._instance) {
+        this._instance = new ContextAPI222();
+      }
+      return this._instance;
+    };
+    ContextAPI222.prototype.setGlobalContextManager = function(contextManager) {
+      return registerGlobal3(API_NAME23, contextManager, DiagAPI3.instance());
+    };
+    ContextAPI222.prototype.active = function() {
+      return this._getContextManager().active();
+    };
+    ContextAPI222.prototype.with = function(context, fn, thisArg) {
+      var _a146;
+      var args = [];
+      for (var _i = 3; _i < arguments.length; _i++) {
+        args[_i - 3] = arguments[_i];
+      }
+      return (_a146 = this._getContextManager()).with.apply(_a146, __spreadArray43([context, fn, thisArg], __read43(args), false));
+    };
+    ContextAPI222.prototype.bind = function(context, target) {
+      return this._getContextManager().bind(context, target);
+    };
+    ContextAPI222.prototype._getContextManager = function() {
+      return getGlobal3(API_NAME23) || NOOP_CONTEXT_MANAGER3;
+    };
+    ContextAPI222.prototype.disable = function() {
+      this._getContextManager().disable();
+      unregisterGlobal3(API_NAME23, DiagAPI3.instance());
+    };
+    return ContextAPI222;
+  })()
+);
+var TraceFlags3;
+(function(TraceFlags222) {
+  TraceFlags222[TraceFlags222["NONE"] = 0] = "NONE";
+  TraceFlags222[TraceFlags222["SAMPLED"] = 1] = "SAMPLED";
+})(TraceFlags3 || (TraceFlags3 = {}));
+var INVALID_SPANID3 = "0000000000000000";
+var INVALID_TRACEID3 = "00000000000000000000000000000000";
+var INVALID_SPAN_CONTEXT3 = {
+  traceId: INVALID_TRACEID3,
+  spanId: INVALID_SPANID3,
+  traceFlags: TraceFlags3.NONE
+};
+var NonRecordingSpan3 = (
+  /** @class */
+  (function() {
+    function NonRecordingSpan222(_spanContext) {
+      if (_spanContext === void 0) {
+        _spanContext = INVALID_SPAN_CONTEXT3;
+      }
+      this._spanContext = _spanContext;
+    }
+    NonRecordingSpan222.prototype.spanContext = function() {
+      return this._spanContext;
+    };
+    NonRecordingSpan222.prototype.setAttribute = function(_key, _value) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.setAttributes = function(_attributes) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.addEvent = function(_name, _attributes) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.addLink = function(_link) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.addLinks = function(_links) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.setStatus = function(_status) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.updateName = function(_name) {
+      return this;
+    };
+    NonRecordingSpan222.prototype.end = function(_endTime) {
+    };
+    NonRecordingSpan222.prototype.isRecording = function() {
+      return false;
+    };
+    NonRecordingSpan222.prototype.recordException = function(_exception, _time) {
+    };
+    return NonRecordingSpan222;
+  })()
+);
+var SPAN_KEY3 = createContextKey3("OpenTelemetry Context Key SPAN");
+function getSpan3(context) {
+  return context.getValue(SPAN_KEY3) || void 0;
+}
+function getActiveSpan3() {
+  return getSpan3(ContextAPI3.getInstance().active());
+}
+function setSpan3(context, span) {
+  return context.setValue(SPAN_KEY3, span);
+}
+function deleteSpan3(context) {
+  return context.deleteValue(SPAN_KEY3);
+}
+function setSpanContext3(context, spanContext) {
+  return setSpan3(context, new NonRecordingSpan3(spanContext));
+}
+function getSpanContext3(context) {
+  var _a146;
+  return (_a146 = getSpan3(context)) === null || _a146 === void 0 ? void 0 : _a146.spanContext();
+}
+var VALID_TRACEID_REGEX3 = /^([0-9a-f]{32})$/i;
+var VALID_SPANID_REGEX3 = /^[0-9a-f]{16}$/i;
+function isValidTraceId3(traceId) {
+  return VALID_TRACEID_REGEX3.test(traceId) && traceId !== INVALID_TRACEID3;
+}
+function isValidSpanId3(spanId) {
+  return VALID_SPANID_REGEX3.test(spanId) && spanId !== INVALID_SPANID3;
+}
+function isSpanContextValid3(spanContext) {
+  return isValidTraceId3(spanContext.traceId) && isValidSpanId3(spanContext.spanId);
+}
+function wrapSpanContext3(spanContext) {
+  return new NonRecordingSpan3(spanContext);
+}
+var contextApi3 = ContextAPI3.getInstance();
+var NoopTracer3 = (
+  /** @class */
+  (function() {
+    function NoopTracer222() {
+    }
+    NoopTracer222.prototype.startSpan = function(name144, options, context) {
+      if (context === void 0) {
+        context = contextApi3.active();
+      }
+      var root = Boolean(options === null || options === void 0 ? void 0 : options.root);
+      if (root) {
+        return new NonRecordingSpan3();
+      }
+      var parentFromContext = context && getSpanContext3(context);
+      if (isSpanContext3(parentFromContext) && isSpanContextValid3(parentFromContext)) {
+        return new NonRecordingSpan3(parentFromContext);
+      } else {
+        return new NonRecordingSpan3();
+      }
+    };
+    NoopTracer222.prototype.startActiveSpan = function(name144, arg2, arg3, arg4) {
+      var opts;
+      var ctx;
+      var fn;
+      if (arguments.length < 2) {
+        return;
+      } else if (arguments.length === 2) {
+        fn = arg2;
+      } else if (arguments.length === 3) {
+        opts = arg2;
+        fn = arg3;
+      } else {
+        opts = arg2;
+        ctx = arg3;
+        fn = arg4;
+      }
+      var parentContext = ctx !== null && ctx !== void 0 ? ctx : contextApi3.active();
+      var span = this.startSpan(name144, opts, parentContext);
+      var contextWithSpanSet = setSpan3(parentContext, span);
+      return contextApi3.with(contextWithSpanSet, fn, void 0, span);
+    };
+    return NoopTracer222;
+  })()
+);
+function isSpanContext3(spanContext) {
+  return typeof spanContext === "object" && typeof spanContext["spanId"] === "string" && typeof spanContext["traceId"] === "string" && typeof spanContext["traceFlags"] === "number";
+}
+var NOOP_TRACER3 = new NoopTracer3();
+var ProxyTracer3 = (
+  /** @class */
+  (function() {
+    function ProxyTracer222(_provider, name144, version, options) {
+      this._provider = _provider;
+      this.name = name144;
+      this.version = version;
+      this.options = options;
+    }
+    ProxyTracer222.prototype.startSpan = function(name144, options, context) {
+      return this._getTracer().startSpan(name144, options, context);
+    };
+    ProxyTracer222.prototype.startActiveSpan = function(_name, _options, _context, _fn) {
+      var tracer = this._getTracer();
+      return Reflect.apply(tracer.startActiveSpan, tracer, arguments);
+    };
+    ProxyTracer222.prototype._getTracer = function() {
+      if (this._delegate) {
+        return this._delegate;
+      }
+      var tracer = this._provider.getDelegateTracer(this.name, this.version, this.options);
+      if (!tracer) {
+        return NOOP_TRACER3;
+      }
+      this._delegate = tracer;
+      return this._delegate;
+    };
+    return ProxyTracer222;
+  })()
+);
+var NoopTracerProvider3 = (
+  /** @class */
+  (function() {
+    function NoopTracerProvider222() {
+    }
+    NoopTracerProvider222.prototype.getTracer = function(_name, _version, _options) {
+      return new NoopTracer3();
+    };
+    return NoopTracerProvider222;
+  })()
+);
+var NOOP_TRACER_PROVIDER3 = new NoopTracerProvider3();
+var ProxyTracerProvider3 = (
+  /** @class */
+  (function() {
+    function ProxyTracerProvider222() {
+    }
+    ProxyTracerProvider222.prototype.getTracer = function(name144, version, options) {
+      var _a146;
+      return (_a146 = this.getDelegateTracer(name144, version, options)) !== null && _a146 !== void 0 ? _a146 : new ProxyTracer3(this, name144, version, options);
+    };
+    ProxyTracerProvider222.prototype.getDelegate = function() {
+      var _a146;
+      return (_a146 = this._delegate) !== null && _a146 !== void 0 ? _a146 : NOOP_TRACER_PROVIDER3;
+    };
+    ProxyTracerProvider222.prototype.setDelegate = function(delegate) {
+      this._delegate = delegate;
+    };
+    ProxyTracerProvider222.prototype.getDelegateTracer = function(name144, version, options) {
+      var _a146;
+      return (_a146 = this._delegate) === null || _a146 === void 0 ? void 0 : _a146.getTracer(name144, version, options);
+    };
+    return ProxyTracerProvider222;
+  })()
+);
+var SpanStatusCode3;
+(function(SpanStatusCode222) {
+  SpanStatusCode222[SpanStatusCode222["UNSET"] = 0] = "UNSET";
+  SpanStatusCode222[SpanStatusCode222["OK"] = 1] = "OK";
+  SpanStatusCode222[SpanStatusCode222["ERROR"] = 2] = "ERROR";
+})(SpanStatusCode3 || (SpanStatusCode3 = {}));
+var API_NAME33 = "trace";
+var TraceAPI3 = (
+  /** @class */
+  (function() {
+    function TraceAPI222() {
+      this._proxyTracerProvider = new ProxyTracerProvider3();
+      this.wrapSpanContext = wrapSpanContext3;
+      this.isSpanContextValid = isSpanContextValid3;
+      this.deleteSpan = deleteSpan3;
+      this.getSpan = getSpan3;
+      this.getActiveSpan = getActiveSpan3;
+      this.getSpanContext = getSpanContext3;
+      this.setSpan = setSpan3;
+      this.setSpanContext = setSpanContext3;
+    }
+    TraceAPI222.getInstance = function() {
+      if (!this._instance) {
+        this._instance = new TraceAPI222();
+      }
+      return this._instance;
+    };
+    TraceAPI222.prototype.setGlobalTracerProvider = function(provider) {
+      var success = registerGlobal3(API_NAME33, this._proxyTracerProvider, DiagAPI3.instance());
+      if (success) {
+        this._proxyTracerProvider.setDelegate(provider);
+      }
+      return success;
+    };
+    TraceAPI222.prototype.getTracerProvider = function() {
+      return getGlobal3(API_NAME33) || this._proxyTracerProvider;
+    };
+    TraceAPI222.prototype.getTracer = function(name144, version) {
+      return this.getTracerProvider().getTracer(name144, version);
+    };
+    TraceAPI222.prototype.disable = function() {
+      unregisterGlobal3(API_NAME33, DiagAPI3.instance());
+      this._proxyTracerProvider = new ProxyTracerProvider3();
+    };
+    return TraceAPI222;
+  })()
+);
+var trace3 = TraceAPI3.getInstance();
+var __defProp4 = Object.defineProperty;
+var __export32 = (target, all) => {
+  for (var name144 in all)
+    __defProp4(target, name144, { get: all[name144], enumerable: true });
+};
+var name76 = "AI_InvalidArgumentError";
+var marker86 = `vercel.ai.error.${name76}`;
+var symbol86 = Symbol.for(marker86);
+var _a86;
+var InvalidArgumentError23 = class extends AISDKError3 {
+  constructor({
+    parameter,
+    value,
+    message
+  }) {
+    super({
+      name: name76,
+      message: `Invalid argument for parameter ${parameter}: ${message}`
+    });
+    this[_a86] = true;
+    this.parameter = parameter;
+    this.value = value;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker86);
+  }
+};
+_a86 = symbol86;
+var name523 = "AI_NoObjectGeneratedError";
+var marker523 = `vercel.ai.error.${name523}`;
+var symbol523 = Symbol.for(marker523);
+var _a523;
+var NoObjectGeneratedError3 = class extends AISDKError3 {
+  constructor({
+    message = "No object generated.",
+    cause,
+    text: text222,
+    response,
+    usage,
+    finishReason
+  }) {
+    super({ name: name523, message, cause });
+    this[_a523] = true;
+    this.text = text222;
+    this.response = response;
+    this.usage = usage;
+    this.finishReason = finishReason;
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker523);
+  }
+};
+_a523 = symbol523;
+var UnsupportedModelVersionError3 = class extends AISDKError3 {
+  constructor(options) {
+    super({
+      name: "AI_UnsupportedModelVersionError",
+      message: `Unsupported model version ${options.version} for provider "${options.provider}" and model "${options.modelId}". AI SDK 5 only supports models that implement specification version "v2".`
+    });
+    this.version = options.version;
+    this.provider = options.provider;
+    this.modelId = options.modelId;
+  }
+};
+var name126 = "AI_RetryError";
+var marker125 = `vercel.ai.error.${name126}`;
+var symbol125 = Symbol.for(marker125);
+var _a125;
+var RetryError3 = class extends AISDKError3 {
+  constructor({
+    message,
+    reason,
+    errors
+  }) {
+    super({ name: name126, message });
+    this[_a125] = true;
+    this.reason = reason;
+    this.errors = errors;
+    this.lastError = errors[errors.length - 1];
+  }
+  static isInstance(error) {
+    return AISDKError3.hasMarker(error, marker125);
+  }
+};
+_a125 = symbol125;
+function formatWarning({
+  warning,
+  provider,
+  model
+}) {
+  const prefix = `AI SDK Warning (${provider} / ${model}):`;
+  switch (warning.type) {
+    case "unsupported": {
+      let message = `${prefix} The feature "${warning.feature}" is not supported.`;
+      if (warning.details) {
+        message += ` ${warning.details}`;
+      }
+      return message;
+    }
+    case "compatibility": {
+      let message = `${prefix} The feature "${warning.feature}" is used in a compatibility mode.`;
+      if (warning.details) {
+        message += ` ${warning.details}`;
+      }
+      return message;
+    }
+    case "other": {
+      return `${prefix} ${warning.message}`;
+    }
+    default: {
+      return `${prefix} ${JSON.stringify(warning, null, 2)}`;
+    }
+  }
+}
+var FIRST_WARNING_INFO_MESSAGE = "AI SDK Warning System: To turn off warning logging, set the AI_SDK_LOG_WARNINGS global to false.";
+var hasLoggedBefore = false;
+var logWarnings = (options) => {
+  if (options.warnings.length === 0) {
+    return;
+  }
+  const logger = globalThis.AI_SDK_LOG_WARNINGS;
+  if (logger === false) {
+    return;
+  }
+  if (typeof logger === "function") {
+    logger(options);
+    return;
+  }
+  if (!hasLoggedBefore) {
+    hasLoggedBefore = true;
+    console.info(FIRST_WARNING_INFO_MESSAGE);
+  }
+  for (const warning of options.warnings) {
+    console.warn(
+      formatWarning({
+        warning,
+        provider: options.provider,
+        model: options.model
+      })
+    );
+  }
+};
+function logV2CompatibilityWarning({
+  provider,
+  modelId
+}) {
+  logWarnings({
+    warnings: [
+      {
+        type: "compatibility",
+        feature: "specificationVersion",
+        details: `Using v2 specification compatibility mode. Some features may not be available.`
+      }
+    ],
+    provider,
+    model: modelId
+  });
+}
+function asEmbeddingModelV3(model) {
+  if (model.specificationVersion === "v3") {
+    return model;
+  }
+  logV2CompatibilityWarning({
+    provider: model.provider,
+    modelId: model.modelId
+  });
+  return new Proxy(model, {
+    get(target, prop) {
+      if (prop === "specificationVersion")
+        return "v3";
+      return target[prop];
+    }
+  });
+}
+function resolveEmbeddingModel2(model) {
+  if (typeof model !== "string") {
+    if (model.specificationVersion !== "v3" && model.specificationVersion !== "v2") {
+      const unsupportedModel = model;
+      throw new UnsupportedModelVersionError3({
+        version: unsupportedModel.specificationVersion,
+        provider: unsupportedModel.provider,
+        modelId: unsupportedModel.modelId
+      });
+    }
+    return asEmbeddingModelV3(model);
+  }
+  return getGlobalProvider2().embeddingModel(model);
+}
+function getGlobalProvider2() {
+  var _a146;
+  return (_a146 = globalThis.AI_SDK_DEFAULT_PROVIDER) != null ? _a146 : gateway2;
+}
+var VERSION33 = "6.0.1";
+var dataContentSchema3 = z$2.union([
+  z$2.string(),
+  z$2.instanceof(Uint8Array),
+  z$2.instanceof(ArrayBuffer),
+  z$2.custom(
+    // Buffer might not be available in some environments such as CloudFlare:
+    (value) => {
+      var _a146, _b83;
+      return (_b83 = (_a146 = globalThis.Buffer) == null ? void 0 : _a146.isBuffer(value)) != null ? _b83 : false;
+    },
+    { message: "Must be a Buffer" }
+  )
+]);
+var jsonValueSchema3 = z$2.lazy(
+  () => z$2.union([
+    z$2.null(),
+    z$2.string(),
+    z$2.number(),
+    z$2.boolean(),
+    z$2.record(z$2.string(), jsonValueSchema3.optional()),
+    z$2.array(jsonValueSchema3)
+  ])
+);
+var providerMetadataSchema3 = z$2.record(
+  z$2.string(),
+  z$2.record(z$2.string(), jsonValueSchema3.optional())
+);
+var textPartSchema3 = z$2.object({
+  type: z$2.literal("text"),
+  text: z$2.string(),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var imagePartSchema3 = z$2.object({
+  type: z$2.literal("image"),
+  image: z$2.union([dataContentSchema3, z$2.instanceof(URL)]),
+  mediaType: z$2.string().optional(),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var filePartSchema3 = z$2.object({
+  type: z$2.literal("file"),
+  data: z$2.union([dataContentSchema3, z$2.instanceof(URL)]),
+  filename: z$2.string().optional(),
+  mediaType: z$2.string(),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var reasoningPartSchema3 = z$2.object({
+  type: z$2.literal("reasoning"),
+  text: z$2.string(),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var toolCallPartSchema3 = z$2.object({
+  type: z$2.literal("tool-call"),
+  toolCallId: z$2.string(),
+  toolName: z$2.string(),
+  input: z$2.unknown(),
+  providerOptions: providerMetadataSchema3.optional(),
+  providerExecuted: z$2.boolean().optional()
+});
+var outputSchema2 = z$2.discriminatedUnion(
+  "type",
+  [
+    z$2.object({
+      type: z$2.literal("text"),
+      value: z$2.string(),
+      providerOptions: providerMetadataSchema3.optional()
+    }),
+    z$2.object({
+      type: z$2.literal("json"),
+      value: jsonValueSchema3,
+      providerOptions: providerMetadataSchema3.optional()
+    }),
+    z$2.object({
+      type: z$2.literal("execution-denied"),
+      reason: z$2.string().optional(),
+      providerOptions: providerMetadataSchema3.optional()
+    }),
+    z$2.object({
+      type: z$2.literal("error-text"),
+      value: z$2.string(),
+      providerOptions: providerMetadataSchema3.optional()
+    }),
+    z$2.object({
+      type: z$2.literal("error-json"),
+      value: jsonValueSchema3,
+      providerOptions: providerMetadataSchema3.optional()
+    }),
+    z$2.object({
+      type: z$2.literal("content"),
+      value: z$2.array(
+        z$2.union([
+          z$2.object({
+            type: z$2.literal("text"),
+            text: z$2.string(),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("media"),
+            data: z$2.string(),
+            mediaType: z$2.string()
+          }),
+          z$2.object({
+            type: z$2.literal("file-data"),
+            data: z$2.string(),
+            mediaType: z$2.string(),
+            filename: z$2.string().optional(),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("file-url"),
+            url: z$2.string(),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("file-id"),
+            fileId: z$2.union([z$2.string(), z$2.record(z$2.string(), z$2.string())]),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("image-data"),
+            data: z$2.string(),
+            mediaType: z$2.string(),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("image-url"),
+            url: z$2.string(),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("image-file-id"),
+            fileId: z$2.union([z$2.string(), z$2.record(z$2.string(), z$2.string())]),
+            providerOptions: providerMetadataSchema3.optional()
+          }),
+          z$2.object({
+            type: z$2.literal("custom"),
+            providerOptions: providerMetadataSchema3.optional()
+          })
+        ])
+      )
+    })
+  ]
+);
+var toolResultPartSchema3 = z$2.object({
+  type: z$2.literal("tool-result"),
+  toolCallId: z$2.string(),
+  toolName: z$2.string(),
+  output: outputSchema2,
+  providerOptions: providerMetadataSchema3.optional()
+});
+var toolApprovalRequestSchema = z$2.object({
+  type: z$2.literal("tool-approval-request"),
+  approvalId: z$2.string(),
+  toolCallId: z$2.string()
+});
+var toolApprovalResponseSchema = z$2.object({
+  type: z$2.literal("tool-approval-response"),
+  approvalId: z$2.string(),
+  approved: z$2.boolean(),
+  reason: z$2.string().optional()
+});
+var systemModelMessageSchema2 = z$2.object(
+  {
+    role: z$2.literal("system"),
+    content: z$2.string(),
+    providerOptions: providerMetadataSchema3.optional()
+  }
+);
+var userModelMessageSchema2 = z$2.object({
+  role: z$2.literal("user"),
+  content: z$2.union([
+    z$2.string(),
+    z$2.array(z$2.union([textPartSchema3, imagePartSchema3, filePartSchema3]))
+  ]),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var assistantModelMessageSchema2 = z$2.object({
+  role: z$2.literal("assistant"),
+  content: z$2.union([
+    z$2.string(),
+    z$2.array(
+      z$2.union([
+        textPartSchema3,
+        filePartSchema3,
+        reasoningPartSchema3,
+        toolCallPartSchema3,
+        toolResultPartSchema3,
+        toolApprovalRequestSchema
+      ])
+    )
+  ]),
+  providerOptions: providerMetadataSchema3.optional()
+});
+var toolModelMessageSchema2 = z$2.object({
+  role: z$2.literal("tool"),
+  content: z$2.array(z$2.union([toolResultPartSchema3, toolApprovalResponseSchema])),
+  providerOptions: providerMetadataSchema3.optional()
+});
+z$2.union([
+  systemModelMessageSchema2,
+  userModelMessageSchema2,
+  assistantModelMessageSchema2,
+  toolModelMessageSchema2
+]);
+function assembleOperationName3({
+  operationId,
+  telemetry
+}) {
+  return {
+    // standardized operation and resource name:
+    "operation.name": `${operationId}${(telemetry == null ? void 0 : telemetry.functionId) != null ? ` ${telemetry.functionId}` : ""}`,
+    "resource.name": telemetry == null ? void 0 : telemetry.functionId,
+    // detailed, AI SDK specific data:
+    "ai.operationId": operationId,
+    "ai.telemetry.functionId": telemetry == null ? void 0 : telemetry.functionId
+  };
+}
+function getBaseTelemetryAttributes3({
+  model,
+  settings,
+  telemetry,
+  headers
+}) {
+  var _a146;
+  return {
+    "ai.model.provider": model.provider,
+    "ai.model.id": model.modelId,
+    // settings:
+    ...Object.entries(settings).reduce((attributes, [key, value]) => {
+      attributes[`ai.settings.${key}`] = value;
+      return attributes;
+    }, {}),
+    // add metadata as attributes:
+    ...Object.entries((_a146 = telemetry == null ? void 0 : telemetry.metadata) != null ? _a146 : {}).reduce(
+      (attributes, [key, value]) => {
+        attributes[`ai.telemetry.metadata.${key}`] = value;
+        return attributes;
+      },
+      {}
+    ),
+    // request headers
+    ...Object.entries(headers != null ? headers : {}).reduce((attributes, [key, value]) => {
+      if (value !== void 0) {
+        attributes[`ai.request.headers.${key}`] = value;
+      }
+      return attributes;
+    }, {})
+  };
+}
+var noopTracer3 = {
+  startSpan() {
+    return noopSpan3;
+  },
+  startActiveSpan(name144, arg1, arg2, arg3) {
+    if (typeof arg1 === "function") {
+      return arg1(noopSpan3);
+    }
+    if (typeof arg2 === "function") {
+      return arg2(noopSpan3);
+    }
+    if (typeof arg3 === "function") {
+      return arg3(noopSpan3);
+    }
+  }
+};
+var noopSpan3 = {
+  spanContext() {
+    return noopSpanContext3;
+  },
+  setAttribute() {
+    return this;
+  },
+  setAttributes() {
+    return this;
+  },
+  addEvent() {
+    return this;
+  },
+  addLink() {
+    return this;
+  },
+  addLinks() {
+    return this;
+  },
+  setStatus() {
+    return this;
+  },
+  updateName() {
+    return this;
+  },
+  end() {
+    return this;
+  },
+  isRecording() {
+    return false;
+  },
+  recordException() {
+    return this;
+  }
+};
+var noopSpanContext3 = {
+  traceId: "",
+  spanId: "",
+  traceFlags: 0
+};
+function getTracer3({
+  isEnabled = false,
+  tracer
+} = {}) {
+  if (!isEnabled) {
+    return noopTracer3;
+  }
+  if (tracer) {
+    return tracer;
+  }
+  return trace3.getTracer("ai");
+}
+async function recordSpan3({
+  name: name144,
+  tracer,
+  attributes,
+  fn,
+  endWhenDone = true
+}) {
+  return tracer.startActiveSpan(
+    name144,
+    { attributes: await attributes },
+    async (span) => {
+      try {
+        const result = await fn(span);
+        if (endWhenDone) {
+          span.end();
+        }
+        return result;
+      } catch (error) {
+        try {
+          recordErrorOnSpan3(span, error);
+        } finally {
+          span.end();
+        }
+        throw error;
+      }
+    }
+  );
+}
+function recordErrorOnSpan3(span, error) {
+  if (error instanceof Error) {
+    span.recordException({
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    });
+    span.setStatus({
+      code: SpanStatusCode3.ERROR,
+      message: error.message
+    });
+  } else {
+    span.setStatus({ code: SpanStatusCode3.ERROR });
+  }
+}
+async function selectTelemetryAttributes3({
+  telemetry,
+  attributes
+}) {
+  if ((telemetry == null ? void 0 : telemetry.isEnabled) !== true) {
+    return {};
+  }
+  const resultAttributes = {};
+  for (const [key, value] of Object.entries(attributes)) {
+    if (value == null) {
+      continue;
+    }
+    if (typeof value === "object" && "input" in value && typeof value.input === "function") {
+      if ((telemetry == null ? void 0 : telemetry.recordInputs) === false) {
+        continue;
+      }
+      const result = await value.input();
+      if (result != null) {
+        resultAttributes[key] = result;
+      }
+      continue;
+    }
+    if (typeof value === "object" && "output" in value && typeof value.output === "function") {
+      if ((telemetry == null ? void 0 : telemetry.recordOutputs) === false) {
+        continue;
+      }
+      const result = await value.output();
+      if (result != null) {
+        resultAttributes[key] = result;
+      }
+      continue;
+    }
+    resultAttributes[key] = value;
+  }
+  return resultAttributes;
+}
+function getRetryDelayInMs2({
+  error,
+  exponentialBackoffDelay
+}) {
+  const headers = error.responseHeaders;
+  if (!headers)
+    return exponentialBackoffDelay;
+  let ms;
+  const retryAfterMs = headers["retry-after-ms"];
+  if (retryAfterMs) {
+    const timeoutMs = parseFloat(retryAfterMs);
+    if (!Number.isNaN(timeoutMs)) {
+      ms = timeoutMs;
+    }
+  }
+  const retryAfter = headers["retry-after"];
+  if (retryAfter && ms === void 0) {
+    const timeoutSeconds = parseFloat(retryAfter);
+    if (!Number.isNaN(timeoutSeconds)) {
+      ms = timeoutSeconds * 1e3;
+    } else {
+      ms = Date.parse(retryAfter) - Date.now();
+    }
+  }
+  if (ms != null && !Number.isNaN(ms) && 0 <= ms && (ms < 60 * 1e3 || ms < exponentialBackoffDelay)) {
+    return ms;
+  }
+  return exponentialBackoffDelay;
+}
+var retryWithExponentialBackoffRespectingRetryHeaders2 = ({
+  maxRetries = 2,
+  initialDelayInMs = 2e3,
+  backoffFactor = 2,
+  abortSignal
+} = {}) => async (f) => _retryWithExponentialBackoff3(f, {
+  maxRetries,
+  delayInMs: initialDelayInMs,
+  backoffFactor,
+  abortSignal
+});
+async function _retryWithExponentialBackoff3(f, {
+  maxRetries,
+  delayInMs,
+  backoffFactor,
+  abortSignal
+}, errors = []) {
+  try {
+    return await f();
+  } catch (error) {
+    if (isAbortError3(error)) {
+      throw error;
+    }
+    if (maxRetries === 0) {
+      throw error;
+    }
+    const errorMessage = getErrorMessage23(error);
+    const newErrors = [...errors, error];
+    const tryNumber = newErrors.length;
+    if (tryNumber > maxRetries) {
+      throw new RetryError3({
+        message: `Failed after ${tryNumber} attempts. Last error: ${errorMessage}`,
+        reason: "maxRetriesExceeded",
+        errors: newErrors
+      });
+    }
+    if (error instanceof Error && APICallError3.isInstance(error) && error.isRetryable === true && tryNumber <= maxRetries) {
+      await delay3(
+        getRetryDelayInMs2({
+          error,
+          exponentialBackoffDelay: delayInMs
+        }),
+        { abortSignal }
+      );
+      return _retryWithExponentialBackoff3(
+        f,
+        {
+          maxRetries,
+          delayInMs: backoffFactor * delayInMs,
+          backoffFactor,
+          abortSignal
+        },
+        newErrors
+      );
+    }
+    if (tryNumber === 1) {
+      throw error;
+    }
+    throw new RetryError3({
+      message: `Failed after ${tryNumber} attempts with non-retryable error: '${errorMessage}'`,
+      reason: "errorNotRetryable",
+      errors: newErrors
+    });
+  }
+}
+function prepareRetries3({
+  maxRetries,
+  abortSignal
+}) {
+  if (maxRetries != null) {
+    if (!Number.isInteger(maxRetries)) {
+      throw new InvalidArgumentError23({
+        parameter: "maxRetries",
+        value: maxRetries,
+        message: "maxRetries must be an integer"
+      });
+    }
+    if (maxRetries < 0) {
+      throw new InvalidArgumentError23({
+        parameter: "maxRetries",
+        value: maxRetries,
+        message: "maxRetries must be >= 0"
+      });
+    }
+  }
+  const maxRetriesResult = maxRetries != null ? maxRetries : 2;
+  return {
+    maxRetries: maxRetriesResult,
+    retry: retryWithExponentialBackoffRespectingRetryHeaders2({
+      maxRetries: maxRetriesResult,
+      abortSignal
+    })
+  };
+}
+var output_exports3 = {};
+__export32(output_exports3, {
+  array: () => array,
+  choice: () => choice,
+  json: () => json,
+  object: () => object3,
+  text: () => text3
+});
+function fixJson3(input) {
+  const stack = ["ROOT"];
+  let lastValidIndex = -1;
+  let literalStart = null;
+  function processValueStart(char, i, swapState) {
+    {
+      switch (char) {
+        case '"': {
+          lastValidIndex = i;
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_STRING");
+          break;
+        }
+        case "f":
+        case "t":
+        case "n": {
+          lastValidIndex = i;
+          literalStart = i;
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_LITERAL");
+          break;
+        }
+        case "-": {
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_NUMBER");
+          break;
+        }
+        case "0":
+        case "1":
+        case "2":
+        case "3":
+        case "4":
+        case "5":
+        case "6":
+        case "7":
+        case "8":
+        case "9": {
+          lastValidIndex = i;
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_NUMBER");
+          break;
+        }
+        case "{": {
+          lastValidIndex = i;
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_OBJECT_START");
+          break;
+        }
+        case "[": {
+          lastValidIndex = i;
+          stack.pop();
+          stack.push(swapState);
+          stack.push("INSIDE_ARRAY_START");
+          break;
+        }
+      }
+    }
+  }
+  function processAfterObjectValue(char, i) {
+    switch (char) {
+      case ",": {
+        stack.pop();
+        stack.push("INSIDE_OBJECT_AFTER_COMMA");
+        break;
+      }
+      case "}": {
+        lastValidIndex = i;
+        stack.pop();
+        break;
+      }
+    }
+  }
+  function processAfterArrayValue(char, i) {
+    switch (char) {
+      case ",": {
+        stack.pop();
+        stack.push("INSIDE_ARRAY_AFTER_COMMA");
+        break;
+      }
+      case "]": {
+        lastValidIndex = i;
+        stack.pop();
+        break;
+      }
+    }
+  }
+  for (let i = 0; i < input.length; i++) {
+    const char = input[i];
+    const currentState = stack[stack.length - 1];
+    switch (currentState) {
+      case "ROOT":
+        processValueStart(char, i, "FINISH");
+        break;
+      case "INSIDE_OBJECT_START": {
+        switch (char) {
+          case '"': {
+            stack.pop();
+            stack.push("INSIDE_OBJECT_KEY");
+            break;
+          }
+          case "}": {
+            lastValidIndex = i;
+            stack.pop();
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_OBJECT_AFTER_COMMA": {
+        switch (char) {
+          case '"': {
+            stack.pop();
+            stack.push("INSIDE_OBJECT_KEY");
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_OBJECT_KEY": {
+        switch (char) {
+          case '"': {
+            stack.pop();
+            stack.push("INSIDE_OBJECT_AFTER_KEY");
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_OBJECT_AFTER_KEY": {
+        switch (char) {
+          case ":": {
+            stack.pop();
+            stack.push("INSIDE_OBJECT_BEFORE_VALUE");
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_OBJECT_BEFORE_VALUE": {
+        processValueStart(char, i, "INSIDE_OBJECT_AFTER_VALUE");
+        break;
+      }
+      case "INSIDE_OBJECT_AFTER_VALUE": {
+        processAfterObjectValue(char, i);
+        break;
+      }
+      case "INSIDE_STRING": {
+        switch (char) {
+          case '"': {
+            stack.pop();
+            lastValidIndex = i;
+            break;
+          }
+          case "\\": {
+            stack.push("INSIDE_STRING_ESCAPE");
+            break;
+          }
+          default: {
+            lastValidIndex = i;
+          }
+        }
+        break;
+      }
+      case "INSIDE_ARRAY_START": {
+        switch (char) {
+          case "]": {
+            lastValidIndex = i;
+            stack.pop();
+            break;
+          }
+          default: {
+            lastValidIndex = i;
+            processValueStart(char, i, "INSIDE_ARRAY_AFTER_VALUE");
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_ARRAY_AFTER_VALUE": {
+        switch (char) {
+          case ",": {
+            stack.pop();
+            stack.push("INSIDE_ARRAY_AFTER_COMMA");
+            break;
+          }
+          case "]": {
+            lastValidIndex = i;
+            stack.pop();
+            break;
+          }
+          default: {
+            lastValidIndex = i;
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_ARRAY_AFTER_COMMA": {
+        processValueStart(char, i, "INSIDE_ARRAY_AFTER_VALUE");
+        break;
+      }
+      case "INSIDE_STRING_ESCAPE": {
+        stack.pop();
+        lastValidIndex = i;
+        break;
+      }
+      case "INSIDE_NUMBER": {
+        switch (char) {
+          case "0":
+          case "1":
+          case "2":
+          case "3":
+          case "4":
+          case "5":
+          case "6":
+          case "7":
+          case "8":
+          case "9": {
+            lastValidIndex = i;
+            break;
+          }
+          case "e":
+          case "E":
+          case "-":
+          case ".": {
+            break;
+          }
+          case ",": {
+            stack.pop();
+            if (stack[stack.length - 1] === "INSIDE_ARRAY_AFTER_VALUE") {
+              processAfterArrayValue(char, i);
+            }
+            if (stack[stack.length - 1] === "INSIDE_OBJECT_AFTER_VALUE") {
+              processAfterObjectValue(char, i);
+            }
+            break;
+          }
+          case "}": {
+            stack.pop();
+            if (stack[stack.length - 1] === "INSIDE_OBJECT_AFTER_VALUE") {
+              processAfterObjectValue(char, i);
+            }
+            break;
+          }
+          case "]": {
+            stack.pop();
+            if (stack[stack.length - 1] === "INSIDE_ARRAY_AFTER_VALUE") {
+              processAfterArrayValue(char, i);
+            }
+            break;
+          }
+          default: {
+            stack.pop();
+            break;
+          }
+        }
+        break;
+      }
+      case "INSIDE_LITERAL": {
+        const partialLiteral = input.substring(literalStart, i + 1);
+        if (!"false".startsWith(partialLiteral) && !"true".startsWith(partialLiteral) && !"null".startsWith(partialLiteral)) {
+          stack.pop();
+          if (stack[stack.length - 1] === "INSIDE_OBJECT_AFTER_VALUE") {
+            processAfterObjectValue(char, i);
+          } else if (stack[stack.length - 1] === "INSIDE_ARRAY_AFTER_VALUE") {
+            processAfterArrayValue(char, i);
+          }
+        } else {
+          lastValidIndex = i;
+        }
+        break;
+      }
+    }
+  }
+  let result = input.slice(0, lastValidIndex + 1);
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const state = stack[i];
+    switch (state) {
+      case "INSIDE_STRING": {
+        result += '"';
+        break;
+      }
+      case "INSIDE_OBJECT_KEY":
+      case "INSIDE_OBJECT_AFTER_KEY":
+      case "INSIDE_OBJECT_AFTER_COMMA":
+      case "INSIDE_OBJECT_START":
+      case "INSIDE_OBJECT_BEFORE_VALUE":
+      case "INSIDE_OBJECT_AFTER_VALUE": {
+        result += "}";
+        break;
+      }
+      case "INSIDE_ARRAY_START":
+      case "INSIDE_ARRAY_AFTER_COMMA":
+      case "INSIDE_ARRAY_AFTER_VALUE": {
+        result += "]";
+        break;
+      }
+      case "INSIDE_LITERAL": {
+        const partialLiteral = input.substring(literalStart, input.length);
+        if ("true".startsWith(partialLiteral)) {
+          result += "true".slice(partialLiteral.length);
+        } else if ("false".startsWith(partialLiteral)) {
+          result += "false".slice(partialLiteral.length);
+        } else if ("null".startsWith(partialLiteral)) {
+          result += "null".slice(partialLiteral.length);
+        }
+      }
+    }
+  }
+  return result;
+}
+async function parsePartialJson3(jsonText) {
+  if (jsonText === void 0) {
+    return { value: void 0, state: "undefined-input" };
+  }
+  let result = await safeParseJSON3({ text: jsonText });
+  if (result.success) {
+    return { value: result.value, state: "successful-parse" };
+  }
+  result = await safeParseJSON3({ text: fixJson3(jsonText) });
+  if (result.success) {
+    return { value: result.value, state: "repaired-parse" };
+  }
+  return { value: void 0, state: "failed-parse" };
+}
+var text3 = () => ({
+  responseFormat: Promise.resolve({ type: "text" }),
+  async parseCompleteOutput({ text: text222 }) {
+    return text222;
+  },
+  async parsePartialOutput({ text: text222 }) {
+    return { partial: text222 };
+  }
+});
+var object3 = ({
+  schema: inputSchema,
+  name: name144,
+  description
+}) => {
+  const schema = asSchema3(inputSchema);
+  return {
+    responseFormat: resolve2(schema.jsonSchema).then((jsonSchema222) => ({
+      type: "json",
+      schema: jsonSchema222,
+      ...name144 != null && { name: name144 },
+      ...description != null && { description }
+    })),
+    async parseCompleteOutput({ text: text222 }, context) {
+      const parseResult = await safeParseJSON3({ text: text222 });
+      if (!parseResult.success) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: could not parse the response.",
+          cause: parseResult.error,
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      const validationResult = await safeValidateTypes3({
+        value: parseResult.value,
+        schema
+      });
+      if (!validationResult.success) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: response did not match schema.",
+          cause: validationResult.error,
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      return validationResult.value;
+    },
+    async parsePartialOutput({ text: text222 }) {
+      const result = await parsePartialJson3(text222);
+      switch (result.state) {
+        case "failed-parse":
+        case "undefined-input": {
+          return void 0;
+        }
+        case "repaired-parse":
+        case "successful-parse": {
+          return {
+            // Note: currently no validation of partial results:
+            partial: result.value
+          };
+        }
+      }
+    }
+  };
+};
+var array = ({
+  element: inputElementSchema,
+  name: name144,
+  description
+}) => {
+  const elementSchema = asSchema3(inputElementSchema);
+  return {
+    // JSON schema that describes an array of elements:
+    responseFormat: resolve2(elementSchema.jsonSchema).then((jsonSchema222) => {
+      const { $schema, ...itemSchema } = jsonSchema222;
+      return {
+        type: "json",
+        schema: {
+          $schema: "http://json-schema.org/draft-07/schema#",
+          type: "object",
+          properties: {
+            elements: { type: "array", items: itemSchema }
+          },
+          required: ["elements"],
+          additionalProperties: false
+        },
+        ...name144 != null && { name: name144 },
+        ...description != null && { description }
+      };
+    }),
+    async parseCompleteOutput({ text: text222 }, context) {
+      const parseResult = await safeParseJSON3({ text: text222 });
+      if (!parseResult.success) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: could not parse the response.",
+          cause: parseResult.error,
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      const outerValue = parseResult.value;
+      if (outerValue == null || typeof outerValue !== "object" || !("elements" in outerValue) || !Array.isArray(outerValue.elements)) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: response did not match schema.",
+          cause: new TypeValidationError3({
+            value: outerValue,
+            cause: "response must be an object with an elements array"
+          }),
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      for (const element of outerValue.elements) {
+        const validationResult = await safeValidateTypes3({
+          value: element,
+          schema: elementSchema
+        });
+        if (!validationResult.success) {
+          throw new NoObjectGeneratedError3({
+            message: "No object generated: response did not match schema.",
+            cause: validationResult.error,
+            text: text222,
+            response: context.response,
+            usage: context.usage,
+            finishReason: context.finishReason
+          });
+        }
+      }
+      return outerValue.elements;
+    },
+    async parsePartialOutput({ text: text222 }) {
+      const result = await parsePartialJson3(text222);
+      switch (result.state) {
+        case "failed-parse":
+        case "undefined-input": {
+          return void 0;
+        }
+        case "repaired-parse":
+        case "successful-parse": {
+          const outerValue = result.value;
+          if (outerValue == null || typeof outerValue !== "object" || !("elements" in outerValue) || !Array.isArray(outerValue.elements)) {
+            return void 0;
+          }
+          const rawElements = result.state === "repaired-parse" && outerValue.elements.length > 0 ? outerValue.elements.slice(0, -1) : outerValue.elements;
+          const parsedElements = [];
+          for (const rawElement of rawElements) {
+            const validationResult = await safeValidateTypes3({
+              value: rawElement,
+              schema: elementSchema
+            });
+            if (validationResult.success) {
+              parsedElements.push(validationResult.value);
+            }
+          }
+          return { partial: parsedElements };
+        }
+      }
+    }
+  };
+};
+var choice = ({
+  options: choiceOptions,
+  name: name144,
+  description
+}) => {
+  return {
+    // JSON schema that describes an enumeration:
+    responseFormat: Promise.resolve({
+      type: "json",
+      schema: {
+        $schema: "http://json-schema.org/draft-07/schema#",
+        type: "object",
+        properties: {
+          result: { type: "string", enum: choiceOptions }
+        },
+        required: ["result"],
+        additionalProperties: false
+      },
+      ...name144 != null && { name: name144 },
+      ...description != null && { description }
+    }),
+    async parseCompleteOutput({ text: text222 }, context) {
+      const parseResult = await safeParseJSON3({ text: text222 });
+      if (!parseResult.success) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: could not parse the response.",
+          cause: parseResult.error,
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      const outerValue = parseResult.value;
+      if (outerValue == null || typeof outerValue !== "object" || !("result" in outerValue) || typeof outerValue.result !== "string" || !choiceOptions.includes(outerValue.result)) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: response did not match schema.",
+          cause: new TypeValidationError3({
+            value: outerValue,
+            cause: "response must be an object that contains a choice value."
+          }),
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      return outerValue.result;
+    },
+    async parsePartialOutput({ text: text222 }) {
+      const result = await parsePartialJson3(text222);
+      switch (result.state) {
+        case "failed-parse":
+        case "undefined-input": {
+          return void 0;
+        }
+        case "repaired-parse":
+        case "successful-parse": {
+          const outerValue = result.value;
+          if (outerValue == null || typeof outerValue !== "object" || !("result" in outerValue) || typeof outerValue.result !== "string") {
+            return void 0;
+          }
+          const potentialMatches = choiceOptions.filter(
+            (choiceOption) => choiceOption.startsWith(outerValue.result)
+          );
+          if (result.state === "successful-parse") {
+            return potentialMatches.includes(outerValue.result) ? { partial: outerValue.result } : void 0;
+          } else {
+            return potentialMatches.length === 1 ? { partial: potentialMatches[0] } : void 0;
+          }
+        }
+      }
+    }
+  };
+};
+var json = ({
+  name: name144,
+  description
+} = {}) => {
+  return {
+    responseFormat: Promise.resolve({
+      type: "json",
+      ...name144 != null && { name: name144 },
+      ...description != null && { description }
+    }),
+    async parseCompleteOutput({ text: text222 }, context) {
+      const parseResult = await safeParseJSON3({ text: text222 });
+      if (!parseResult.success) {
+        throw new NoObjectGeneratedError3({
+          message: "No object generated: could not parse the response.",
+          cause: parseResult.error,
+          text: text222,
+          response: context.response,
+          usage: context.usage,
+          finishReason: context.finishReason
+        });
+      }
+      return parseResult.value;
+    },
+    async parsePartialOutput({ text: text222 }) {
+      const result = await parsePartialJson3(text222);
+      switch (result.state) {
+        case "failed-parse":
+        case "undefined-input": {
+          return void 0;
+        }
+        case "repaired-parse":
+        case "successful-parse": {
+          return result.value === void 0 ? void 0 : { partial: result.value };
+        }
+      }
+    }
+  };
+};
+createIdGenerator3({
+  prefix: "aitxt",
+  size: 24
+});
+createIdGenerator3({
+  prefix: "aitxt",
+  size: 24
+});
+function splitArray3(array2, chunkSize) {
+  if (chunkSize <= 0) {
+    throw new Error("chunkSize must be greater than 0");
+  }
+  const result = [];
+  for (let i = 0; i < array2.length; i += chunkSize) {
+    result.push(array2.slice(i, i + chunkSize));
+  }
+  return result;
+}
+async function embedMany3({
+  model: modelArg,
+  values,
+  maxParallelCalls = Infinity,
+  maxRetries: maxRetriesArg,
+  abortSignal,
+  headers,
+  providerOptions,
+  experimental_telemetry: telemetry
+}) {
+  const model = resolveEmbeddingModel2(modelArg);
+  const { maxRetries, retry } = prepareRetries3({
+    maxRetries: maxRetriesArg,
+    abortSignal
+  });
+  const headersWithUserAgent = withUserAgentSuffix2(
+    headers != null ? headers : {},
+    `ai/${VERSION33}`
+  );
+  const baseTelemetryAttributes = getBaseTelemetryAttributes3({
+    model,
+    telemetry,
+    headers: headersWithUserAgent,
+    settings: { maxRetries }
+  });
+  const tracer = getTracer3(telemetry);
+  return recordSpan3({
+    name: "ai.embedMany",
+    attributes: selectTelemetryAttributes3({
+      telemetry,
+      attributes: {
+        ...assembleOperationName3({ operationId: "ai.embedMany", telemetry }),
+        ...baseTelemetryAttributes,
+        // specific settings that only make sense on the outer level:
+        "ai.values": {
+          input: () => values.map((value) => JSON.stringify(value))
+        }
+      }
+    }),
+    tracer,
+    fn: async (span) => {
+      var _a146;
+      const [maxEmbeddingsPerCall, supportsParallelCalls] = await Promise.all([
+        model.maxEmbeddingsPerCall,
+        model.supportsParallelCalls
+      ]);
+      if (maxEmbeddingsPerCall == null || maxEmbeddingsPerCall === Infinity) {
+        const { embeddings: embeddings2, usage, warnings: warnings2, response, providerMetadata: providerMetadata2 } = await retry(() => {
+          return recordSpan3({
+            name: "ai.embedMany.doEmbed",
+            attributes: selectTelemetryAttributes3({
+              telemetry,
+              attributes: {
+                ...assembleOperationName3({
+                  operationId: "ai.embedMany.doEmbed",
+                  telemetry
+                }),
+                ...baseTelemetryAttributes,
+                // specific settings that only make sense on the outer level:
+                "ai.values": {
+                  input: () => values.map((value) => JSON.stringify(value))
+                }
+              }
+            }),
+            tracer,
+            fn: async (doEmbedSpan) => {
+              var _a154;
+              const modelResponse = await model.doEmbed({
+                values,
+                abortSignal,
+                headers: headersWithUserAgent,
+                providerOptions
+              });
+              const embeddings3 = modelResponse.embeddings;
+              const usage2 = (_a154 = modelResponse.usage) != null ? _a154 : { tokens: NaN };
+              doEmbedSpan.setAttributes(
+                await selectTelemetryAttributes3({
+                  telemetry,
+                  attributes: {
+                    "ai.embeddings": {
+                      output: () => embeddings3.map(
+                        (embedding) => JSON.stringify(embedding)
+                      )
+                    },
+                    "ai.usage.tokens": usage2.tokens
+                  }
+                })
+              );
+              return {
+                embeddings: embeddings3,
+                usage: usage2,
+                warnings: modelResponse.warnings,
+                providerMetadata: modelResponse.providerMetadata,
+                response: modelResponse.response
+              };
+            }
+          });
+        });
+        span.setAttributes(
+          await selectTelemetryAttributes3({
+            telemetry,
+            attributes: {
+              "ai.embeddings": {
+                output: () => embeddings2.map((embedding) => JSON.stringify(embedding))
+              },
+              "ai.usage.tokens": usage.tokens
+            }
+          })
+        );
+        logWarnings({
+          warnings: warnings2,
+          provider: model.provider,
+          model: model.modelId
+        });
+        return new DefaultEmbedManyResult3({
+          values,
+          embeddings: embeddings2,
+          usage,
+          warnings: warnings2,
+          providerMetadata: providerMetadata2,
+          responses: [response]
+        });
+      }
+      const valueChunks = splitArray3(values, maxEmbeddingsPerCall);
+      const embeddings = [];
+      const warnings = [];
+      const responses = [];
+      let tokens = 0;
+      let providerMetadata;
+      const parallelChunks = splitArray3(
+        valueChunks,
+        supportsParallelCalls ? maxParallelCalls : 1
+      );
+      for (const parallelChunk of parallelChunks) {
+        const results = await Promise.all(
+          parallelChunk.map((chunk) => {
+            return retry(() => {
+              return recordSpan3({
+                name: "ai.embedMany.doEmbed",
+                attributes: selectTelemetryAttributes3({
+                  telemetry,
+                  attributes: {
+                    ...assembleOperationName3({
+                      operationId: "ai.embedMany.doEmbed",
+                      telemetry
+                    }),
+                    ...baseTelemetryAttributes,
+                    // specific settings that only make sense on the outer level:
+                    "ai.values": {
+                      input: () => chunk.map((value) => JSON.stringify(value))
+                    }
+                  }
+                }),
+                tracer,
+                fn: async (doEmbedSpan) => {
+                  var _a154;
+                  const modelResponse = await model.doEmbed({
+                    values: chunk,
+                    abortSignal,
+                    headers: headersWithUserAgent,
+                    providerOptions
+                  });
+                  const embeddings2 = modelResponse.embeddings;
+                  const usage = (_a154 = modelResponse.usage) != null ? _a154 : { tokens: NaN };
+                  doEmbedSpan.setAttributes(
+                    await selectTelemetryAttributes3({
+                      telemetry,
+                      attributes: {
+                        "ai.embeddings": {
+                          output: () => embeddings2.map(
+                            (embedding) => JSON.stringify(embedding)
+                          )
+                        },
+                        "ai.usage.tokens": usage.tokens
+                      }
+                    })
+                  );
+                  return {
+                    embeddings: embeddings2,
+                    usage,
+                    warnings: modelResponse.warnings,
+                    providerMetadata: modelResponse.providerMetadata,
+                    response: modelResponse.response
+                  };
+                }
+              });
+            });
+          })
+        );
+        for (const result of results) {
+          embeddings.push(...result.embeddings);
+          warnings.push(...result.warnings);
+          responses.push(result.response);
+          tokens += result.usage.tokens;
+          if (result.providerMetadata) {
+            if (!providerMetadata) {
+              providerMetadata = { ...result.providerMetadata };
+            } else {
+              for (const [providerName, metadata] of Object.entries(
+                result.providerMetadata
+              )) {
+                providerMetadata[providerName] = {
+                  ...(_a146 = providerMetadata[providerName]) != null ? _a146 : {},
+                  ...metadata
+                };
+              }
+            }
+          }
+        }
+      }
+      span.setAttributes(
+        await selectTelemetryAttributes3({
+          telemetry,
+          attributes: {
+            "ai.embeddings": {
+              output: () => embeddings.map((embedding) => JSON.stringify(embedding))
+            },
+            "ai.usage.tokens": tokens
+          }
+        })
+      );
+      logWarnings({
+        warnings,
+        provider: model.provider,
+        model: model.modelId
+      });
+      return new DefaultEmbedManyResult3({
+        values,
+        embeddings,
+        usage: { tokens },
+        warnings,
+        providerMetadata,
+        responses
+      });
+    }
+  });
+}
+var DefaultEmbedManyResult3 = class {
+  constructor(options) {
+    this.values = options.values;
+    this.embeddings = options.embeddings;
+    this.usage = options.usage;
+    this.warnings = options.warnings;
+    this.providerMetadata = options.providerMetadata;
+    this.responses = options.responses;
+  }
+};
+createIdGenerator3({ prefix: "aiobj", size: 24 });
+createIdGenerator3({ prefix: "aiobj", size: 24 });
 function deepMergeWorkingMemory(existing, update) {
   if (!existing || typeof existing !== "object") {
     return update;
@@ -26286,35 +33176,6 @@ var __experimental_updateWorkingMemoryToolVNext = (config) => {
     }
   });
 };
-var WORKING_MEMORY_START_TAG = "<working_memory>";
-var WORKING_MEMORY_END_TAG = "</working_memory>";
-function removeWorkingMemoryTags(text32) {
-  let result = "";
-  let pos = 0;
-  while (pos < text32.length) {
-    const start = text32.indexOf(WORKING_MEMORY_START_TAG, pos);
-    if (start === -1) {
-      result += text32.substring(pos);
-      break;
-    }
-    result += text32.substring(pos, start);
-    const end = text32.indexOf(WORKING_MEMORY_END_TAG, start + WORKING_MEMORY_START_TAG.length);
-    if (end === -1) {
-      result += text32.substring(start);
-      break;
-    }
-    pos = end + WORKING_MEMORY_END_TAG.length;
-  }
-  return result;
-}
-function extractWorkingMemoryContent(text32) {
-  const start = text32.indexOf(WORKING_MEMORY_START_TAG);
-  if (start === -1) return null;
-  const contentStart = start + WORKING_MEMORY_START_TAG.length;
-  const end = text32.indexOf(WORKING_MEMORY_END_TAG, contentStart);
-  if (end === -1) return null;
-  return text32.substring(contentStart, end);
-}
 var CHARS_PER_TOKEN = 4;
 var DEFAULT_MESSAGE_RANGE = { before: 1, after: 1 };
 var DEFAULT_TOP_K = 4;
@@ -26333,9 +33194,19 @@ var Memory = class extends MastraMemory {
     });
     this.threadConfig = mergedConfig;
   }
+  /**
+   * Gets the memory storage domain, throwing if not available.
+   */
+  async getMemoryStore() {
+    const store = await this.storage.getStore("memory");
+    if (!store) {
+      throw new Error(`Memory storage domain is not available on ${this.storage.constructor.name}`);
+    }
+    return store;
+  }
   async validateThreadIsOwnedByResource(threadId, resourceId, config) {
     const resourceScope = typeof config?.semanticRecall === "object" && config?.semanticRecall?.scope !== `thread` || config.semanticRecall === true;
-    const thread = await this.storage.getThreadById({ threadId });
+    const thread = await this.getThreadById({ threadId });
     if (!thread && !resourceScope) {
       throw new Error(`No thread found with id ${threadId}`);
     }
@@ -26345,22 +33216,8 @@ var Memory = class extends MastraMemory {
       );
     }
   }
-  checkStorageFeatureSupport(config) {
-    const resourceScope = typeof config.semanticRecall === "object" && config.semanticRecall.scope !== "thread" || // resource scope is now default
-    config.semanticRecall === true;
-    if (resourceScope && !this.storage.supports.selectByIncludeResourceScope) {
-      throw new Error(
-        `Memory error: Attached storage adapter "${this.storage.name || "unknown"}" doesn't support semanticRecall: { scope: "resource" } yet and currently only supports per-thread semantic recall.`
-      );
-    }
-    if (config.workingMemory?.enabled && config.workingMemory.scope === `resource` && !this.storage.supports.resourceWorkingMemory) {
-      throw new Error(
-        `Memory error: Attached storage adapter "${this.storage.name || "unknown"}" doesn't support workingMemory: { scope: "resource" } yet and currently only supports per-thread working memory. Supported adapters: LibSQL, PostgreSQL, Upstash.`
-      );
-    }
-  }
   async recall(args) {
-    const { threadId, resourceId, perPage: perPageArg, page, orderBy, threadConfig, vectorSearchString, filter: filter22 } = args;
+    const { threadId, resourceId, perPage: perPageArg, page, orderBy, threadConfig, vectorSearchString, filter: filter32 } = args;
     const config = this.getMergedThreadConfig(threadConfig || {});
     if (resourceId) await this.validateThreadIsOwnedByResource(threadId, resourceId, config);
     const perPage = perPageArg !== void 0 ? perPageArg : config.lastMessages;
@@ -26372,9 +33229,10 @@ var Memory = class extends MastraMemory {
       perPage,
       page,
       orderBy: effectiveOrderBy,
-      threadConfig
+      hasWorkingMemorySchema: Boolean(config.workingMemory?.schema),
+      workingMemoryEnabled: config.workingMemory?.enabled,
+      semanticRecallEnabled: Boolean(config.semanticRecall)
     });
-    this.checkStorageFeatureSupport(config);
     const defaultRange = DEFAULT_MESSAGE_RANGE;
     const defaultTopK = DEFAULT_TOP_K;
     const vectorConfig = typeof config?.semanticRecall === `boolean` ? {
@@ -26415,13 +33273,14 @@ var Memory = class extends MastraMemory {
         })
       );
     }
-    const paginatedResult = await this.storage.listMessages({
+    const memoryStore = await this.getMemoryStore();
+    const paginatedResult = await memoryStore.listMessages({
       threadId,
       resourceId,
       perPage,
       page,
       orderBy: effectiveOrderBy,
-      filter: filter22,
+      filter: filter32,
       ...vectorResults?.length ? {
         include: vectorResults.map((r) => ({
           id: r.metadata?.message_id,
@@ -26437,10 +33296,12 @@ var Memory = class extends MastraMemory {
     return { messages };
   }
   async getThreadById({ threadId }) {
-    return this.storage.getThreadById({ threadId });
+    const memoryStore = await this.getMemoryStore();
+    return memoryStore.getThreadById({ threadId });
   }
   async listThreadsByResourceId(args) {
-    return this.storage.listThreadsByResourceId(args);
+    const memoryStore = await this.getMemoryStore();
+    return memoryStore.listThreadsByResourceId(args);
   }
   async handleWorkingMemoryFromMetadata({
     workingMemory,
@@ -26449,10 +33310,10 @@ var Memory = class extends MastraMemory {
   }) {
     const config = this.getMergedThreadConfig(memoryConfig || {});
     if (config.workingMemory?.enabled) {
-      this.checkStorageFeatureSupport(config);
       const scope = config.workingMemory.scope || "resource";
       if (scope === "resource" && resourceId) {
-        await this.storage.updateResource({
+        const memoryStore = await this.getMemoryStore();
+        await memoryStore.updateResource({
           resourceId,
           workingMemory
         });
@@ -26463,7 +33324,8 @@ var Memory = class extends MastraMemory {
     thread,
     memoryConfig
   }) {
-    const savedThread = await this.storage.saveThread({ thread });
+    const memoryStore = await this.getMemoryStore();
+    const savedThread = await memoryStore.saveThread({ thread });
     if (thread.metadata?.workingMemory && typeof thread.metadata.workingMemory === "string" && thread.resourceId) {
       await this.handleWorkingMemoryFromMetadata({
         workingMemory: thread.metadata.workingMemory,
@@ -26479,7 +33341,8 @@ var Memory = class extends MastraMemory {
     metadata,
     memoryConfig
   }) {
-    const updatedThread = await this.storage.updateThread({
+    const memoryStore = await this.getMemoryStore();
+    const updatedThread = await memoryStore.updateThread({
       id,
       title,
       metadata
@@ -26494,7 +33357,8 @@ var Memory = class extends MastraMemory {
     return updatedThread;
   }
   async deleteThread(threadId) {
-    await this.storage.deleteThread({ threadId });
+    const memoryStore = await this.getMemoryStore();
+    await memoryStore.deleteThread({ threadId });
   }
   async updateWorkingMemory({
     threadId,
@@ -26506,24 +33370,24 @@ var Memory = class extends MastraMemory {
     if (!config.workingMemory?.enabled) {
       throw new Error("Working memory is not enabled for this memory instance");
     }
-    this.checkStorageFeatureSupport(config);
     const scope = config.workingMemory.scope || "resource";
     if (scope === "resource" && !resourceId) {
       throw new Error(
         `Memory error: Resource-scoped working memory is enabled but no resourceId was provided. Either provide a resourceId or explicitly set workingMemory.scope to 'thread'.`
       );
     }
+    const memoryStore = await this.getMemoryStore();
     if (scope === "resource" && resourceId) {
-      await this.storage.updateResource({
+      await memoryStore.updateResource({
         resourceId,
         workingMemory
       });
     } else {
-      const thread = await this.storage.getThreadById({ threadId });
+      const thread = await this.getThreadById({ threadId });
       if (!thread) {
         throw new Error(`Thread ${threadId} not found`);
       }
-      await this.storage.updateThread({
+      await memoryStore.updateThread({
         id: threadId,
         title: thread.title || "Untitled Thread",
         metadata: {
@@ -26548,7 +33412,6 @@ var Memory = class extends MastraMemory {
     if (!config.workingMemory?.enabled) {
       throw new Error("Working memory is not enabled for this memory instance");
     }
-    this.checkStorageFeatureSupport(config);
     const mutexKey = memoryConfig?.workingMemory?.scope === `resource` ? `resource-${resourceId}` : `thread-${threadId}`;
     const mutex = this.updateWorkingMemoryMutexes.has(mutexKey) ? this.updateWorkingMemoryMutexes.get(mutexKey) : new Mutex();
     this.updateWorkingMemoryMutexes.set(mutexKey, mutex);
@@ -26590,8 +33453,9 @@ ${workingMemory}`;
           `Memory error: Resource-scoped working memory is enabled but no resourceId was provided. Either provide a resourceId or explicitly set workingMemory.scope to 'thread'.`
         );
       }
+      const memoryStore = await this.getMemoryStore();
       if (scope === "resource" && resourceId) {
-        await this.storage.updateResource({
+        await memoryStore.updateResource({
           resourceId,
           workingMemory
         });
@@ -26599,11 +33463,11 @@ ${workingMemory}`;
           return { success: true, reason };
         }
       } else {
-        const thread = await this.storage.getThreadById({ threadId });
+        const thread = await this.getThreadById({ threadId });
         if (!thread) {
           throw new Error(`Thread ${threadId} not found`);
         }
-        await this.storage.updateThread({
+        await memoryStore.updateThread({
           id: threadId,
           title: thread.title || "Untitled Thread",
           metadata: {
@@ -26620,11 +33484,11 @@ ${workingMemory}`;
       release();
     }
   }
-  chunkText(text32, tokenSize = 4096) {
+  chunkText(text42, tokenSize = 4096) {
     const charSize = tokenSize * CHARS_PER_TOKEN;
     const chunks = [];
     let currentChunk = "";
-    const words = text32.split(/\s+/);
+    const words = text42.split(/\s+/);
     for (const word of words) {
       const wordWithSpace = currentChunk ? " " + word : word;
       if (currentChunk.length + wordWithSpace.length > charSize) {
@@ -26655,11 +33519,25 @@ ${workingMemory}`;
     if (isFastEmbed && this.firstEmbed instanceof Promise) {
       await this.firstEmbed;
     }
-    const promise = (this.embedder.specificationVersion === `v2` ? embedMany2 : embedMany)({
+    let embedFn;
+    const specVersion = this.embedder.specificationVersion;
+    switch (specVersion) {
+      case "v3":
+        embedFn = embedMany3;
+        break;
+      case "v2":
+        embedFn = embedMany2;
+        break;
+      default:
+        embedFn = embedMany;
+        break;
+    }
+    const promise = embedFn({
       values: chunks,
       maxRetries: 3,
       // @ts-ignore
-      model: this.embedder
+      model: this.embedder,
+      ...this.embedderOptions || {}
     });
     if (isFastEmbed && !this.firstEmbed) this.firstEmbed = promise;
     const { embeddings } = await promise;
@@ -26682,7 +33560,8 @@ ${workingMemory}`;
     const dbMessages = new MessageList({
       generateMessageId: () => this.generateId()
     }).add(updatedMessages, "memory").get.all.db();
-    const result = await this.storage.saveMessages({
+    const memoryStore = await this.getMemoryStore();
+    const result = await memoryStore.saveMessages({
       messages: dbMessages
     });
     if (this.vector && config.semanticRecall) {
@@ -26730,31 +33609,6 @@ ${workingMemory}`;
     }
     return result;
   }
-  updateMessageToHideWorkingMemory(message) {
-    if (typeof message?.content === `string`) {
-      return {
-        ...message,
-        content: removeWorkingMemoryTags(message.content).trim()
-      };
-    } else if (Array.isArray(message?.content)) {
-      const filteredContent = message.content.filter(
-        (content) => content.type !== "tool-call" && content.type !== "tool-result" || content.toolName !== "updateWorkingMemory"
-      );
-      const newContent = filteredContent.map((content) => {
-        if (content.type === "text") {
-          return {
-            ...content,
-            text: removeWorkingMemoryTags(content.text).trim()
-          };
-        }
-        return { ...content };
-      });
-      if (!newContent.length) return null;
-      return { ...message, content: newContent };
-    } else {
-      return { ...message };
-    }
-  }
   updateMessageToHideWorkingMemoryV2(message) {
     const newMessage = { ...message };
     if (message.content && typeof message.content === "object" && !Array.isArray(message.content)) {
@@ -26771,10 +33625,10 @@ ${workingMemory}`;
         return true;
       }).map((part) => {
         if (part?.type === "text") {
-          const text32 = typeof part.text === "string" ? part.text : "";
+          const text42 = typeof part.text === "string" ? part.text : "";
           return {
             ...part,
-            text: removeWorkingMemoryTags(text32).trim()
+            text: removeWorkingMemoryTags(text42).trim()
           };
         }
         return part;
@@ -26785,9 +33639,9 @@ ${workingMemory}`;
     }
     return newMessage;
   }
-  parseWorkingMemory(text32) {
+  parseWorkingMemory(text42) {
     if (!this.threadConfig.workingMemory?.enabled) return null;
-    const content = extractWorkingMemoryContent(text32);
+    const content = extractWorkingMemoryContent(text42);
     return content?.trim() ?? null;
   }
   async getWorkingMemory({
@@ -26799,7 +33653,6 @@ ${workingMemory}`;
     if (!config.workingMemory?.enabled) {
       return null;
     }
-    this.checkStorageFeatureSupport(config);
     const scope = config.workingMemory.scope || "resource";
     let workingMemoryData = null;
     if (scope === "resource" && !resourceId) {
@@ -26808,10 +33661,11 @@ ${workingMemory}`;
       );
     }
     if (scope === "resource" && resourceId) {
-      const resource = await this.storage.getResourceById({ resourceId });
+      const memoryStore = await this.getMemoryStore();
+      const resource = await memoryStore.getResourceById({ resourceId });
       workingMemoryData = resource?.workingMemory || null;
     } else {
-      const thread = await this.storage.getThreadById({ threadId });
+      const thread = await this.getThreadById({ threadId });
       workingMemoryData = thread?.metadata?.workingMemory;
     }
     if (!workingMemoryData) {
@@ -26983,7 +33837,8 @@ ${template.content !== this.defaultWorkingMemoryTemplate ? `- Only store informa
     messages
   }) {
     if (messages.length === 0) return [];
-    return this.storage.updateMessages({ messages });
+    const memoryStore = await this.getMemoryStore();
+    return memoryStore.updateMessages({ messages });
   }
   /**
    * Deletes one or more messages
@@ -27013,12 +33868,13 @@ ${template.content !== this.defaultWorkingMemoryTemplate ? `- Only store informa
     if (invalidIds.length > 0) {
       throw new Error("All message IDs must be non-empty strings");
     }
-    await this.storage.deleteMessages(messageIds);
+    const memoryStore = await this.getMemoryStore();
+    await memoryStore.deleteMessages(messageIds);
   }
 };
 
 // ../agent-builder/dist/index.js
-var import_ignore = __toESM$2(require_ignore());
+var import_ignore = __toESM$3(require_ignore());
 var UNIT_KINDS = ["mcp-server", "tool", "workflow", "agent", "integration", "network", "other"];
 var TemplateUnitSchema = z.object({
   kind: z.enum(UNIT_KINDS),
@@ -28104,7 +34960,7 @@ export const mastra = new Mastra({
             encoding: z.string(),
             lastModified: z.string()
           }).optional(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.readFile({ ...inputData, projectPath });
@@ -28124,7 +34980,7 @@ export const mastra = new Mastra({
           filePath: z.string(),
           bytesWritten: z.number().optional(),
           message: z.string(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.writeFile({ ...inputData, projectPath });
@@ -28156,7 +35012,7 @@ export const mastra = new Mastra({
           totalItems: z.number(),
           path: z.string(),
           message: z.string(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.listDirectory({ ...inputData, projectPath });
@@ -28181,7 +35037,7 @@ export const mastra = new Mastra({
           command: z.string(),
           workingDirectory: z.string().optional(),
           executionTime: z.number().optional(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.executeCommand({
@@ -28282,7 +35138,7 @@ export const mastra = new Mastra({
           message: z.string(),
           linesReplaced: z.number().optional(),
           backup: z.string().optional(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.replaceLines({ ...inputData, projectPath });
@@ -28311,7 +35167,7 @@ export const mastra = new Mastra({
           ),
           totalLines: z.number(),
           message: z.string(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.showFileLines({ ...inputData, projectPath });
@@ -28429,7 +35285,7 @@ export const mastra = new Mastra({
           totalResults: z.number(),
           searchTime: z.number(),
           suggestions: z.array(z.string()).optional(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.webSearch(inputData);
@@ -28485,7 +35341,7 @@ export const mastra = new Mastra({
           warnings: z.array(z.string()).optional(),
           message: z.string().optional(),
           details: z.string().optional(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           const { action, features, packages } = inputData;
@@ -28547,7 +35403,7 @@ export const mastra = new Mastra({
           url: z.string().optional(),
           message: z.string().optional(),
           stdout: z.array(z.string()).optional().describe("Server output lines captured during startup"),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           const { action, port } = inputData;
@@ -28573,7 +35429,7 @@ export const mastra = new Mastra({
                     success: false,
                     status: "unknown",
                     message: `Failed to restart: could not stop server on port ${port}`,
-                    error: stopResult.error || "Unknown stop error"
+                    errorMessage: stopResult.errorMessage || "Unknown stop error"
                   };
                 }
                 await new Promise((resolve5) => setTimeout(resolve5, 500));
@@ -28586,7 +35442,7 @@ export const mastra = new Mastra({
                     success: false,
                     status: "stopped",
                     message: `Failed to restart: server stopped successfully but failed to start on port ${port}`,
-                    error: startResult.error || "Unknown start error"
+                    errorMessage: startResult.errorMessage || "Unknown start error"
                   };
                 }
                 return {
@@ -28631,7 +35487,7 @@ export const mastra = new Mastra({
           statusText: z.string().optional(),
           headers: z.record(z.string()).optional(),
           data: z.any().optional(),
-          error: z.string().optional(),
+          errorMessage: z.string().optional(),
           url: z.string(),
           method: z.string()
         }),
@@ -28651,7 +35507,7 @@ export const mastra = new Mastra({
               success: false,
               url: baseUrl ? `${baseUrl}${url}` : url,
               method,
-              error: error instanceof Error ? error.message : String(error)
+              errorMessage: error instanceof Error ? error.message : String(error)
             };
           }
         }
@@ -28715,7 +35571,7 @@ export const mastra = new Mastra({
         projectPath: `./${projectName}`,
         message: `Successfully created Mastra project: ${projectName}.`,
         details: stdout,
-        error: stderr
+        errorMessage: stderr
       };
     } catch (error) {
       console.error(error);
@@ -28843,7 +35699,7 @@ export const mastra = new Mastra({
       return {
         success: false,
         status: "stopped",
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -28855,7 +35711,7 @@ export const mastra = new Mastra({
       return {
         success: false,
         status: "error",
-        error: `Invalid port value: ${String(port)}`
+        errorMessage: `Invalid port value: ${String(port)}`
       };
     }
     try {
@@ -28887,7 +35743,7 @@ export const mastra = new Mastra({
           success: false,
           status: "unknown",
           message: `Failed to stop any processes on port ${port}`,
-          error: `Could not kill PIDs: ${failedPids.join(", ")}`
+          errorMessage: `Could not kill PIDs: ${failedPids.join(", ")}`
         };
       }
       if (failedPids.length > 0) {
@@ -28918,7 +35774,7 @@ export const mastra = new Mastra({
               success: false,
               status: "unknown",
               message: `Server processes still running on port ${port} after stop attempts`,
-              error: `Remaining PIDs: ${finalCheck.trim()}`
+              errorMessage: `Remaining PIDs: ${finalCheck.trim()}`
             };
           }
         }
@@ -28934,7 +35790,7 @@ export const mastra = new Mastra({
       return {
         success: false,
         status: "unknown",
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29417,7 +36273,7 @@ export const mastra = new Mastra({
         success: false,
         url: baseUrl ? `${baseUrl}${url}` : url,
         method,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29600,21 +36456,21 @@ export const mastra = new Mastra({
         return {
           success: false,
           message: `Line numbers must be 1 or greater. Got startLine: ${startLine}, endLine: ${endLine}`,
-          error: "Invalid line range"
+          errorMessage: "Invalid line range"
         };
       }
       if (startLine > lines.length || endLine > lines.length) {
         return {
           success: false,
           message: `Line range ${startLine}-${endLine} is out of bounds. File has ${lines.length} lines. Remember: lines are 1-indexed, so valid range is 1-${lines.length}.`,
-          error: "Invalid line range"
+          errorMessage: "Invalid line range"
         };
       }
       if (startLine > endLine) {
         return {
           success: false,
           message: `Start line (${startLine}) cannot be greater than end line (${endLine}).`,
-          error: "Invalid line range"
+          errorMessage: "Invalid line range"
         };
       }
       let backup;
@@ -29641,7 +36497,7 @@ export const mastra = new Mastra({
       return {
         success: false,
         message: `Failed to replace lines: ${error instanceof Error ? error.message : String(error)}`,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29686,7 +36542,7 @@ export const mastra = new Mastra({
         lines: [],
         totalLines: 0,
         message: `Failed to read file: ${error instanceof Error ? error.message : String(error)}`,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29836,7 +36692,7 @@ export const mastra = new Mastra({
     } catch (error) {
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29863,7 +36719,7 @@ export const mastra = new Mastra({
         success: false,
         filePath: context.filePath,
         message: `Failed to write file: ${error instanceof Error ? error.message : String(error)}`,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29954,7 +36810,7 @@ export const mastra = new Mastra({
         totalItems: 0,
         path: context.path,
         message: `Failed to list directory: ${error instanceof Error ? error.message : String(error)}`,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -29996,7 +36852,7 @@ export const mastra = new Mastra({
         command: context.command,
         workingDirectory: context.workingDirectory,
         executionTime,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -30059,7 +36915,7 @@ export const mastra = new Mastra({
         results: [],
         totalResults: 0,
         searchTime: 0,
-        error: error instanceof Error ? error.message : String(error)
+        errorMessage: error instanceof Error ? error.message : String(error)
       };
     }
   }
@@ -31053,7 +37909,7 @@ var intelligentMergeStep = createStep({
         outputSchema: z.object({
           success: z.boolean(),
           message: z.string(),
-          error: z.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (input) => {
           try {
@@ -31068,11 +37924,11 @@ var intelligentMergeStep = createStep({
               success: true,
               message: `Successfully copied file from ${sourcePath} to ${destinationPath}`
             };
-          } catch (error) {
+          } catch (err) {
             return {
               success: false,
-              message: `Failed to copy file: ${error instanceof Error ? error.message : String(error)}`,
-              error: error instanceof Error ? error.message : String(error)
+              message: `Failed to copy file: ${err instanceof Error ? err.message : String(err)}`,
+              errorMessage: err instanceof Error ? err.message : String(err)
             };
           }
         }
@@ -31744,7 +38600,7 @@ var shouldAbortWorkflow = (stepResult) => {
 var marker3 = "vercel.ai.error";
 var symbol3 = Symbol.for(marker3);
 var _a3;
-var _AISDKError4 = class _AISDKError23 extends Error {
+var _AISDKError5 = class _AISDKError23 extends Error {
   /**
    * Creates an AI SDK Error.
    *
@@ -31777,12 +38633,12 @@ var _AISDKError4 = class _AISDKError23 extends Error {
   }
 };
 _a3 = symbol3;
-var AISDKError3 = _AISDKError4;
+var AISDKError4 = _AISDKError5;
 var name2 = "AI_APICallError";
-var marker25 = `vercel.ai.error.${name2}`;
-var symbol25 = Symbol.for(marker25);
-var _a25;
-var APICallError3 = class extends AISDKError3 {
+var marker27 = `vercel.ai.error.${name2}`;
+var symbol27 = Symbol.for(marker27);
+var _a27;
+var APICallError4 = class extends AISDKError4 {
   constructor({
     message,
     url,
@@ -31799,7 +38655,7 @@ var APICallError3 = class extends AISDKError3 {
     data
   }) {
     super({ name: name2, message, cause });
-    this[_a25] = true;
+    this[_a27] = true;
     this.url = url;
     this.requestBodyValues = requestBodyValues;
     this.statusCode = statusCode;
@@ -31809,26 +38665,26 @@ var APICallError3 = class extends AISDKError3 {
     this.data = data;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker25);
+    return AISDKError4.hasMarker(error, marker27);
   }
 };
-_a25 = symbol25;
-var name25 = "AI_EmptyResponseBodyError";
-var marker32 = `vercel.ai.error.${name25}`;
+_a27 = symbol27;
+var name27 = "AI_EmptyResponseBodyError";
+var marker32 = `vercel.ai.error.${name27}`;
 var symbol32 = Symbol.for(marker32);
 var _a32;
-var EmptyResponseBodyError2 = class extends AISDKError3 {
+var EmptyResponseBodyError3 = class extends AISDKError4 {
   // used in isInstance
   constructor({ message = "Empty response body" } = {}) {
-    super({ name: name25, message });
+    super({ name: name27, message });
     this[_a32] = true;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker32);
+    return AISDKError4.hasMarker(error, marker32);
   }
 };
 _a32 = symbol32;
-function getErrorMessage4(error) {
+function getErrorMessage5(error) {
   if (error == null) {
     return "unknown error";
   }
@@ -31840,62 +38696,62 @@ function getErrorMessage4(error) {
   }
   return JSON.stringify(error);
 }
-var name35 = "AI_InvalidArgumentError";
-var marker45 = `vercel.ai.error.${name35}`;
-var symbol45 = Symbol.for(marker45);
-var _a45;
-var InvalidArgumentError4 = class extends AISDKError3 {
+var name37 = "AI_InvalidArgumentError";
+var marker47 = `vercel.ai.error.${name37}`;
+var symbol47 = Symbol.for(marker47);
+var _a47;
+var InvalidArgumentError5 = class extends AISDKError4 {
   constructor({
     message,
     cause,
     argument
   }) {
-    super({ name: name35, message, cause });
-    this[_a45] = true;
+    super({ name: name37, message, cause });
+    this[_a47] = true;
     this.argument = argument;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker45);
+    return AISDKError4.hasMarker(error, marker47);
   }
 };
-_a45 = symbol45;
-var name65 = "AI_JSONParseError";
-var marker75 = `vercel.ai.error.${name65}`;
-var symbol75 = Symbol.for(marker75);
-var _a75;
-var JSONParseError3 = class extends AISDKError3 {
+_a47 = symbol47;
+var name67 = "AI_JSONParseError";
+var marker77 = `vercel.ai.error.${name67}`;
+var symbol77 = Symbol.for(marker77);
+var _a77;
+var JSONParseError4 = class extends AISDKError4 {
   constructor({ text: text23, cause }) {
     super({
-      name: name65,
+      name: name67,
       message: `JSON parsing failed: Text: ${text23}.
-Error message: ${getErrorMessage4(cause)}`,
+Error message: ${getErrorMessage5(cause)}`,
       cause
     });
-    this[_a75] = true;
+    this[_a77] = true;
     this.text = text23;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker75);
+    return AISDKError4.hasMarker(error, marker77);
   }
 };
-_a75 = symbol75;
+_a77 = symbol77;
 var name124 = "AI_TypeValidationError";
 var marker134 = `vercel.ai.error.${name124}`;
 var symbol134 = Symbol.for(marker134);
 var _a134;
-var _TypeValidationError4 = class _TypeValidationError23 extends AISDKError3 {
+var _TypeValidationError5 = class _TypeValidationError23 extends AISDKError4 {
   constructor({ value, cause }) {
     super({
       name: name124,
       message: `Type validation failed: Value: ${JSON.stringify(value)}.
-Error message: ${getErrorMessage4(cause)}`,
+Error message: ${getErrorMessage5(cause)}`,
       cause
     });
     this[_a134] = true;
     this.value = value;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker134);
+    return AISDKError4.hasMarker(error, marker134);
   }
   /**
    * Wraps an error into a TypeValidationError.
@@ -31915,23 +38771,23 @@ Error message: ${getErrorMessage4(cause)}`,
   }
 };
 _a134 = symbol134;
-var TypeValidationError3 = _TypeValidationError4;
-var ParseError2 = class extends Error {
+var TypeValidationError4 = _TypeValidationError5;
+var ParseError3 = class extends Error {
   constructor(message, options) {
     super(message), this.name = "ParseError", this.type = options.type, this.field = options.field, this.value = options.value, this.line = options.line;
   }
 };
-function noop2(_arg) {
+function noop3(_arg) {
 }
-function createParser2(callbacks) {
+function createParser3(callbacks) {
   if (typeof callbacks == "function")
     throw new TypeError(
       "`callbacks` must be an object, got a function instead. Did you mean `{onEvent: fn}`?"
     );
-  const { onEvent = noop2, onError = noop2, onRetry = noop2, onComment } = callbacks;
+  const { onEvent = noop3, onError = noop3, onRetry = noop3, onComment } = callbacks;
   let incompleteLine = "", isFirstChunk = true, id, data = "", eventType = "";
   function feed(newChunk) {
-    const chunk = isFirstChunk ? newChunk.replace(/^\xEF\xBB\xBF/, "") : newChunk, [complete, incomplete] = splitLines2(`${incompleteLine}${chunk}`);
+    const chunk = isFirstChunk ? newChunk.replace(/^\xEF\xBB\xBF/, "") : newChunk, [complete, incomplete] = splitLines3(`${incompleteLine}${chunk}`);
     for (const line of complete)
       parseLine(line);
     incompleteLine = incomplete, isFirstChunk = false;
@@ -31967,7 +38823,7 @@ function createParser2(callbacks) {
         break;
       case "retry":
         /^\d+$/.test(value) ? onRetry(parseInt(value, 10)) : onError(
-          new ParseError2(`Invalid \`retry\` value: "${value}"`, {
+          new ParseError3(`Invalid \`retry\` value: "${value}"`, {
             type: "invalid-retry",
             value,
             line
@@ -31976,7 +38832,7 @@ function createParser2(callbacks) {
         break;
       default:
         onError(
-          new ParseError2(
+          new ParseError3(
             `Unknown field "${field.length > 20 ? `${field.slice(0, 20)}\u2026` : field}"`,
             { type: "unknown-field", field, value, line }
           )
@@ -31999,7 +38855,7 @@ function createParser2(callbacks) {
   }
   return { feed, reset };
 }
-function splitLines2(chunk) {
+function splitLines3(chunk) {
   const lines = [];
   let incompleteLine = "", searchIndex = 0;
   for (; searchIndex < chunk.length; ) {
@@ -32017,12 +38873,12 @@ function splitLines2(chunk) {
   }
   return [lines, incompleteLine];
 }
-var EventSourceParserStream2 = class extends TransformStream {
+var EventSourceParserStream3 = class extends TransformStream {
   constructor({ onError, onRetry, onComment } = {}) {
     let parser;
     super({
       start(controller) {
-        parser = createParser2({
+        parser = createParser3({
           onEvent: (event) => {
             controller.enqueue(event);
           },
@@ -32039,7 +38895,7 @@ var EventSourceParserStream2 = class extends TransformStream {
     });
   }
 };
-function combineHeaders2(...headers) {
+function combineHeaders3(...headers) {
   return headers.reduce(
     (combinedHeaders, currentHeaders) => ({
       ...combinedHeaders,
@@ -32048,10 +38904,10 @@ function combineHeaders2(...headers) {
     {}
   );
 }
-function extractResponseHeaders2(response) {
+function extractResponseHeaders3(response) {
   return Object.fromEntries([...response.headers]);
 }
-var createIdGenerator3 = ({
+var createIdGenerator4 = ({
   prefix,
   size = 16,
   alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
@@ -32069,31 +38925,31 @@ var createIdGenerator3 = ({
     return generator;
   }
   if (alphabet.includes(separator)) {
-    throw new InvalidArgumentError4({
+    throw new InvalidArgumentError5({
       argument: "separator",
       message: `The separator "${separator}" must not be part of the alphabet "${alphabet}".`
     });
   }
   return () => `${prefix}${separator}${generator()}`;
 };
-createIdGenerator3();
-function isAbortError3(error) {
+createIdGenerator4();
+function isAbortError4(error) {
   return (error instanceof Error || error instanceof DOMException) && (error.name === "AbortError" || error.name === "ResponseAborted" || // Next.js
   error.name === "TimeoutError");
 }
-var FETCH_FAILED_ERROR_MESSAGES2 = ["fetch failed", "failed to fetch"];
-function handleFetchError2({
+var FETCH_FAILED_ERROR_MESSAGES3 = ["fetch failed", "failed to fetch"];
+function handleFetchError3({
   error,
   url,
   requestBodyValues
 }) {
-  if (isAbortError3(error)) {
+  if (isAbortError4(error)) {
     return error;
   }
-  if (error instanceof TypeError && FETCH_FAILED_ERROR_MESSAGES2.includes(error.message.toLowerCase())) {
+  if (error instanceof TypeError && FETCH_FAILED_ERROR_MESSAGES3.includes(error.message.toLowerCase())) {
     const cause = error.cause;
     if (cause != null) {
-      return new APICallError3({
+      return new APICallError4({
         message: `Cannot connect to API: ${cause.message}`,
         cause,
         url,
@@ -32105,7 +38961,7 @@ function handleFetchError2({
   }
   return error;
 }
-function getRuntimeEnvironmentUserAgent2(globalThisAny = globalThis) {
+function getRuntimeEnvironmentUserAgent3(globalThisAny = globalThis) {
   var _a153, _b82, _c;
   if (globalThisAny.window) {
     return `runtime/browser`;
@@ -32121,7 +38977,7 @@ function getRuntimeEnvironmentUserAgent2(globalThisAny = globalThis) {
   }
   return "runtime/unknown";
 }
-function normalizeHeaders2(headers) {
+function normalizeHeaders3(headers) {
   if (headers == null) {
     return {};
   }
@@ -32142,8 +38998,8 @@ function normalizeHeaders2(headers) {
   }
   return normalized;
 }
-function withUserAgentSuffix2(headers, ...userAgentSuffixParts) {
-  const normalizedHeaders = new Headers(normalizeHeaders2(headers));
+function withUserAgentSuffix3(headers, ...userAgentSuffixParts) {
+  const normalizedHeaders = new Headers(normalizeHeaders3(headers));
   const currentUserAgentHeader = normalizedHeaders.get("user-agent") || "";
   normalizedHeaders.set(
     "user-agent",
@@ -32151,27 +39007,27 @@ function withUserAgentSuffix2(headers, ...userAgentSuffixParts) {
   );
   return Object.fromEntries(normalizedHeaders.entries());
 }
-var VERSION4 = "3.0.17";
-var getOriginalFetch3 = () => globalThis.fetch;
-var getFromApi2 = async ({
+var VERSION6 = "3.0.17";
+var getOriginalFetch4 = () => globalThis.fetch;
+var getFromApi3 = async ({
   url,
   headers = {},
   successfulResponseHandler,
   failedResponseHandler,
   abortSignal,
-  fetch: fetch2 = getOriginalFetch3()
+  fetch: fetch2 = getOriginalFetch4()
 }) => {
   try {
     const response = await fetch2(url, {
       method: "GET",
-      headers: withUserAgentSuffix2(
+      headers: withUserAgentSuffix3(
         headers,
-        `ai-sdk/provider-utils/${VERSION4}`,
-        getRuntimeEnvironmentUserAgent2()
+        `ai-sdk/provider-utils/${VERSION6}`,
+        getRuntimeEnvironmentUserAgent3()
       ),
       signal: abortSignal
     });
-    const responseHeaders = extractResponseHeaders2(response);
+    const responseHeaders = extractResponseHeaders3(response);
     if (!response.ok) {
       let errorInformation;
       try {
@@ -32181,10 +39037,10 @@ var getFromApi2 = async ({
           requestBodyValues: {}
         });
       } catch (error) {
-        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+        if (isAbortError4(error) || APICallError4.isInstance(error)) {
           throw error;
         }
-        throw new APICallError3({
+        throw new APICallError4({
           message: "Failed to process error response",
           cause: error,
           statusCode: response.status,
@@ -32203,11 +39059,11 @@ var getFromApi2 = async ({
       });
     } catch (error) {
       if (error instanceof Error) {
-        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+        if (isAbortError4(error) || APICallError4.isInstance(error)) {
           throw error;
         }
       }
-      throw new APICallError3({
+      throw new APICallError4({
         message: "Failed to process successful response",
         cause: error,
         statusCode: response.status,
@@ -32217,10 +39073,10 @@ var getFromApi2 = async ({
       });
     }
   } catch (error) {
-    throw handleFetchError2({ error, url, requestBodyValues: {} });
+    throw handleFetchError3({ error, url, requestBodyValues: {} });
   }
 };
-function loadOptionalSetting2({
+function loadOptionalSetting3({
   settingValue,
   environmentVariableName
 }) {
@@ -32236,19 +39092,19 @@ function loadOptionalSetting2({
   }
   return settingValue;
 }
-var suspectProtoRx2 = /"__proto__"\s*:/;
-var suspectConstructorRx2 = /"constructor"\s*:/;
-function _parse2(text23) {
+var suspectProtoRx3 = /"__proto__"\s*:/;
+var suspectConstructorRx3 = /"constructor"\s*:/;
+function _parse3(text23) {
   const obj = JSON.parse(text23);
   if (obj === null || typeof obj !== "object") {
     return obj;
   }
-  if (suspectProtoRx2.test(text23) === false && suspectConstructorRx2.test(text23) === false) {
+  if (suspectProtoRx3.test(text23) === false && suspectConstructorRx3.test(text23) === false) {
     return obj;
   }
-  return filter2(obj);
+  return filter3(obj);
 }
-function filter2(obj) {
+function filter3(obj) {
   let next = [obj];
   while (next.length) {
     const nodes = next;
@@ -32270,15 +39126,15 @@ function filter2(obj) {
   }
   return obj;
 }
-function secureJsonParse2(text23) {
+function secureJsonParse3(text23) {
   const { stackTraceLimit } = Error;
   try {
     Error.stackTraceLimit = 0;
   } catch (e2) {
-    return _parse2(text23);
+    return _parse3(text23);
   }
   try {
-    return _parse2(text23);
+    return _parse3(text23);
   } finally {
     Error.stackTraceLimit = stackTraceLimit;
   }
@@ -32302,29 +39158,29 @@ function lazyValidator2(createValidator) {
 function asValidator3(value) {
   return isValidator3(value) ? value : typeof value === "function" ? value() : standardSchemaValidator2(value);
 }
-function standardSchemaValidator2(standardSchema) {
+function standardSchemaValidator2(standardSchema2) {
   return validator3(async (value) => {
-    const result = await standardSchema["~standard"].validate(value);
+    const result = await standardSchema2["~standard"].validate(value);
     return result.issues == null ? { success: true, value: result.value } : {
       success: false,
-      error: new TypeValidationError3({
+      error: new TypeValidationError4({
         value,
         cause: result.issues
       })
     };
   });
 }
-async function validateTypes2({
+async function validateTypes3({
   value,
   schema
 }) {
-  const result = await safeValidateTypes3({ value, schema });
+  const result = await safeValidateTypes4({ value, schema });
   if (!result.success) {
-    throw TypeValidationError3.wrap({ value, cause: result.error });
+    throw TypeValidationError4.wrap({ value, cause: result.error });
   }
   return result.value;
 }
-async function safeValidateTypes3({
+async function safeValidateTypes4({
   value,
   schema
 }) {
@@ -32339,69 +39195,69 @@ async function safeValidateTypes3({
     }
     return {
       success: false,
-      error: TypeValidationError3.wrap({ value, cause: result.error }),
+      error: TypeValidationError4.wrap({ value, cause: result.error }),
       rawValue: value
     };
   } catch (error) {
     return {
       success: false,
-      error: TypeValidationError3.wrap({ value, cause: error }),
+      error: TypeValidationError4.wrap({ value, cause: error }),
       rawValue: value
     };
   }
 }
-async function parseJSON2({
+async function parseJSON3({
   text: text23,
   schema
 }) {
   try {
-    const value = secureJsonParse2(text23);
+    const value = secureJsonParse3(text23);
     if (schema == null) {
       return value;
     }
-    return validateTypes2({ value, schema });
+    return validateTypes3({ value, schema });
   } catch (error) {
-    if (JSONParseError3.isInstance(error) || TypeValidationError3.isInstance(error)) {
+    if (JSONParseError4.isInstance(error) || TypeValidationError4.isInstance(error)) {
       throw error;
     }
-    throw new JSONParseError3({ text: text23, cause: error });
+    throw new JSONParseError4({ text: text23, cause: error });
   }
 }
-async function safeParseJSON3({
+async function safeParseJSON4({
   text: text23,
   schema
 }) {
   try {
-    const value = secureJsonParse2(text23);
+    const value = secureJsonParse3(text23);
     if (schema == null) {
       return { success: true, value, rawValue: value };
     }
-    return await safeValidateTypes3({ value, schema });
+    return await safeValidateTypes4({ value, schema });
   } catch (error) {
     return {
       success: false,
-      error: JSONParseError3.isInstance(error) ? error : new JSONParseError3({ text: text23, cause: error }),
+      error: JSONParseError4.isInstance(error) ? error : new JSONParseError4({ text: text23, cause: error }),
       rawValue: void 0
     };
   }
 }
-function parseJsonEventStream2({
+function parseJsonEventStream3({
   stream,
   schema
 }) {
-  return stream.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream2()).pipeThrough(
+  return stream.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream3()).pipeThrough(
     new TransformStream({
       async transform({ data }, controller) {
         if (data === "[DONE]") {
           return;
         }
-        controller.enqueue(await safeParseJSON3({ text: data, schema }));
+        controller.enqueue(await safeParseJSON4({ text: data, schema }));
       }
     })
   );
 }
-var getOriginalFetch22 = () => globalThis.fetch;
-var postJsonToApi2 = async ({
+var getOriginalFetch23 = () => globalThis.fetch;
+var postJsonToApi3 = async ({
   url,
   headers,
   body,
@@ -32409,7 +39265,7 @@ var postJsonToApi2 = async ({
   successfulResponseHandler,
   abortSignal,
   fetch: fetch2
-}) => postToApi2({
+}) => postToApi3({
   url,
   headers: {
     "Content-Type": "application/json",
@@ -32424,27 +39280,27 @@ var postJsonToApi2 = async ({
   abortSignal,
   fetch: fetch2
 });
-var postToApi2 = async ({
+var postToApi3 = async ({
   url,
   headers = {},
   body,
   successfulResponseHandler,
   failedResponseHandler,
   abortSignal,
-  fetch: fetch2 = getOriginalFetch22()
+  fetch: fetch2 = getOriginalFetch23()
 }) => {
   try {
     const response = await fetch2(url, {
       method: "POST",
-      headers: withUserAgentSuffix2(
+      headers: withUserAgentSuffix3(
         headers,
-        `ai-sdk/provider-utils/${VERSION4}`,
-        getRuntimeEnvironmentUserAgent2()
+        `ai-sdk/provider-utils/${VERSION6}`,
+        getRuntimeEnvironmentUserAgent3()
       ),
       body: body.content,
       signal: abortSignal
     });
-    const responseHeaders = extractResponseHeaders2(response);
+    const responseHeaders = extractResponseHeaders3(response);
     if (!response.ok) {
       let errorInformation;
       try {
@@ -32454,10 +39310,10 @@ var postToApi2 = async ({
           requestBodyValues: body.values
         });
       } catch (error) {
-        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+        if (isAbortError4(error) || APICallError4.isInstance(error)) {
           throw error;
         }
-        throw new APICallError3({
+        throw new APICallError4({
           message: "Failed to process error response",
           cause: error,
           statusCode: response.status,
@@ -32476,11 +39332,11 @@ var postToApi2 = async ({
       });
     } catch (error) {
       if (error instanceof Error) {
-        if (isAbortError3(error) || APICallError3.isInstance(error)) {
+        if (isAbortError4(error) || APICallError4.isInstance(error)) {
           throw error;
         }
       }
-      throw new APICallError3({
+      throw new APICallError4({
         message: "Failed to process successful response",
         cause: error,
         statusCode: response.status,
@@ -32490,7 +39346,7 @@ var postToApi2 = async ({
       });
     }
   } catch (error) {
-    throw handleFetchError2({ error, url, requestBodyValues: body.values });
+    throw handleFetchError3({ error, url, requestBodyValues: body.values });
   }
 };
 async function resolve4(value) {
@@ -32499,17 +39355,17 @@ async function resolve4(value) {
   }
   return Promise.resolve(value);
 }
-var createJsonErrorResponseHandler2 = ({
+var createJsonErrorResponseHandler3 = ({
   errorSchema,
   errorToMessage,
   isRetryable
 }) => async ({ response, url, requestBodyValues }) => {
   const responseBody = await response.text();
-  const responseHeaders = extractResponseHeaders2(response);
+  const responseHeaders = extractResponseHeaders3(response);
   if (responseBody.trim() === "") {
     return {
       responseHeaders,
-      value: new APICallError3({
+      value: new APICallError4({
         message: response.statusText,
         url,
         requestBodyValues,
@@ -32521,13 +39377,13 @@ var createJsonErrorResponseHandler2 = ({
     };
   }
   try {
-    const parsedError = await parseJSON2({
+    const parsedError = await parseJSON3({
       text: responseBody,
       schema: errorSchema
     });
     return {
       responseHeaders,
-      value: new APICallError3({
+      value: new APICallError4({
         message: errorToMessage(parsedError),
         url,
         requestBodyValues,
@@ -32541,7 +39397,7 @@ var createJsonErrorResponseHandler2 = ({
   } catch (parseError) {
     return {
       responseHeaders,
-      value: new APICallError3({
+      value: new APICallError4({
         message: response.statusText,
         url,
         requestBodyValues,
@@ -32553,28 +39409,28 @@ var createJsonErrorResponseHandler2 = ({
     };
   }
 };
-var createEventSourceResponseHandler2 = (chunkSchema) => async ({ response }) => {
-  const responseHeaders = extractResponseHeaders2(response);
+var createEventSourceResponseHandler3 = (chunkSchema) => async ({ response }) => {
+  const responseHeaders = extractResponseHeaders3(response);
   if (response.body == null) {
-    throw new EmptyResponseBodyError2({});
+    throw new EmptyResponseBodyError3({});
   }
   return {
     responseHeaders,
-    value: parseJsonEventStream2({
+    value: parseJsonEventStream3({
       stream: response.body,
       schema: chunkSchema
     })
   };
 };
-var createJsonResponseHandler2 = (responseSchema) => async ({ response, url, requestBodyValues }) => {
+var createJsonResponseHandler3 = (responseSchema) => async ({ response, url, requestBodyValues }) => {
   const responseBody = await response.text();
-  const parsedResult = await safeParseJSON3({
+  const parsedResult = await safeParseJSON4({
     text: responseBody,
     schema: responseSchema
   });
-  const responseHeaders = extractResponseHeaders2(response);
+  const responseHeaders = extractResponseHeaders3(response);
   if (!parsedResult.success) {
-    throw new APICallError3({
+    throw new APICallError4({
       message: "Invalid JSON response",
       cause: parsedResult.error,
       statusCode: response.status,
@@ -33673,10 +40529,10 @@ var zodToJsonSchema4 = (schema, options) => {
   return combined;
 };
 var zod_to_json_schema_default2 = zodToJsonSchema4;
-function zod3Schema2(zodSchema23, options) {
+function zod3Schema3(zodSchema23, options) {
   var _a153;
   const useReferences = (_a153 = void 0) != null ? _a153 : false;
-  return jsonSchema3(
+  return jsonSchema4(
     // defer json schema creation to avoid unnecessary computation when only validation is needed
     () => zod_to_json_schema_default2(zodSchema23, {
       $refStrategy: useReferences ? "root" : "none"
@@ -33689,10 +40545,10 @@ function zod3Schema2(zodSchema23, options) {
     }
   );
 }
-function zod4Schema2(zodSchema23, options) {
+function zod4Schema3(zodSchema23, options) {
   var _a153;
   const useReferences = (_a153 = void 0) != null ? _a153 : false;
-  return jsonSchema3(
+  return jsonSchema4(
     // defer json schema creation to avoid unnecessary computation when only validation is needed
     () => z42.toJSONSchema(zodSchema23, {
       target: "draft-7",
@@ -33707,22 +40563,22 @@ function zod4Schema2(zodSchema23, options) {
     }
   );
 }
-function isZod4Schema2(zodSchema23) {
+function isZod4Schema3(zodSchema23) {
   return "_zod" in zodSchema23;
 }
-function zodSchema3(zodSchema23, options) {
-  if (isZod4Schema2(zodSchema23)) {
-    return zod4Schema2(zodSchema23);
+function zodSchema4(zodSchema23, options) {
+  if (isZod4Schema3(zodSchema23)) {
+    return zod4Schema3(zodSchema23);
   } else {
-    return zod3Schema2(zodSchema23);
+    return zod3Schema3(zodSchema23);
   }
 }
-var schemaSymbol3 = Symbol.for("vercel.ai.schema");
-function jsonSchema3(jsonSchema23, {
+var schemaSymbol4 = Symbol.for("vercel.ai.schema");
+function jsonSchema4(jsonSchema23, {
   validate
 } = {}) {
   return {
-    [schemaSymbol3]: true,
+    [schemaSymbol4]: true,
     _type: void 0,
     // should never be used directly
     [validatorSymbol3]: true,
@@ -33735,19 +40591,19 @@ function jsonSchema3(jsonSchema23, {
     validate
   };
 }
-function isSchema3(value) {
-  return typeof value === "object" && value !== null && schemaSymbol3 in value && value[schemaSymbol3] === true && "jsonSchema" in value && "validate" in value;
+function isSchema4(value) {
+  return typeof value === "object" && value !== null && schemaSymbol4 in value && value[schemaSymbol4] === true && "jsonSchema" in value && "validate" in value;
 }
-function asSchema3(schema) {
-  return schema == null ? jsonSchema3({
+function asSchema4(schema) {
+  return schema == null ? jsonSchema4({
     properties: {},
     additionalProperties: false
-  }) : isSchema3(schema) ? schema : typeof schema === "function" ? schema() : zodSchema3(schema);
+  }) : isSchema4(schema) ? schema : typeof schema === "function" ? schema() : zodSchema4(schema);
 }
-function withoutTrailingSlash2(url) {
+function withoutTrailingSlash3(url) {
   return url == null ? void 0 : url.replace(/\/$/, "");
 }
-var require_get_context2 = __commonJS$1({
+var require_get_context3 = __commonJS$1({
   "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/get-context.js"(exports, module) {
     var __defProp23 = Object.defineProperty;
     var __getOwnPropDesc3 = Object.getOwnPropertyDescriptor;
@@ -33779,7 +40635,7 @@ var require_get_context2 = __commonJS$1({
     }
   }
 });
-var require_get_vercel_oidc_token2 = __commonJS$1({
+var require_get_vercel_oidc_token3 = __commonJS$1({
   "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/get-vercel-oidc-token.js"(exports, module) {
     var __defProp23 = Object.defineProperty;
     var __getOwnPropDesc3 = Object.getOwnPropertyDescriptor;
@@ -33804,7 +40660,7 @@ var require_get_vercel_oidc_token2 = __commonJS$1({
       getVercelOidcTokenSync: () => getVercelOidcTokenSync2
     });
     module.exports = __toCommonJS(get_vercel_oidc_token_exports);
-    var import_get_context = require_get_context2();
+    var import_get_context = require_get_context3();
     var import_token_error = require_token_error$1();
     async function getVercelOidcToken3() {
       let token = "";
@@ -33843,7 +40699,7 @@ ${error.message}`;
     }
   }
 });
-var require_dist2 = __commonJS$1({
+var require_dist3 = __commonJS$1({
   "../../../node_modules/.pnpm/@vercel+oidc@3.0.5/node_modules/@vercel/oidc/dist/index.js"(exports, module) {
     var __defProp23 = Object.defineProperty;
     var __getOwnPropDesc3 = Object.getOwnPropertyDescriptor;
@@ -33869,17 +40725,17 @@ var require_dist2 = __commonJS$1({
       getVercelOidcTokenSync: () => import_get_vercel_oidc_token.getVercelOidcTokenSync
     });
     module.exports = __toCommonJS(src_exports);
-    var import_get_vercel_oidc_token = require_get_vercel_oidc_token2();
-    var import_get_context = require_get_context2();
+    var import_get_vercel_oidc_token = require_get_vercel_oidc_token3();
+    var import_get_context = require_get_context3();
   }
 });
-var import_oidc3 = __toESM$1(require_dist2());
-var import_oidc22 = __toESM$1(require_dist2());
+var import_oidc4 = __toESM$1(require_dist3());
+var import_oidc23 = __toESM$1(require_dist3());
 var marker15 = "vercel.ai.gateway.error";
 var symbol15 = Symbol.for(marker15);
 var _a15;
-var _b8;
-var GatewayError2 = class _GatewayError2 extends (_b8 = Error, _a15 = symbol15, _b8) {
+var _b9;
+var GatewayError3 = class _GatewayError3 extends (_b9 = Error, _a15 = symbol15, _b9) {
   constructor({
     message,
     statusCode = 500,
@@ -33896,7 +40752,7 @@ var GatewayError2 = class _GatewayError2 extends (_b8 = Error, _a15 = symbol15, 
    * @returns {boolean} True if the error is a Gateway Error, false otherwise.
    */
   static isInstance(error) {
-    return _GatewayError2.hasMarker(error);
+    return _GatewayError3.hasMarker(error);
   }
   static hasMarker(error) {
     return typeof error === "object" && error !== null && symbol15 in error && error[symbol15] === true;
@@ -33906,8 +40762,8 @@ var name14 = "GatewayAuthenticationError";
 var marker223 = `vercel.ai.gateway.error.${name14}`;
 var symbol223 = Symbol.for(marker223);
 var _a223;
-var _b22;
-var GatewayAuthenticationError2 = class _GatewayAuthenticationError2 extends (_b22 = GatewayError2, _a223 = symbol223, _b22) {
+var _b24;
+var GatewayAuthenticationError3 = class _GatewayAuthenticationError3 extends (_b24 = GatewayError3, _a223 = symbol223, _b24) {
   constructor({
     message = "Authentication failed",
     statusCode = 401,
@@ -33919,7 +40775,7 @@ var GatewayAuthenticationError2 = class _GatewayAuthenticationError2 extends (_b
     this.type = "authentication_error";
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol223 in error;
+    return GatewayError3.hasMarker(error) && symbol223 in error;
   }
   /**
    * Creates a contextual error message when authentication fails
@@ -33954,7 +40810,7 @@ Provide via 'apiKey' option or 'AI_GATEWAY_API_KEY' environment variable.
 Option 2 - OIDC token:
 Run 'npx vercel link' to link your project, then 'vc env pull' to fetch the token.`;
     }
-    return new _GatewayAuthenticationError2({
+    return new _GatewayAuthenticationError3({
       message: contextualMessage,
       statusCode,
       cause
@@ -33965,8 +40821,8 @@ var name223 = "GatewayInvalidRequestError";
 var marker322 = `vercel.ai.gateway.error.${name223}`;
 var symbol322 = Symbol.for(marker322);
 var _a322;
-var _b32;
-var GatewayInvalidRequestError2 = class extends (_b32 = GatewayError2, _a322 = symbol322, _b32) {
+var _b34;
+var GatewayInvalidRequestError3 = class extends (_b34 = GatewayError3, _a322 = symbol322, _b34) {
   constructor({
     message = "Invalid request",
     statusCode = 400,
@@ -33978,15 +40834,15 @@ var GatewayInvalidRequestError2 = class extends (_b32 = GatewayError2, _a322 = s
     this.type = "invalid_request_error";
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol322 in error;
+    return GatewayError3.hasMarker(error) && symbol322 in error;
   }
 };
 var name322 = "GatewayRateLimitError";
 var marker423 = `vercel.ai.gateway.error.${name322}`;
 var symbol423 = Symbol.for(marker423);
 var _a423;
-var _b42;
-var GatewayRateLimitError2 = class extends (_b42 = GatewayError2, _a423 = symbol423, _b42) {
+var _b44;
+var GatewayRateLimitError3 = class extends (_b44 = GatewayError3, _a423 = symbol423, _b44) {
   constructor({
     message = "Rate limit exceeded",
     statusCode = 429,
@@ -33998,14 +40854,14 @@ var GatewayRateLimitError2 = class extends (_b42 = GatewayError2, _a423 = symbol
     this.type = "rate_limit_exceeded";
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol423 in error;
+    return GatewayError3.hasMarker(error) && symbol423 in error;
   }
 };
 var name423 = "GatewayModelNotFoundError";
 var marker52 = `vercel.ai.gateway.error.${name423}`;
 var symbol52 = Symbol.for(marker52);
-var modelNotFoundParamSchema2 = lazyValidator2(
-  () => zodSchema3(
+var modelNotFoundParamSchema3 = lazyValidator2(
+  () => zodSchema4(
     z$2.object({
       modelId: z$2.string()
     })
@@ -34013,7 +40869,7 @@ var modelNotFoundParamSchema2 = lazyValidator2(
 );
 var _a52;
 var _b52;
-var GatewayModelNotFoundError2 = class extends (_b52 = GatewayError2, _a52 = symbol52, _b52) {
+var GatewayModelNotFoundError3 = class extends (_b52 = GatewayError3, _a52 = symbol52, _b52) {
   constructor({
     message = "Model not found",
     statusCode = 404,
@@ -34027,7 +40883,7 @@ var GatewayModelNotFoundError2 = class extends (_b52 = GatewayError2, _a52 = sym
     this.modelId = modelId;
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol52 in error;
+    return GatewayError3.hasMarker(error) && symbol52 in error;
   }
 };
 var name52 = "GatewayInternalServerError";
@@ -34035,7 +40891,7 @@ var marker62 = `vercel.ai.gateway.error.${name52}`;
 var symbol62 = Symbol.for(marker62);
 var _a62;
 var _b62;
-var GatewayInternalServerError2 = class extends (_b62 = GatewayError2, _a62 = symbol62, _b62) {
+var GatewayInternalServerError3 = class extends (_b62 = GatewayError3, _a62 = symbol62, _b62) {
   constructor({
     message = "Internal server error",
     statusCode = 500,
@@ -34047,15 +40903,15 @@ var GatewayInternalServerError2 = class extends (_b62 = GatewayError2, _a62 = sy
     this.type = "internal_server_error";
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol62 in error;
+    return GatewayError3.hasMarker(error) && symbol62 in error;
   }
 };
 var name623 = "GatewayResponseError";
 var marker722 = `vercel.ai.gateway.error.${name623}`;
 var symbol722 = Symbol.for(marker722);
 var _a722;
-var _b72;
-var GatewayResponseError2 = class extends (_b72 = GatewayError2, _a722 = symbol722, _b72) {
+var _b74;
+var GatewayResponseError3 = class extends (_b74 = GatewayError3, _a722 = symbol722, _b74) {
   constructor({
     message = "Invalid response from Gateway",
     statusCode = 502,
@@ -34071,22 +40927,22 @@ var GatewayResponseError2 = class extends (_b72 = GatewayError2, _a722 = symbol7
     this.validationError = validationError;
   }
   static isInstance(error) {
-    return GatewayError2.hasMarker(error) && symbol722 in error;
+    return GatewayError3.hasMarker(error) && symbol722 in error;
   }
 };
-async function createGatewayErrorFromResponse2({
+async function createGatewayErrorFromResponse3({
   response,
   statusCode,
   defaultMessage = "Gateway request failed",
   cause,
   authMethod
 }) {
-  const parseResult = await safeValidateTypes3({
+  const parseResult = await safeValidateTypes4({
     value: response,
-    schema: gatewayErrorResponseSchema2
+    schema: gatewayErrorResponseSchema3
   });
   if (!parseResult.success) {
-    return new GatewayResponseError2({
+    return new GatewayResponseError3({
       message: `Invalid error response format: ${defaultMessage}`,
       statusCode,
       response,
@@ -34099,22 +40955,22 @@ async function createGatewayErrorFromResponse2({
   const message = validatedResponse.error.message;
   switch (errorType) {
     case "authentication_error":
-      return GatewayAuthenticationError2.createContextualError({
+      return GatewayAuthenticationError3.createContextualError({
         apiKeyProvided: authMethod === "api-key",
         oidcTokenProvided: authMethod === "oidc",
         statusCode,
         cause
       });
     case "invalid_request_error":
-      return new GatewayInvalidRequestError2({ message, statusCode, cause });
+      return new GatewayInvalidRequestError3({ message, statusCode, cause });
     case "rate_limit_exceeded":
-      return new GatewayRateLimitError2({ message, statusCode, cause });
+      return new GatewayRateLimitError3({ message, statusCode, cause });
     case "model_not_found": {
-      const modelResult = await safeValidateTypes3({
+      const modelResult = await safeValidateTypes4({
         value: validatedResponse.error.param,
-        schema: modelNotFoundParamSchema2
+        schema: modelNotFoundParamSchema3
       });
-      return new GatewayModelNotFoundError2({
+      return new GatewayModelNotFoundError3({
         message,
         statusCode,
         modelId: modelResult.success ? modelResult.value.modelId : void 0,
@@ -34122,13 +40978,13 @@ async function createGatewayErrorFromResponse2({
       });
     }
     case "internal_server_error":
-      return new GatewayInternalServerError2({ message, statusCode, cause });
+      return new GatewayInternalServerError3({ message, statusCode, cause });
     default:
-      return new GatewayInternalServerError2({ message, statusCode, cause });
+      return new GatewayInternalServerError3({ message, statusCode, cause });
   }
 }
-var gatewayErrorResponseSchema2 = lazyValidator2(
-  () => zodSchema3(
+var gatewayErrorResponseSchema3 = lazyValidator2(
+  () => zodSchema4(
     z$2.object({
       error: z$2.object({
         message: z$2.string(),
@@ -34139,21 +40995,21 @@ var gatewayErrorResponseSchema2 = lazyValidator2(
     })
   )
 );
-function asGatewayError2(error, authMethod) {
+function asGatewayError3(error, authMethod) {
   var _a83;
-  if (GatewayError2.isInstance(error)) {
+  if (GatewayError3.isInstance(error)) {
     return error;
   }
-  if (APICallError3.isInstance(error)) {
-    return createGatewayErrorFromResponse2({
-      response: extractApiCallResponse2(error),
+  if (APICallError4.isInstance(error)) {
+    return createGatewayErrorFromResponse3({
+      response: extractApiCallResponse3(error),
       statusCode: (_a83 = error.statusCode) != null ? _a83 : 500,
       defaultMessage: "Gateway request failed",
       cause: error,
       authMethod
     });
   }
-  return createGatewayErrorFromResponse2({
+  return createGatewayErrorFromResponse3({
     response: {},
     statusCode: 500,
     defaultMessage: error instanceof Error ? `Gateway request failed: ${error.message}` : "Unknown Gateway error",
@@ -34161,7 +41017,7 @@ function asGatewayError2(error, authMethod) {
     authMethod
   });
 }
-function extractApiCallResponse2(error) {
+function extractApiCallResponse3(error) {
   if (error.data !== void 0) {
     return error.data;
   }
@@ -34174,30 +41030,30 @@ function extractApiCallResponse2(error) {
   }
   return {};
 }
-var GATEWAY_AUTH_METHOD_HEADER2 = "ai-gateway-auth-method";
-async function parseAuthMethod2(headers) {
-  const result = await safeValidateTypes3({
-    value: headers[GATEWAY_AUTH_METHOD_HEADER2],
-    schema: gatewayAuthMethodSchema2
+var GATEWAY_AUTH_METHOD_HEADER3 = "ai-gateway-auth-method";
+async function parseAuthMethod3(headers) {
+  const result = await safeValidateTypes4({
+    value: headers[GATEWAY_AUTH_METHOD_HEADER3],
+    schema: gatewayAuthMethodSchema3
   });
   return result.success ? result.value : void 0;
 }
-var gatewayAuthMethodSchema2 = lazyValidator2(
-  () => zodSchema3(z$2.union([z$2.literal("api-key"), z$2.literal("oidc")]))
+var gatewayAuthMethodSchema3 = lazyValidator2(
+  () => zodSchema4(z$2.union([z$2.literal("api-key"), z$2.literal("oidc")]))
 );
-var GatewayFetchMetadata2 = class {
+var GatewayFetchMetadata3 = class {
   constructor(config) {
     this.config = config;
   }
   async getAvailableModels() {
     try {
-      const { value } = await getFromApi2({
+      const { value } = await getFromApi3({
         url: `${this.config.baseURL}/config`,
         headers: await resolve4(this.config.headers()),
-        successfulResponseHandler: createJsonResponseHandler2(
-          gatewayAvailableModelsResponseSchema2
+        successfulResponseHandler: createJsonResponseHandler3(
+          gatewayAvailableModelsResponseSchema3
         ),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34205,19 +41061,19 @@ var GatewayFetchMetadata2 = class {
       });
       return value;
     } catch (error) {
-      throw await asGatewayError2(error);
+      throw await asGatewayError3(error);
     }
   }
   async getCredits() {
     try {
       const baseUrl = new URL(this.config.baseURL);
-      const { value } = await getFromApi2({
+      const { value } = await getFromApi3({
         url: `${baseUrl.origin}/v1/credits`,
         headers: await resolve4(this.config.headers()),
-        successfulResponseHandler: createJsonResponseHandler2(
-          gatewayCreditsResponseSchema2
+        successfulResponseHandler: createJsonResponseHandler3(
+          gatewayCreditsResponseSchema3
         ),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34225,12 +41081,12 @@ var GatewayFetchMetadata2 = class {
       });
       return value;
     } catch (error) {
-      throw await asGatewayError2(error);
+      throw await asGatewayError3(error);
     }
   }
 };
-var gatewayAvailableModelsResponseSchema2 = lazyValidator2(
-  () => zodSchema3(
+var gatewayAvailableModelsResponseSchema3 = lazyValidator2(
+  () => zodSchema4(
     z$2.object({
       models: z$2.array(
         z$2.object({
@@ -34261,8 +41117,8 @@ var gatewayAvailableModelsResponseSchema2 = lazyValidator2(
     })
   )
 );
-var gatewayCreditsResponseSchema2 = lazyValidator2(
-  () => zodSchema3(
+var gatewayCreditsResponseSchema3 = lazyValidator2(
+  () => zodSchema4(
     z$2.object({
       balance: z$2.string(),
       total_used: z$2.string()
@@ -34272,7 +41128,7 @@ var gatewayCreditsResponseSchema2 = lazyValidator2(
     }))
   )
 );
-var GatewayLanguageModel2 = class {
+var GatewayLanguageModel3 = class {
   constructor(modelId, config) {
     this.modelId = modelId;
     this.config = config;
@@ -34298,17 +41154,17 @@ var GatewayLanguageModel2 = class {
         responseHeaders,
         value: responseBody,
         rawValue: rawResponse
-      } = await postJsonToApi2({
+      } = await postJsonToApi3({
         url: this.getUrl(),
-        headers: combineHeaders2(
+        headers: combineHeaders3(
           resolvedHeaders,
           options.headers,
           this.getModelConfigHeaders(this.modelId, false),
           await resolve4(this.config.o11yHeaders)
         ),
         body: args,
-        successfulResponseHandler: createJsonResponseHandler2(z$2.any()),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        successfulResponseHandler: createJsonResponseHandler3(z$2.any()),
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34322,7 +41178,7 @@ var GatewayLanguageModel2 = class {
         warnings
       };
     } catch (error) {
-      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+      throw await asGatewayError3(error, await parseAuthMethod3(resolvedHeaders));
     }
   }
   async doStream(options) {
@@ -34330,17 +41186,17 @@ var GatewayLanguageModel2 = class {
     const { abortSignal } = options;
     const resolvedHeaders = await resolve4(this.config.headers());
     try {
-      const { value: response, responseHeaders } = await postJsonToApi2({
+      const { value: response, responseHeaders } = await postJsonToApi3({
         url: this.getUrl(),
-        headers: combineHeaders2(
+        headers: combineHeaders3(
           resolvedHeaders,
           options.headers,
           this.getModelConfigHeaders(this.modelId, true),
           await resolve4(this.config.o11yHeaders)
         ),
         body: args,
-        successfulResponseHandler: createEventSourceResponseHandler2(z$2.any()),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        successfulResponseHandler: createEventSourceResponseHandler3(z$2.any()),
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34377,7 +41233,7 @@ var GatewayLanguageModel2 = class {
         response: { headers: responseHeaders }
       };
     } catch (error) {
-      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+      throw await asGatewayError3(error, await parseAuthMethod3(resolvedHeaders));
     }
   }
   isFilePart(part) {
@@ -34417,7 +41273,7 @@ var GatewayLanguageModel2 = class {
     };
   }
 };
-var GatewayEmbeddingModel2 = class {
+var GatewayEmbeddingModel3 = class {
   constructor(modelId, config) {
     this.modelId = modelId;
     this.config = config;
@@ -34441,9 +41297,9 @@ var GatewayEmbeddingModel2 = class {
         responseHeaders,
         value: responseBody,
         rawValue
-      } = await postJsonToApi2({
+      } = await postJsonToApi3({
         url: this.getUrl(),
-        headers: combineHeaders2(
+        headers: combineHeaders3(
           resolvedHeaders,
           headers != null ? headers : {},
           this.getModelConfigHeaders(),
@@ -34453,10 +41309,10 @@ var GatewayEmbeddingModel2 = class {
           input: values.length === 1 ? values[0] : values,
           ...providerOptions ? { providerOptions } : {}
         },
-        successfulResponseHandler: createJsonResponseHandler2(
-          gatewayEmbeddingResponseSchema2
+        successfulResponseHandler: createJsonResponseHandler3(
+          gatewayEmbeddingResponseSchema3
         ),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34470,7 +41326,7 @@ var GatewayEmbeddingModel2 = class {
         response: { headers: responseHeaders, body: rawValue }
       };
     } catch (error) {
-      throw await asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+      throw await asGatewayError3(error, await parseAuthMethod3(resolvedHeaders));
     }
   }
   getUrl() {
@@ -34483,8 +41339,8 @@ var GatewayEmbeddingModel2 = class {
     };
   }
 };
-var gatewayEmbeddingResponseSchema2 = lazyValidator2(
-  () => zodSchema3(
+var gatewayEmbeddingResponseSchema3 = lazyValidator2(
+  () => zodSchema4(
     z$2.object({
       embeddings: z$2.array(z$2.array(z$2.number())),
       usage: z$2.object({ tokens: z$2.number() }).nullish(),
@@ -34492,7 +41348,7 @@ var gatewayEmbeddingResponseSchema2 = lazyValidator2(
     })
   )
 );
-var GatewayImageModel2 = class {
+var GatewayImageModel3 = class {
   constructor(modelId, config) {
     this.modelId = modelId;
     this.config = config;
@@ -34518,9 +41374,9 @@ var GatewayImageModel2 = class {
       const {
         responseHeaders,
         value: responseBody
-      } = await postJsonToApi2({
+      } = await postJsonToApi3({
         url: this.getUrl(),
-        headers: combineHeaders2(
+        headers: combineHeaders3(
           resolvedHeaders,
           headers != null ? headers : {},
           this.getModelConfigHeaders(),
@@ -34534,10 +41390,10 @@ var GatewayImageModel2 = class {
           ...seed && { seed },
           ...providerOptions && { providerOptions }
         },
-        successfulResponseHandler: createJsonResponseHandler2(
-          gatewayImageResponseSchema2
+        successfulResponseHandler: createJsonResponseHandler3(
+          gatewayImageResponseSchema3
         ),
-        failedResponseHandler: createJsonErrorResponseHandler2({
+        failedResponseHandler: createJsonErrorResponseHandler3({
           errorSchema: z$2.any(),
           errorToMessage: (data) => data
         }),
@@ -34556,7 +41412,7 @@ var GatewayImageModel2 = class {
         }
       };
     } catch (error) {
-      throw asGatewayError2(error, await parseAuthMethod2(resolvedHeaders));
+      throw asGatewayError3(error, await parseAuthMethod3(resolvedHeaders));
     }
   }
   getUrl() {
@@ -34569,10 +41425,10 @@ var GatewayImageModel2 = class {
     };
   }
 };
-var providerMetadataEntrySchema2 = z$2.object({
+var providerMetadataEntrySchema3 = z$2.object({
   images: z$2.array(z$2.unknown()).optional()
 }).catchall(z$2.unknown());
-var gatewayImageResponseSchema2 = z$2.object({
+var gatewayImageResponseSchema3 = z$2.object({
   images: z$2.array(z$2.string()),
   // Always base64 strings over the wire
   warnings: z$2.array(
@@ -34581,55 +41437,55 @@ var gatewayImageResponseSchema2 = z$2.object({
       message: z$2.string()
     })
   ).optional(),
-  providerMetadata: z$2.record(z$2.string(), providerMetadataEntrySchema2).optional()
+  providerMetadata: z$2.record(z$2.string(), providerMetadataEntrySchema3).optional()
 });
-async function getVercelRequestId2() {
+async function getVercelRequestId3() {
   var _a83;
-  return (_a83 = (0, import_oidc3.getContext)().headers) == null ? void 0 : _a83["x-vercel-id"];
+  return (_a83 = (0, import_oidc4.getContext)().headers) == null ? void 0 : _a83["x-vercel-id"];
 }
-var VERSION23 = "2.0.15";
-var AI_GATEWAY_PROTOCOL_VERSION2 = "0.0.1";
-function createGatewayProvider2(options = {}) {
+var VERSION24 = "2.0.15";
+var AI_GATEWAY_PROTOCOL_VERSION3 = "0.0.1";
+function createGatewayProvider3(options = {}) {
   var _a83, _b82;
   let pendingMetadata = null;
   let metadataCache = null;
   const cacheRefreshMillis = (_a83 = options.metadataCacheRefreshMillis) != null ? _a83 : 1e3 * 60 * 5;
   let lastFetchTime = 0;
-  const baseURL = (_b82 = withoutTrailingSlash2(options.baseURL)) != null ? _b82 : "https://ai-gateway.vercel.sh/v1/ai";
+  const baseURL = (_b82 = withoutTrailingSlash3(options.baseURL)) != null ? _b82 : "https://ai-gateway.vercel.sh/v1/ai";
   const getHeaders = async () => {
-    const auth = await getGatewayAuthToken2(options);
+    const auth = await getGatewayAuthToken3(options);
     if (auth) {
-      return withUserAgentSuffix2(
+      return withUserAgentSuffix3(
         {
           Authorization: `Bearer ${auth.token}`,
-          "ai-gateway-protocol-version": AI_GATEWAY_PROTOCOL_VERSION2,
-          [GATEWAY_AUTH_METHOD_HEADER2]: auth.authMethod,
+          "ai-gateway-protocol-version": AI_GATEWAY_PROTOCOL_VERSION3,
+          [GATEWAY_AUTH_METHOD_HEADER3]: auth.authMethod,
           ...options.headers
         },
-        `ai-sdk/gateway/${VERSION23}`
+        `ai-sdk/gateway/${VERSION24}`
       );
     }
-    throw GatewayAuthenticationError2.createContextualError({
+    throw GatewayAuthenticationError3.createContextualError({
       apiKeyProvided: false,
       oidcTokenProvided: false,
       statusCode: 401
     });
   };
   const createO11yHeaders = () => {
-    const deploymentId = loadOptionalSetting2({
+    const deploymentId = loadOptionalSetting3({
       settingValue: void 0,
       environmentVariableName: "VERCEL_DEPLOYMENT_ID"
     });
-    const environment = loadOptionalSetting2({
+    const environment = loadOptionalSetting3({
       settingValue: void 0,
       environmentVariableName: "VERCEL_ENV"
     });
-    const region = loadOptionalSetting2({
+    const region = loadOptionalSetting3({
       settingValue: void 0,
       environmentVariableName: "VERCEL_REGION"
     });
     return async () => {
-      const requestId = await getVercelRequestId2();
+      const requestId = await getVercelRequestId3();
       return {
         ...deploymentId && { "ai-o11y-deployment-id": deploymentId },
         ...environment && { "ai-o11y-environment": environment },
@@ -34639,7 +41495,7 @@ function createGatewayProvider2(options = {}) {
     };
   };
   const createLanguageModel = (modelId) => {
-    return new GatewayLanguageModel2(modelId, {
+    return new GatewayLanguageModel3(modelId, {
       provider: "gateway",
       baseURL,
       headers: getHeaders,
@@ -34648,11 +41504,11 @@ function createGatewayProvider2(options = {}) {
     });
   };
   const getAvailableModels = async () => {
-    var _a922, _b9, _c;
-    const now2 = (_c = (_b9 = (_a922 = options._internal) == null ? void 0 : _a922.currentDate) == null ? void 0 : _b9.call(_a922).getTime()) != null ? _c : Date.now();
+    var _a922, _b92, _c;
+    const now2 = (_c = (_b92 = (_a922 = options._internal) == null ? void 0 : _a922.currentDate) == null ? void 0 : _b92.call(_a922).getTime()) != null ? _c : Date.now();
     if (!pendingMetadata || now2 - lastFetchTime > cacheRefreshMillis) {
       lastFetchTime = now2;
-      pendingMetadata = new GatewayFetchMetadata2({
+      pendingMetadata = new GatewayFetchMetadata3({
         baseURL,
         headers: getHeaders,
         fetch: options.fetch
@@ -34660,23 +41516,23 @@ function createGatewayProvider2(options = {}) {
         metadataCache = metadata;
         return metadata;
       }).catch(async (error) => {
-        throw await asGatewayError2(
+        throw await asGatewayError3(
           error,
-          await parseAuthMethod2(await getHeaders())
+          await parseAuthMethod3(await getHeaders())
         );
       });
     }
     return metadataCache ? Promise.resolve(metadataCache) : pendingMetadata;
   };
   const getCredits = async () => {
-    return new GatewayFetchMetadata2({
+    return new GatewayFetchMetadata3({
       baseURL,
       headers: getHeaders,
       fetch: options.fetch
     }).getCredits().catch(async (error) => {
-      throw await asGatewayError2(
+      throw await asGatewayError3(
         error,
-        await parseAuthMethod2(await getHeaders())
+        await parseAuthMethod3(await getHeaders())
       );
     });
   };
@@ -34691,7 +41547,7 @@ function createGatewayProvider2(options = {}) {
   provider.getAvailableModels = getAvailableModels;
   provider.getCredits = getCredits;
   provider.imageModel = (modelId) => {
-    return new GatewayImageModel2(modelId, {
+    return new GatewayImageModel3(modelId, {
       provider: "gateway",
       baseURL,
       headers: getHeaders,
@@ -34701,7 +41557,7 @@ function createGatewayProvider2(options = {}) {
   };
   provider.languageModel = createLanguageModel;
   provider.textEmbeddingModel = (modelId) => {
-    return new GatewayEmbeddingModel2(modelId, {
+    return new GatewayEmbeddingModel3(modelId, {
       provider: "gateway",
       baseURL,
       headers: getHeaders,
@@ -34711,9 +41567,9 @@ function createGatewayProvider2(options = {}) {
   };
   return provider;
 }
-createGatewayProvider2();
-async function getGatewayAuthToken2(options) {
-  const apiKey = loadOptionalSetting2({
+createGatewayProvider3();
+async function getGatewayAuthToken3(options) {
+  const apiKey = loadOptionalSetting3({
     settingValue: options.apiKey,
     environmentVariableName: "AI_GATEWAY_API_KEY"
   });
@@ -34724,7 +41580,7 @@ async function getGatewayAuthToken2(options) {
     };
   }
   try {
-    const oidcToken = await (0, import_oidc22.getVercelOidcToken)();
+    const oidcToken = await (0, import_oidc23.getVercelOidcToken)();
     return {
       token: oidcToken,
       authMethod: "oidc"
@@ -34733,13 +41589,13 @@ async function getGatewayAuthToken2(options) {
     return null;
   }
 }
-var _globalThis3 = typeof globalThis === "object" ? globalThis : global;
+var _globalThis4 = typeof globalThis === "object" ? globalThis : global;
 var VERSION223 = "1.9.0";
-var re3 = /^(\d+)\.(\d+)\.(\d+)(-(.+))?$/;
-function _makeCompatibilityCheck3(ownVersion) {
+var re4 = /^(\d+)\.(\d+)\.(\d+)(-(.+))?$/;
+function _makeCompatibilityCheck4(ownVersion) {
   var acceptedVersions = /* @__PURE__ */ new Set([ownVersion]);
   var rejectedVersions = /* @__PURE__ */ new Set();
-  var myVersionMatch = ownVersion.match(re3);
+  var myVersionMatch = ownVersion.match(re4);
   if (!myVersionMatch) {
     return function() {
       return false;
@@ -34771,7 +41627,7 @@ function _makeCompatibilityCheck3(ownVersion) {
     if (rejectedVersions.has(globalVersion)) {
       return false;
     }
-    var globalVersionMatch = globalVersion.match(re3);
+    var globalVersionMatch = globalVersion.match(re4);
     if (!globalVersionMatch) {
       return _reject(globalVersion);
     }
@@ -34799,16 +41655,16 @@ function _makeCompatibilityCheck3(ownVersion) {
     return _reject(globalVersion);
   };
 }
-var isCompatible3 = _makeCompatibilityCheck3(VERSION223);
-var major3 = VERSION223.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY3 = Symbol.for("opentelemetry.js.api." + major3);
-var _global3 = _globalThis3;
-function registerGlobal3(type, instance, diag, allowOverride) {
+var isCompatible4 = _makeCompatibilityCheck4(VERSION223);
+var major4 = VERSION223.split(".")[0];
+var GLOBAL_OPENTELEMETRY_API_KEY4 = Symbol.for("opentelemetry.js.api." + major4);
+var _global4 = _globalThis4;
+function registerGlobal4(type, instance, diag, allowOverride) {
   var _a16;
   if (allowOverride === void 0) {
     allowOverride = false;
   }
-  var api = _global3[GLOBAL_OPENTELEMETRY_API_KEY3] = (_a16 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) !== null && _a16 !== void 0 ? _a16 : {
+  var api = _global4[GLOBAL_OPENTELEMETRY_API_KEY4] = (_a16 = _global4[GLOBAL_OPENTELEMETRY_API_KEY4]) !== null && _a16 !== void 0 ? _a16 : {
     version: VERSION223
   };
   if (!allowOverride && api[type]) {
@@ -34825,22 +41681,22 @@ function registerGlobal3(type, instance, diag, allowOverride) {
   diag.debug("@opentelemetry/api: Registered a global for " + type + " v" + VERSION223 + ".");
   return true;
 }
-function getGlobal3(type) {
+function getGlobal4(type) {
   var _a16, _b82;
-  var globalVersion = (_a16 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) === null || _a16 === void 0 ? void 0 : _a16.version;
-  if (!globalVersion || !isCompatible3(globalVersion)) {
+  var globalVersion = (_a16 = _global4[GLOBAL_OPENTELEMETRY_API_KEY4]) === null || _a16 === void 0 ? void 0 : _a16.version;
+  if (!globalVersion || !isCompatible4(globalVersion)) {
     return;
   }
-  return (_b82 = _global3[GLOBAL_OPENTELEMETRY_API_KEY3]) === null || _b82 === void 0 ? void 0 : _b82[type];
+  return (_b82 = _global4[GLOBAL_OPENTELEMETRY_API_KEY4]) === null || _b82 === void 0 ? void 0 : _b82[type];
 }
-function unregisterGlobal3(type, diag) {
+function unregisterGlobal4(type, diag) {
   diag.debug("@opentelemetry/api: Unregistering a global for " + type + " v" + VERSION223 + ".");
-  var api = _global3[GLOBAL_OPENTELEMETRY_API_KEY3];
+  var api = _global4[GLOBAL_OPENTELEMETRY_API_KEY4];
   if (api) {
     delete api[type];
   }
 }
-var __read6 = function(o, n) {
+var __read7 = function(o, n) {
   var m = typeof Symbol === "function" && o[Symbol.iterator];
   if (!m) return o;
   var i = m.call(o), r, ar = [], e2;
@@ -34857,7 +41713,7 @@ var __read6 = function(o, n) {
   }
   return ar;
 };
-var __spreadArray6 = function(to, from, pack) {
+var __spreadArray7 = function(to, from, pack) {
   if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
     if (ar || !(i in from)) {
       if (!ar) ar = Array.prototype.slice.call(from, 0, i);
@@ -34866,7 +41722,7 @@ var __spreadArray6 = function(to, from, pack) {
   }
   return to.concat(ar || Array.prototype.slice.call(from));
 };
-var DiagComponentLogger3 = (
+var DiagComponentLogger4 = (
   /** @class */
   (function() {
     function DiagComponentLogger23(props) {
@@ -34877,48 +41733,48 @@ var DiagComponentLogger3 = (
       for (var _i = 0; _i < arguments.length; _i++) {
         args[_i] = arguments[_i];
       }
-      return logProxy3("debug", this._namespace, args);
+      return logProxy4("debug", this._namespace, args);
     };
     DiagComponentLogger23.prototype.error = function() {
       var args = [];
       for (var _i = 0; _i < arguments.length; _i++) {
         args[_i] = arguments[_i];
       }
-      return logProxy3("error", this._namespace, args);
+      return logProxy4("error", this._namespace, args);
     };
     DiagComponentLogger23.prototype.info = function() {
       var args = [];
       for (var _i = 0; _i < arguments.length; _i++) {
         args[_i] = arguments[_i];
       }
-      return logProxy3("info", this._namespace, args);
+      return logProxy4("info", this._namespace, args);
     };
     DiagComponentLogger23.prototype.warn = function() {
       var args = [];
       for (var _i = 0; _i < arguments.length; _i++) {
         args[_i] = arguments[_i];
       }
-      return logProxy3("warn", this._namespace, args);
+      return logProxy4("warn", this._namespace, args);
     };
     DiagComponentLogger23.prototype.verbose = function() {
       var args = [];
       for (var _i = 0; _i < arguments.length; _i++) {
         args[_i] = arguments[_i];
       }
-      return logProxy3("verbose", this._namespace, args);
+      return logProxy4("verbose", this._namespace, args);
     };
     return DiagComponentLogger23;
   })()
 );
-function logProxy3(funcName, namespace, args) {
-  var logger = getGlobal3("diag");
+function logProxy4(funcName, namespace, args) {
+  var logger = getGlobal4("diag");
   if (!logger) {
     return;
   }
   args.unshift(namespace);
-  return logger[funcName].apply(logger, __spreadArray6([], __read6(args), false));
+  return logger[funcName].apply(logger, __spreadArray7([], __read7(args), false));
 }
-var DiagLogLevel3;
+var DiagLogLevel4;
 (function(DiagLogLevel23) {
   DiagLogLevel23[DiagLogLevel23["NONE"] = 0] = "NONE";
   DiagLogLevel23[DiagLogLevel23["ERROR"] = 30] = "ERROR";
@@ -34927,12 +41783,12 @@ var DiagLogLevel3;
   DiagLogLevel23[DiagLogLevel23["DEBUG"] = 70] = "DEBUG";
   DiagLogLevel23[DiagLogLevel23["VERBOSE"] = 80] = "VERBOSE";
   DiagLogLevel23[DiagLogLevel23["ALL"] = 9999] = "ALL";
-})(DiagLogLevel3 || (DiagLogLevel3 = {}));
-function createLogLevelDiagLogger3(maxLevel, logger) {
-  if (maxLevel < DiagLogLevel3.NONE) {
-    maxLevel = DiagLogLevel3.NONE;
-  } else if (maxLevel > DiagLogLevel3.ALL) {
-    maxLevel = DiagLogLevel3.ALL;
+})(DiagLogLevel4 || (DiagLogLevel4 = {}));
+function createLogLevelDiagLogger4(maxLevel, logger) {
+  if (maxLevel < DiagLogLevel4.NONE) {
+    maxLevel = DiagLogLevel4.NONE;
+  } else if (maxLevel > DiagLogLevel4.ALL) {
+    maxLevel = DiagLogLevel4.ALL;
   }
   logger = logger || {};
   function _filterFunc(funcName, theLevel) {
@@ -34944,14 +41800,14 @@ function createLogLevelDiagLogger3(maxLevel, logger) {
     };
   }
   return {
-    error: _filterFunc("error", DiagLogLevel3.ERROR),
-    warn: _filterFunc("warn", DiagLogLevel3.WARN),
-    info: _filterFunc("info", DiagLogLevel3.INFO),
-    debug: _filterFunc("debug", DiagLogLevel3.DEBUG),
-    verbose: _filterFunc("verbose", DiagLogLevel3.VERBOSE)
+    error: _filterFunc("error", DiagLogLevel4.ERROR),
+    warn: _filterFunc("warn", DiagLogLevel4.WARN),
+    info: _filterFunc("info", DiagLogLevel4.INFO),
+    debug: _filterFunc("debug", DiagLogLevel4.DEBUG),
+    verbose: _filterFunc("verbose", DiagLogLevel4.VERBOSE)
   };
 }
-var __read23 = function(o, n) {
+var __read24 = function(o, n) {
   var m = typeof Symbol === "function" && o[Symbol.iterator];
   if (!m) return o;
   var i = m.call(o), r, ar = [], e2;
@@ -34968,7 +41824,7 @@ var __read23 = function(o, n) {
   }
   return ar;
 };
-var __spreadArray23 = function(to, from, pack) {
+var __spreadArray24 = function(to, from, pack) {
   if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
     if (ar || !(i in from)) {
       if (!ar) ar = Array.prototype.slice.call(from, 0, i);
@@ -34977,8 +41833,8 @@ var __spreadArray23 = function(to, from, pack) {
   }
   return to.concat(ar || Array.prototype.slice.call(from));
 };
-var API_NAME5 = "diag";
-var DiagAPI3 = (
+var API_NAME6 = "diag";
+var DiagAPI4 = (
   /** @class */
   (function() {
     function DiagAPI23() {
@@ -34988,17 +41844,17 @@ var DiagAPI3 = (
           for (var _i = 0; _i < arguments.length; _i++) {
             args[_i] = arguments[_i];
           }
-          var logger = getGlobal3("diag");
+          var logger = getGlobal4("diag");
           if (!logger)
             return;
-          return logger[funcName].apply(logger, __spreadArray23([], __read23(args), false));
+          return logger[funcName].apply(logger, __spreadArray24([], __read24(args), false));
         };
       }
       var self = this;
       var setLogger = function(logger, optionsOrLogLevel) {
         var _a16, _b82, _c;
         if (optionsOrLogLevel === void 0) {
-          optionsOrLogLevel = { logLevel: DiagLogLevel3.INFO };
+          optionsOrLogLevel = { logLevel: DiagLogLevel4.INFO };
         }
         if (logger === self) {
           var err = new Error("Cannot use diag as the logger for itself. Please use a DiagLogger implementation like ConsoleDiagLogger or a custom implementation");
@@ -35010,21 +41866,21 @@ var DiagAPI3 = (
             logLevel: optionsOrLogLevel
           };
         }
-        var oldLogger = getGlobal3("diag");
-        var newLogger = createLogLevelDiagLogger3((_b82 = optionsOrLogLevel.logLevel) !== null && _b82 !== void 0 ? _b82 : DiagLogLevel3.INFO, logger);
+        var oldLogger = getGlobal4("diag");
+        var newLogger = createLogLevelDiagLogger4((_b82 = optionsOrLogLevel.logLevel) !== null && _b82 !== void 0 ? _b82 : DiagLogLevel4.INFO, logger);
         if (oldLogger && !optionsOrLogLevel.suppressOverrideMessage) {
           var stack = (_c = new Error().stack) !== null && _c !== void 0 ? _c : "<failed to generate stacktrace>";
           oldLogger.warn("Current logger will be overwritten from " + stack);
           newLogger.warn("Current logger will overwrite one already registered from " + stack);
         }
-        return registerGlobal3("diag", newLogger, self, true);
+        return registerGlobal4("diag", newLogger, self, true);
       };
       self.setLogger = setLogger;
       self.disable = function() {
-        unregisterGlobal3(API_NAME5, self);
+        unregisterGlobal4(API_NAME6, self);
       };
       self.createComponentLogger = function(options) {
-        return new DiagComponentLogger3(options);
+        return new DiagComponentLogger4(options);
       };
       self.verbose = _logProxy("verbose");
       self.debug = _logProxy("debug");
@@ -35041,10 +41897,10 @@ var DiagAPI3 = (
     return DiagAPI23;
   })()
 );
-function createContextKey3(description) {
+function createContextKey4(description) {
   return Symbol.for(description);
 }
-var BaseContext3 = (
+var BaseContext4 = (
   /** @class */
   /* @__PURE__ */ (function() {
     function BaseContext23(parentContext) {
@@ -35067,8 +41923,8 @@ var BaseContext3 = (
     return BaseContext23;
   })()
 );
-var ROOT_CONTEXT3 = new BaseContext3();
-var __read33 = function(o, n) {
+var ROOT_CONTEXT4 = new BaseContext4();
+var __read34 = function(o, n) {
   var m = typeof Symbol === "function" && o[Symbol.iterator];
   if (!m) return o;
   var i = m.call(o), r, ar = [], e2;
@@ -35085,7 +41941,7 @@ var __read33 = function(o, n) {
   }
   return ar;
 };
-var __spreadArray33 = function(to, from, pack) {
+var __spreadArray34 = function(to, from, pack) {
   if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
     if (ar || !(i in from)) {
       if (!ar) ar = Array.prototype.slice.call(from, 0, i);
@@ -35094,20 +41950,20 @@ var __spreadArray33 = function(to, from, pack) {
   }
   return to.concat(ar || Array.prototype.slice.call(from));
 };
-var NoopContextManager3 = (
+var NoopContextManager4 = (
   /** @class */
   (function() {
     function NoopContextManager23() {
     }
     NoopContextManager23.prototype.active = function() {
-      return ROOT_CONTEXT3;
+      return ROOT_CONTEXT4;
     };
     NoopContextManager23.prototype.with = function(_context, fn, thisArg) {
       var args = [];
       for (var _i = 3; _i < arguments.length; _i++) {
         args[_i - 3] = arguments[_i];
       }
-      return fn.call.apply(fn, __spreadArray33([thisArg], __read33(args), false));
+      return fn.call.apply(fn, __spreadArray34([thisArg], __read34(args), false));
     };
     NoopContextManager23.prototype.bind = function(_context, target) {
       return target;
@@ -35121,7 +41977,7 @@ var NoopContextManager3 = (
     return NoopContextManager23;
   })()
 );
-var __read43 = function(o, n) {
+var __read44 = function(o, n) {
   var m = typeof Symbol === "function" && o[Symbol.iterator];
   if (!m) return o;
   var i = m.call(o), r, ar = [], e2;
@@ -35138,7 +41994,7 @@ var __read43 = function(o, n) {
   }
   return ar;
 };
-var __spreadArray43 = function(to, from, pack) {
+var __spreadArray44 = function(to, from, pack) {
   if (arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
     if (ar || !(i in from)) {
       if (!ar) ar = Array.prototype.slice.call(from, 0, i);
@@ -35147,9 +42003,9 @@ var __spreadArray43 = function(to, from, pack) {
   }
   return to.concat(ar || Array.prototype.slice.call(from));
 };
-var API_NAME23 = "context";
-var NOOP_CONTEXT_MANAGER3 = new NoopContextManager3();
-var ContextAPI3 = (
+var API_NAME24 = "context";
+var NOOP_CONTEXT_MANAGER4 = new NoopContextManager4();
+var ContextAPI4 = (
   /** @class */
   (function() {
     function ContextAPI23() {
@@ -35161,7 +42017,7 @@ var ContextAPI3 = (
       return this._instance;
     };
     ContextAPI23.prototype.setGlobalContextManager = function(contextManager) {
-      return registerGlobal3(API_NAME23, contextManager, DiagAPI3.instance());
+      return registerGlobal4(API_NAME24, contextManager, DiagAPI4.instance());
     };
     ContextAPI23.prototype.active = function() {
       return this._getContextManager().active();
@@ -35172,39 +42028,39 @@ var ContextAPI3 = (
       for (var _i = 3; _i < arguments.length; _i++) {
         args[_i - 3] = arguments[_i];
       }
-      return (_a16 = this._getContextManager()).with.apply(_a16, __spreadArray43([context, fn, thisArg], __read43(args), false));
+      return (_a16 = this._getContextManager()).with.apply(_a16, __spreadArray44([context, fn, thisArg], __read44(args), false));
     };
     ContextAPI23.prototype.bind = function(context, target) {
       return this._getContextManager().bind(context, target);
     };
     ContextAPI23.prototype._getContextManager = function() {
-      return getGlobal3(API_NAME23) || NOOP_CONTEXT_MANAGER3;
+      return getGlobal4(API_NAME24) || NOOP_CONTEXT_MANAGER4;
     };
     ContextAPI23.prototype.disable = function() {
       this._getContextManager().disable();
-      unregisterGlobal3(API_NAME23, DiagAPI3.instance());
+      unregisterGlobal4(API_NAME24, DiagAPI4.instance());
     };
     return ContextAPI23;
   })()
 );
-var TraceFlags3;
+var TraceFlags4;
 (function(TraceFlags23) {
   TraceFlags23[TraceFlags23["NONE"] = 0] = "NONE";
   TraceFlags23[TraceFlags23["SAMPLED"] = 1] = "SAMPLED";
-})(TraceFlags3 || (TraceFlags3 = {}));
-var INVALID_SPANID3 = "0000000000000000";
-var INVALID_TRACEID3 = "00000000000000000000000000000000";
-var INVALID_SPAN_CONTEXT3 = {
-  traceId: INVALID_TRACEID3,
-  spanId: INVALID_SPANID3,
-  traceFlags: TraceFlags3.NONE
+})(TraceFlags4 || (TraceFlags4 = {}));
+var INVALID_SPANID4 = "0000000000000000";
+var INVALID_TRACEID4 = "00000000000000000000000000000000";
+var INVALID_SPAN_CONTEXT4 = {
+  traceId: INVALID_TRACEID4,
+  spanId: INVALID_SPANID4,
+  traceFlags: TraceFlags4.NONE
 };
-var NonRecordingSpan3 = (
+var NonRecordingSpan4 = (
   /** @class */
   (function() {
     function NonRecordingSpan23(_spanContext) {
       if (_spanContext === void 0) {
-        _spanContext = INVALID_SPAN_CONTEXT3;
+        _spanContext = INVALID_SPAN_CONTEXT4;
       }
       this._spanContext = _spanContext;
     }
@@ -35242,59 +42098,59 @@ var NonRecordingSpan3 = (
     return NonRecordingSpan23;
   })()
 );
-var SPAN_KEY3 = createContextKey3("OpenTelemetry Context Key SPAN");
-function getSpan3(context) {
-  return context.getValue(SPAN_KEY3) || void 0;
+var SPAN_KEY4 = createContextKey4("OpenTelemetry Context Key SPAN");
+function getSpan4(context) {
+  return context.getValue(SPAN_KEY4) || void 0;
 }
-function getActiveSpan3() {
-  return getSpan3(ContextAPI3.getInstance().active());
+function getActiveSpan4() {
+  return getSpan4(ContextAPI4.getInstance().active());
 }
-function setSpan3(context, span) {
-  return context.setValue(SPAN_KEY3, span);
+function setSpan4(context, span) {
+  return context.setValue(SPAN_KEY4, span);
 }
-function deleteSpan3(context) {
-  return context.deleteValue(SPAN_KEY3);
+function deleteSpan4(context) {
+  return context.deleteValue(SPAN_KEY4);
 }
-function setSpanContext3(context, spanContext) {
-  return setSpan3(context, new NonRecordingSpan3(spanContext));
+function setSpanContext4(context, spanContext) {
+  return setSpan4(context, new NonRecordingSpan4(spanContext));
 }
-function getSpanContext3(context) {
+function getSpanContext4(context) {
   var _a16;
-  return (_a16 = getSpan3(context)) === null || _a16 === void 0 ? void 0 : _a16.spanContext();
+  return (_a16 = getSpan4(context)) === null || _a16 === void 0 ? void 0 : _a16.spanContext();
 }
-var VALID_TRACEID_REGEX3 = /^([0-9a-f]{32})$/i;
-var VALID_SPANID_REGEX3 = /^[0-9a-f]{16}$/i;
-function isValidTraceId3(traceId) {
-  return VALID_TRACEID_REGEX3.test(traceId) && traceId !== INVALID_TRACEID3;
+var VALID_TRACEID_REGEX4 = /^([0-9a-f]{32})$/i;
+var VALID_SPANID_REGEX4 = /^[0-9a-f]{16}$/i;
+function isValidTraceId4(traceId) {
+  return VALID_TRACEID_REGEX4.test(traceId) && traceId !== INVALID_TRACEID4;
 }
-function isValidSpanId3(spanId) {
-  return VALID_SPANID_REGEX3.test(spanId) && spanId !== INVALID_SPANID3;
+function isValidSpanId4(spanId) {
+  return VALID_SPANID_REGEX4.test(spanId) && spanId !== INVALID_SPANID4;
 }
-function isSpanContextValid3(spanContext) {
-  return isValidTraceId3(spanContext.traceId) && isValidSpanId3(spanContext.spanId);
+function isSpanContextValid4(spanContext) {
+  return isValidTraceId4(spanContext.traceId) && isValidSpanId4(spanContext.spanId);
 }
-function wrapSpanContext3(spanContext) {
-  return new NonRecordingSpan3(spanContext);
+function wrapSpanContext4(spanContext) {
+  return new NonRecordingSpan4(spanContext);
 }
-var contextApi3 = ContextAPI3.getInstance();
-var NoopTracer3 = (
+var contextApi4 = ContextAPI4.getInstance();
+var NoopTracer4 = (
   /** @class */
   (function() {
     function NoopTracer23() {
     }
     NoopTracer23.prototype.startSpan = function(name16, options, context) {
       if (context === void 0) {
-        context = contextApi3.active();
+        context = contextApi4.active();
       }
       var root = Boolean(options === null || options === void 0 ? void 0 : options.root);
       if (root) {
-        return new NonRecordingSpan3();
+        return new NonRecordingSpan4();
       }
-      var parentFromContext = context && getSpanContext3(context);
-      if (isSpanContext3(parentFromContext) && isSpanContextValid3(parentFromContext)) {
-        return new NonRecordingSpan3(parentFromContext);
+      var parentFromContext = context && getSpanContext4(context);
+      if (isSpanContext4(parentFromContext) && isSpanContextValid4(parentFromContext)) {
+        return new NonRecordingSpan4(parentFromContext);
       } else {
-        return new NonRecordingSpan3();
+        return new NonRecordingSpan4();
       }
     };
     NoopTracer23.prototype.startActiveSpan = function(name16, arg2, arg3, arg4) {
@@ -35313,19 +42169,19 @@ var NoopTracer3 = (
         ctx = arg3;
         fn = arg4;
       }
-      var parentContext = ctx !== null && ctx !== void 0 ? ctx : contextApi3.active();
+      var parentContext = ctx !== null && ctx !== void 0 ? ctx : contextApi4.active();
       var span = this.startSpan(name16, opts, parentContext);
-      var contextWithSpanSet = setSpan3(parentContext, span);
-      return contextApi3.with(contextWithSpanSet, fn, void 0, span);
+      var contextWithSpanSet = setSpan4(parentContext, span);
+      return contextApi4.with(contextWithSpanSet, fn, void 0, span);
     };
     return NoopTracer23;
   })()
 );
-function isSpanContext3(spanContext) {
+function isSpanContext4(spanContext) {
   return typeof spanContext === "object" && typeof spanContext["spanId"] === "string" && typeof spanContext["traceId"] === "string" && typeof spanContext["traceFlags"] === "number";
 }
-var NOOP_TRACER3 = new NoopTracer3();
-var ProxyTracer3 = (
+var NOOP_TRACER4 = new NoopTracer4();
+var ProxyTracer4 = (
   /** @class */
   (function() {
     function ProxyTracer23(_provider, name16, version, options) {
@@ -35347,7 +42203,7 @@ var ProxyTracer3 = (
       }
       var tracer = this._provider.getDelegateTracer(this.name, this.version, this.options);
       if (!tracer) {
-        return NOOP_TRACER3;
+        return NOOP_TRACER4;
       }
       this._delegate = tracer;
       return this._delegate;
@@ -35355,30 +42211,30 @@ var ProxyTracer3 = (
     return ProxyTracer23;
   })()
 );
-var NoopTracerProvider3 = (
+var NoopTracerProvider4 = (
   /** @class */
   (function() {
     function NoopTracerProvider23() {
     }
     NoopTracerProvider23.prototype.getTracer = function(_name, _version, _options) {
-      return new NoopTracer3();
+      return new NoopTracer4();
     };
     return NoopTracerProvider23;
   })()
 );
-var NOOP_TRACER_PROVIDER3 = new NoopTracerProvider3();
-var ProxyTracerProvider3 = (
+var NOOP_TRACER_PROVIDER4 = new NoopTracerProvider4();
+var ProxyTracerProvider4 = (
   /** @class */
   (function() {
     function ProxyTracerProvider23() {
     }
     ProxyTracerProvider23.prototype.getTracer = function(name16, version, options) {
       var _a16;
-      return (_a16 = this.getDelegateTracer(name16, version, options)) !== null && _a16 !== void 0 ? _a16 : new ProxyTracer3(this, name16, version, options);
+      return (_a16 = this.getDelegateTracer(name16, version, options)) !== null && _a16 !== void 0 ? _a16 : new ProxyTracer4(this, name16, version, options);
     };
     ProxyTracerProvider23.prototype.getDelegate = function() {
       var _a16;
-      return (_a16 = this._delegate) !== null && _a16 !== void 0 ? _a16 : NOOP_TRACER_PROVIDER3;
+      return (_a16 = this._delegate) !== null && _a16 !== void 0 ? _a16 : NOOP_TRACER_PROVIDER4;
     };
     ProxyTracerProvider23.prototype.setDelegate = function(delegate) {
       this._delegate = delegate;
@@ -35390,26 +42246,26 @@ var ProxyTracerProvider3 = (
     return ProxyTracerProvider23;
   })()
 );
-var SpanStatusCode3;
+var SpanStatusCode4;
 (function(SpanStatusCode23) {
   SpanStatusCode23[SpanStatusCode23["UNSET"] = 0] = "UNSET";
   SpanStatusCode23[SpanStatusCode23["OK"] = 1] = "OK";
   SpanStatusCode23[SpanStatusCode23["ERROR"] = 2] = "ERROR";
-})(SpanStatusCode3 || (SpanStatusCode3 = {}));
-var API_NAME33 = "trace";
-var TraceAPI3 = (
+})(SpanStatusCode4 || (SpanStatusCode4 = {}));
+var API_NAME34 = "trace";
+var TraceAPI4 = (
   /** @class */
   (function() {
     function TraceAPI23() {
-      this._proxyTracerProvider = new ProxyTracerProvider3();
-      this.wrapSpanContext = wrapSpanContext3;
-      this.isSpanContextValid = isSpanContextValid3;
-      this.deleteSpan = deleteSpan3;
-      this.getSpan = getSpan3;
-      this.getActiveSpan = getActiveSpan3;
-      this.getSpanContext = getSpanContext3;
-      this.setSpan = setSpan3;
-      this.setSpanContext = setSpanContext3;
+      this._proxyTracerProvider = new ProxyTracerProvider4();
+      this.wrapSpanContext = wrapSpanContext4;
+      this.isSpanContextValid = isSpanContextValid4;
+      this.deleteSpan = deleteSpan4;
+      this.getSpan = getSpan4;
+      this.getActiveSpan = getActiveSpan4;
+      this.getSpanContext = getSpanContext4;
+      this.setSpan = setSpan4;
+      this.setSpanContext = setSpanContext4;
     }
     TraceAPI23.getInstance = function() {
       if (!this._instance) {
@@ -35418,36 +42274,36 @@ var TraceAPI3 = (
       return this._instance;
     };
     TraceAPI23.prototype.setGlobalTracerProvider = function(provider) {
-      var success = registerGlobal3(API_NAME33, this._proxyTracerProvider, DiagAPI3.instance());
+      var success = registerGlobal4(API_NAME34, this._proxyTracerProvider, DiagAPI4.instance());
       if (success) {
         this._proxyTracerProvider.setDelegate(provider);
       }
       return success;
     };
     TraceAPI23.prototype.getTracerProvider = function() {
-      return getGlobal3(API_NAME33) || this._proxyTracerProvider;
+      return getGlobal4(API_NAME34) || this._proxyTracerProvider;
     };
     TraceAPI23.prototype.getTracer = function(name16, version) {
       return this.getTracerProvider().getTracer(name16, version);
     };
     TraceAPI23.prototype.disable = function() {
-      unregisterGlobal3(API_NAME33, DiagAPI3.instance());
-      this._proxyTracerProvider = new ProxyTracerProvider3();
+      unregisterGlobal4(API_NAME34, DiagAPI4.instance());
+      this._proxyTracerProvider = new ProxyTracerProvider4();
     };
     return TraceAPI23;
   })()
 );
-TraceAPI3.getInstance();
-var __defProp4 = Object.defineProperty;
+TraceAPI4.getInstance();
+var __defProp5 = Object.defineProperty;
 var __export4 = (target, all) => {
   for (var name16 in all)
-    __defProp4(target, name16, { get: all[name16], enumerable: true });
+    __defProp5(target, name16, { get: all[name16], enumerable: true });
 };
 var name6222 = "AI_NoObjectGeneratedError";
 var marker6222 = `vercel.ai.error.${name6222}`;
 var symbol6222 = Symbol.for(marker6222);
 var _a6222;
-var NoObjectGeneratedError3 = class extends AISDKError3 {
+var NoObjectGeneratedError4 = class extends AISDKError4 {
   constructor({
     message = "No object generated.",
     cause,
@@ -35464,11 +42320,11 @@ var NoObjectGeneratedError3 = class extends AISDKError3 {
     this.finishReason = finishReason;
   }
   static isInstance(error) {
-    return AISDKError3.hasMarker(error, marker6222);
+    return AISDKError4.hasMarker(error, marker6222);
   }
 };
 _a6222 = symbol6222;
-var dataContentSchema3 = z$2.union([
+var dataContentSchema4 = z$2.union([
   z$2.string(),
   z$2.instanceof(Uint8Array),
   z$2.instanceof(ArrayBuffer),
@@ -35481,59 +42337,59 @@ var dataContentSchema3 = z$2.union([
     { message: "Must be a Buffer" }
   )
 ]);
-var jsonValueSchema3 = z$2.lazy(
+var jsonValueSchema4 = z$2.lazy(
   () => z$2.union([
     z$2.null(),
     z$2.string(),
     z$2.number(),
     z$2.boolean(),
-    z$2.record(z$2.string(), jsonValueSchema3),
-    z$2.array(jsonValueSchema3)
+    z$2.record(z$2.string(), jsonValueSchema4),
+    z$2.array(jsonValueSchema4)
   ])
 );
-var providerMetadataSchema3 = z$2.record(
+var providerMetadataSchema4 = z$2.record(
   z$2.string(),
-  z$2.record(z$2.string(), jsonValueSchema3)
+  z$2.record(z$2.string(), jsonValueSchema4)
 );
-var textPartSchema3 = z$2.object({
+var textPartSchema4 = z$2.object({
   type: z$2.literal("text"),
   text: z$2.string(),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var imagePartSchema3 = z$2.object({
+var imagePartSchema4 = z$2.object({
   type: z$2.literal("image"),
-  image: z$2.union([dataContentSchema3, z$2.instanceof(URL)]),
+  image: z$2.union([dataContentSchema4, z$2.instanceof(URL)]),
   mediaType: z$2.string().optional(),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var filePartSchema3 = z$2.object({
+var filePartSchema4 = z$2.object({
   type: z$2.literal("file"),
-  data: z$2.union([dataContentSchema3, z$2.instanceof(URL)]),
+  data: z$2.union([dataContentSchema4, z$2.instanceof(URL)]),
   filename: z$2.string().optional(),
   mediaType: z$2.string(),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var reasoningPartSchema3 = z$2.object({
+var reasoningPartSchema4 = z$2.object({
   type: z$2.literal("reasoning"),
   text: z$2.string(),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var toolCallPartSchema3 = z$2.object({
+var toolCallPartSchema4 = z$2.object({
   type: z$2.literal("tool-call"),
   toolCallId: z$2.string(),
   toolName: z$2.string(),
   input: z$2.unknown(),
-  providerOptions: providerMetadataSchema3.optional(),
+  providerOptions: providerMetadataSchema4.optional(),
   providerExecuted: z$2.boolean().optional()
 });
-var outputSchema2 = z$2.discriminatedUnion("type", [
+var outputSchema3 = z$2.discriminatedUnion("type", [
   z$2.object({
     type: z$2.literal("text"),
     value: z$2.string()
   }),
   z$2.object({
     type: z$2.literal("json"),
-    value: jsonValueSchema3
+    value: jsonValueSchema4
   }),
   z$2.object({
     type: z$2.literal("error-text"),
@@ -35541,7 +42397,7 @@ var outputSchema2 = z$2.discriminatedUnion("type", [
   }),
   z$2.object({
     type: z$2.literal("error-json"),
-    value: jsonValueSchema3
+    value: jsonValueSchema4
   }),
   z$2.object({
     type: z$2.literal("content"),
@@ -35560,63 +42416,63 @@ var outputSchema2 = z$2.discriminatedUnion("type", [
     )
   })
 ]);
-var toolResultPartSchema3 = z$2.object({
+var toolResultPartSchema4 = z$2.object({
   type: z$2.literal("tool-result"),
   toolCallId: z$2.string(),
   toolName: z$2.string(),
-  output: outputSchema2,
-  providerOptions: providerMetadataSchema3.optional()
+  output: outputSchema3,
+  providerOptions: providerMetadataSchema4.optional()
 });
-var systemModelMessageSchema2 = z$2.object(
+var systemModelMessageSchema3 = z$2.object(
   {
     role: z$2.literal("system"),
     content: z$2.string(),
-    providerOptions: providerMetadataSchema3.optional()
+    providerOptions: providerMetadataSchema4.optional()
   }
 );
-var userModelMessageSchema2 = z$2.object({
+var userModelMessageSchema3 = z$2.object({
   role: z$2.literal("user"),
   content: z$2.union([
     z$2.string(),
-    z$2.array(z$2.union([textPartSchema3, imagePartSchema3, filePartSchema3]))
+    z$2.array(z$2.union([textPartSchema4, imagePartSchema4, filePartSchema4]))
   ]),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var assistantModelMessageSchema2 = z$2.object({
+var assistantModelMessageSchema3 = z$2.object({
   role: z$2.literal("assistant"),
   content: z$2.union([
     z$2.string(),
     z$2.array(
       z$2.union([
-        textPartSchema3,
-        filePartSchema3,
-        reasoningPartSchema3,
-        toolCallPartSchema3,
-        toolResultPartSchema3
+        textPartSchema4,
+        filePartSchema4,
+        reasoningPartSchema4,
+        toolCallPartSchema4,
+        toolResultPartSchema4
       ])
     )
   ]),
-  providerOptions: providerMetadataSchema3.optional()
+  providerOptions: providerMetadataSchema4.optional()
 });
-var toolModelMessageSchema2 = z$2.object({
+var toolModelMessageSchema3 = z$2.object({
   role: z$2.literal("tool"),
-  content: z$2.array(toolResultPartSchema3),
-  providerOptions: providerMetadataSchema3.optional()
+  content: z$2.array(toolResultPartSchema4),
+  providerOptions: providerMetadataSchema4.optional()
 });
 z$2.union([
-  systemModelMessageSchema2,
-  userModelMessageSchema2,
-  assistantModelMessageSchema2,
-  toolModelMessageSchema2
+  systemModelMessageSchema3,
+  userModelMessageSchema3,
+  assistantModelMessageSchema3,
+  toolModelMessageSchema3
 ]);
 function stepCountIs(stepCount) {
   return ({ steps }) => steps.length === stepCount;
 }
-createIdGenerator3({
+createIdGenerator4({
   prefix: "aitxt",
   size: 24
 });
-function fixJson3(input) {
+function fixJson4(input) {
   const stack = ["ROOT"];
   let lastValidIndex = -1;
   let literalStart = null;
@@ -35932,32 +42788,32 @@ function fixJson3(input) {
   }
   return result;
 }
-async function parsePartialJson3(jsonText) {
+async function parsePartialJson4(jsonText) {
   if (jsonText === void 0) {
     return { value: void 0, state: "undefined-input" };
   }
-  let result = await safeParseJSON3({ text: jsonText });
+  let result = await safeParseJSON4({ text: jsonText });
   if (result.success) {
     return { value: result.value, state: "successful-parse" };
   }
-  result = await safeParseJSON3({ text: fixJson3(jsonText) });
+  result = await safeParseJSON4({ text: fixJson4(jsonText) });
   if (result.success) {
     return { value: result.value, state: "repaired-parse" };
   }
   return { value: void 0, state: "failed-parse" };
 }
-createIdGenerator3({
+createIdGenerator4({
   prefix: "aitxt",
   size: 24
 });
-createIdGenerator3({ prefix: "aiobj", size: 24 });
-createIdGenerator3({ prefix: "aiobj", size: 24 });
-var output_exports3 = {};
-__export4(output_exports3, {
-  object: () => object3,
-  text: () => text3
+createIdGenerator4({ prefix: "aiobj", size: 24 });
+createIdGenerator4({ prefix: "aiobj", size: 24 });
+var output_exports4 = {};
+__export4(output_exports4, {
+  object: () => object4,
+  text: () => text4
 });
-var text3 = () => ({
+var text4 = () => ({
   type: "text",
   responseFormat: { type: "text" },
   async parsePartial({ text: text23 }) {
@@ -35967,10 +42823,10 @@ var text3 = () => ({
     return text23;
   }
 });
-var object3 = ({
+var object4 = ({
   schema: inputSchema
 }) => {
-  const schema = asSchema3(inputSchema);
+  const schema = asSchema4(inputSchema);
   return {
     type: "object",
     responseFormat: {
@@ -35978,7 +42834,7 @@ var object3 = ({
       schema: schema.jsonSchema
     },
     async parsePartial({ text: text23 }) {
-      const result = await parsePartialJson3(text23);
+      const result = await parsePartialJson4(text23);
       switch (result.state) {
         case "failed-parse":
         case "undefined-input":
@@ -35996,9 +42852,9 @@ var object3 = ({
       }
     },
     async parseOutput({ text: text23 }, context) {
-      const parseResult = await safeParseJSON3({ text: text23 });
+      const parseResult = await safeParseJSON4({ text: text23 });
       if (!parseResult.success) {
-        throw new NoObjectGeneratedError3({
+        throw new NoObjectGeneratedError4({
           message: "No object generated: could not parse the response.",
           cause: parseResult.error,
           text: text23,
@@ -36007,12 +42863,12 @@ var object3 = ({
           finishReason: context.finishReason
         });
       }
-      const validationResult = await safeValidateTypes3({
+      const validationResult = await safeValidateTypes4({
         value: parseResult.value,
         schema
       });
       if (!validationResult.success) {
-        throw new NoObjectGeneratedError3({
+        throw new NoObjectGeneratedError4({
           message: "No object generated: response did not match schema.",
           cause: validationResult.error,
           text: text23,
@@ -37441,7 +44297,7 @@ var GET_AGENT_BUILDER_ACTION_BY_ID_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, {
+        throw new HTTPException$1(400, {
           message: `Invalid agent-builder action: ${actionId}. Valid actions are: ${Object.keys(agentBuilderWorkflows).join(", ")}`
         });
       }
@@ -37471,7 +44327,7 @@ var LIST_AGENT_BUILDER_ACTION_RUNS_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Listing agent builder action runs", { actionId });
       return await LIST_WORKFLOW_RUNS_ROUTE.handler({
@@ -37501,7 +44357,7 @@ var GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Getting agent builder action run by ID", { actionId, runId });
       return await GET_WORKFLOW_RUN_BY_ID_ROUTE.handler({
@@ -37531,7 +44387,7 @@ var GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Getting agent builder action run execution result", { actionId, runId });
       return await GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE.handler({
@@ -37562,7 +44418,7 @@ var CREATE_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Creating agent builder action run", { actionId, runId });
       return await CREATE_WORKFLOW_RUN_ROUTE.handler({
@@ -37594,7 +44450,7 @@ var STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action", { actionId, runId });
       return await STREAM_WORKFLOW_ROUTE.handler({
@@ -37627,7 +44483,7 @@ var STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action (v2)", { actionId, runId });
       return await STREAM_VNEXT_WORKFLOW_ROUTE.handler({
@@ -37660,7 +44516,7 @@ var START_ASYNC_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Starting agent builder action asynchronously", { actionId, runId });
       return await START_ASYNC_WORKFLOW_ROUTE.handler({
@@ -37693,7 +44549,7 @@ var START_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Starting specific agent builder action run", { actionId, runId });
       return await START_WORKFLOW_RUN_ROUTE.handler({
@@ -37725,7 +44581,7 @@ var OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream", { actionId, runId });
       return await OBSERVE_STREAM_WORKFLOW_ROUTE.handler({
@@ -37756,7 +44612,7 @@ var OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream (v2)", { actionId, runId });
       return await OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE.handler({
@@ -37788,7 +44644,7 @@ var RESUME_ASYNC_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action asynchronously", { actionId, runId, step });
       return await RESUME_ASYNC_WORKFLOW_ROUTE.handler({
@@ -37821,7 +44677,7 @@ var RESUME_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action", { actionId, runId, step });
       return await RESUME_WORKFLOW_ROUTE.handler({
@@ -37854,7 +44710,7 @@ var RESUME_STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action stream", { actionId, runId, step });
       return await RESUME_STREAM_WORKFLOW_ROUTE.handler({
@@ -37885,7 +44741,7 @@ var CANCEL_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Cancelling agent builder action run", { actionId, runId });
       return await CANCEL_WORKFLOW_RUN_ROUTE.handler({
@@ -37917,7 +44773,7 @@ var STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action (legacy)", { actionId, runId });
       return await STREAM_LEGACY_WORKFLOW_ROUTE.handler({
@@ -37949,7 +44805,7 @@ var OBSERVE_STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream (legacy)", { actionId, runId });
       return await OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE.handler({
@@ -38146,7 +45002,7 @@ async function formatAgentList({
 async function getAgentFromSystem({ mastra, agentId }) {
   const logger = mastra.getLogger();
   if (!agentId) {
-    throw new HTTPException$2(400, { message: "Agent ID is required" });
+    throw new HTTPException$1(400, { message: "Agent ID is required" });
   }
   let agent;
   try {
@@ -38172,7 +45028,7 @@ async function getAgentFromSystem({ mastra, agentId }) {
     }
   }
   if (!agent) {
-    throw new HTTPException$2(404, { message: `Agent with id ${agentId} not found` });
+    throw new HTTPException$1(404, { message: `Agent with id ${agentId} not found` });
   }
   return agent;
 }
@@ -38357,7 +45213,7 @@ var GENERATE_LEGACY_ROUTE = createRoute({
       const finalResourceId = resourceId ?? resourceid;
       validateBody({ messages });
       if (threadId && !finalResourceId || !threadId && finalResourceId) {
-        throw new HTTPException$2(400, { message: "Both threadId or resourceId must be provided" });
+        throw new HTTPException$1(400, { message: "Both threadId or resourceId must be provided" });
       }
       const result = await agent.generateLegacy(messages, {
         ...rest,
@@ -38389,7 +45245,7 @@ var STREAM_GENERATE_LEGACY_ROUTE = createRoute({
       const finalResourceId = resourceId ?? resourceid;
       validateBody({ messages });
       if (threadId && !finalResourceId || !threadId && finalResourceId) {
-        throw new HTTPException$2(400, { message: "Both threadId or resourceId must be provided" });
+        throw new HTTPException$1(400, { message: "Both threadId or resourceId must be provided" });
       }
       const streamResult = await agent.streamLegacy(messages, {
         ...rest,
@@ -38513,10 +45369,10 @@ var APPROVE_TOOL_CALL_ROUTE = createRoute({
     try {
       const agent = await getAgentFromSystem({ mastra, agentId });
       if (!params.runId) {
-        throw new HTTPException$2(400, { message: "Run id is required" });
+        throw new HTTPException$1(400, { message: "Run id is required" });
       }
       if (!params.toolCallId) {
-        throw new HTTPException$2(400, { message: "Tool call id is required" });
+        throw new HTTPException$1(400, { message: "Tool call id is required" });
       }
       sanitizeBody(params, ["tools"]);
       const streamResult = await agent.approveToolCall({
@@ -38544,10 +45400,10 @@ var DECLINE_TOOL_CALL_ROUTE = createRoute({
     try {
       const agent = await getAgentFromSystem({ mastra, agentId });
       if (!params.runId) {
-        throw new HTTPException$2(400, { message: "Run id is required" });
+        throw new HTTPException$1(400, { message: "Run id is required" });
       }
       if (!params.toolCallId) {
-        throw new HTTPException$2(400, { message: "Tool call id is required" });
+        throw new HTTPException$1(400, { message: "Tool call id is required" });
       }
       sanitizeBody(params, ["tools"]);
       const streamResult = await agent.declineToolCall({
@@ -38645,7 +45501,7 @@ var REORDER_AGENT_MODEL_LIST_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const modelList = await agent.getModelList();
       if (!modelList || modelList.length === 0) {
-        throw new HTTPException$2(400, { message: "Agent model list is not found or empty" });
+        throw new HTTPException$1(400, { message: "Agent model list is not found or empty" });
       }
       agent.reorderModels(reorderedModelIds);
       return { message: "Model list reordered" };
@@ -38669,11 +45525,11 @@ var UPDATE_AGENT_MODEL_IN_MODEL_LIST_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const modelList = await agent.getModelList();
       if (!modelList || modelList.length === 0) {
-        throw new HTTPException$2(400, { message: "Agent model list is not found or empty" });
+        throw new HTTPException$1(400, { message: "Agent model list is not found or empty" });
       }
       const modelConfig = modelList.find((config) => config.id === modelConfigId);
       if (!modelConfig) {
-        throw new HTTPException$2(404, { message: `Model config with id ${modelConfigId} not found` });
+        throw new HTTPException$1(404, { message: `Model config with id ${modelConfigId} not found` });
       }
       const newModel = bodyModel?.modelId && bodyModel?.provider ? `${bodyModel.provider}/${bodyModel.modelId}` : modelConfig.model;
       const updated = {
@@ -38773,7 +45629,7 @@ var ENHANCE_INSTRUCTIONS_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const model = await findConnectedModel(agent);
       if (!model) {
-        throw new HTTPException$2(400, {
+        throw new HTTPException$1(400, {
           message: "No model with a configured API key found. Please set the required environment variable for your model provider."
         });
       }
@@ -38811,7 +45667,7 @@ var STREAM_VNEXT_DEPRECATED_ROUTE = createRoute({
   tags: ["Agents"],
   deprecated: true,
   handler: async () => {
-    throw new HTTPException$2(410, { message: "This endpoint is deprecated. Please use /stream instead." });
+    throw new HTTPException$1(410, { message: "This endpoint is deprecated. Please use /stream instead." });
   }
 });
 var STREAM_UI_MESSAGE_VNEXT_DEPRECATED_ROUTE = createRoute({
@@ -39011,7 +45867,7 @@ var MEMORY_ROUTES = [
 
 // src/server/server-adapter/routes/observability.ts
 var OBSERVABILITY_ROUTES = [
-  GET_TRACES_PAGINATED_ROUTE,
+  LIST_TRACES_ROUTE,
   GET_TRACE_ROUTE,
   SCORE_TRACES_ROUTE,
   LIST_SCORES_BY_SPAN_ROUTE
@@ -39038,6 +45894,9 @@ var STORED_AGENTS_ROUTES = [
   UPDATE_STORED_AGENT_ROUTE,
   DELETE_STORED_AGENT_ROUTE
 ];
+
+// src/server/server-adapter/routes/system.ts
+var SYSTEM_ROUTES = [GET_SYSTEM_PACKAGES_ROUTE];
 
 // src/server/server-adapter/routes/tools.ts
 var TOOLS_ROUTES = [LIST_TOOLS_ROUTE, GET_TOOL_BY_ID_ROUTE, EXECUTE_TOOL_ROUTE];
@@ -39094,7 +45953,8 @@ var SERVER_ROUTES = [
   ...AGENT_BUILDER_ROUTES,
   ...LEGACY_ROUTES,
   ...MCP_ROUTES,
-  ...STORED_AGENTS_ROUTES
+  ...STORED_AGENTS_ROUTES,
+  ...SYSTEM_ROUTES
 ];
 
 // src/server/server-adapter/redact.ts
@@ -39485,985 +46345,6 @@ var compose = (middleware, onError, onNotFound) => {
       }
       return context;
     }
-  };
-};
-
-// src/http-exception.ts
-var HTTPException$1 = class HTTPException extends Error {
-  res;
-  status;
-  /**
-   * Creates an instance of `HTTPException`.
-   * @param status - HTTP status code for the exception. Defaults to 500.
-   * @param options - Additional options for the exception.
-   */
-  constructor(status = 500, options) {
-    super(options?.message, { cause: options?.cause });
-    this.res = options?.res;
-    this.status = status;
-  }
-  /**
-   * Returns the response object associated with the exception.
-   * If a response object is not provided, a new response is created with the error message and status code.
-   * @returns The response object.
-   */
-  getResponse() {
-    if (this.res) {
-      const newResponse = new Response(this.res.body, {
-        status: this.status,
-        headers: this.res.headers
-      });
-      return newResponse;
-    }
-    return new Response(this.message, {
-      status: this.status
-    });
-  }
-};
-
-// src/request/constants.ts
-var GET_MATCH_RESULT = /* @__PURE__ */ Symbol();
-
-// src/utils/body.ts
-var parseBody = async (request, options = /* @__PURE__ */ Object.create(null)) => {
-  const { all = false, dot = false } = options;
-  const headers = request instanceof HonoRequest ? request.raw.headers : request.headers;
-  const contentType = headers.get("Content-Type");
-  if (contentType?.startsWith("multipart/form-data") || contentType?.startsWith("application/x-www-form-urlencoded")) {
-    return parseFormData(request, { all, dot });
-  }
-  return {};
-};
-async function parseFormData(request, options) {
-  const formData = await request.formData();
-  if (formData) {
-    return convertFormDataToBodyData(formData, options);
-  }
-  return {};
-}
-function convertFormDataToBodyData(formData, options) {
-  const form = /* @__PURE__ */ Object.create(null);
-  formData.forEach((value, key) => {
-    const shouldParseAllValues = options.all || key.endsWith("[]");
-    if (!shouldParseAllValues) {
-      form[key] = value;
-    } else {
-      handleParsingAllValues(form, key, value);
-    }
-  });
-  if (options.dot) {
-    Object.entries(form).forEach(([key, value]) => {
-      const shouldParseDotValues = key.includes(".");
-      if (shouldParseDotValues) {
-        handleParsingNestedValues(form, key, value);
-        delete form[key];
-      }
-    });
-  }
-  return form;
-}
-var handleParsingAllValues = (form, key, value) => {
-  if (form[key] !== void 0) {
-    if (Array.isArray(form[key])) {
-      form[key].push(value);
-    } else {
-      form[key] = [form[key], value];
-    }
-  } else {
-    if (!key.endsWith("[]")) {
-      form[key] = value;
-    } else {
-      form[key] = [value];
-    }
-  }
-};
-var handleParsingNestedValues = (form, key, value) => {
-  let nestedForm = form;
-  const keys = key.split(".");
-  keys.forEach((key2, index) => {
-    if (index === keys.length - 1) {
-      nestedForm[key2] = value;
-    } else {
-      if (!nestedForm[key2] || typeof nestedForm[key2] !== "object" || Array.isArray(nestedForm[key2]) || nestedForm[key2] instanceof File) {
-        nestedForm[key2] = /* @__PURE__ */ Object.create(null);
-      }
-      nestedForm = nestedForm[key2];
-    }
-  });
-};
-
-// src/utils/url.ts
-var splitPath = (path) => {
-  const paths = path.split("/");
-  if (paths[0] === "") {
-    paths.shift();
-  }
-  return paths;
-};
-var splitRoutingPath = (routePath) => {
-  const { groups, path } = extractGroupsFromPath(routePath);
-  const paths = splitPath(path);
-  return replaceGroupMarks(paths, groups);
-};
-var extractGroupsFromPath = (path) => {
-  const groups = [];
-  path = path.replace(/\{[^}]+\}/g, (match, index) => {
-    const mark = `@${index}`;
-    groups.push([mark, match]);
-    return mark;
-  });
-  return { groups, path };
-};
-var replaceGroupMarks = (paths, groups) => {
-  for (let i = groups.length - 1; i >= 0; i--) {
-    const [mark] = groups[i];
-    for (let j = paths.length - 1; j >= 0; j--) {
-      if (paths[j].includes(mark)) {
-        paths[j] = paths[j].replace(mark, groups[i][1]);
-        break;
-      }
-    }
-  }
-  return paths;
-};
-var patternCache = {};
-var getPattern = (label, next) => {
-  if (label === "*") {
-    return "*";
-  }
-  const match = label.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
-  if (match) {
-    const cacheKey = `${label}#${next}`;
-    if (!patternCache[cacheKey]) {
-      if (match[2]) {
-        patternCache[cacheKey] = next && next[0] !== ":" && next[0] !== "*" ? [cacheKey, match[1], new RegExp(`^${match[2]}(?=/${next})`)] : [label, match[1], new RegExp(`^${match[2]}$`)];
-      } else {
-        patternCache[cacheKey] = [label, match[1], true];
-      }
-    }
-    return patternCache[cacheKey];
-  }
-  return null;
-};
-var tryDecode = (str, decoder) => {
-  try {
-    return decoder(str);
-  } catch {
-    return str.replace(/(?:%[0-9A-Fa-f]{2})+/g, (match) => {
-      try {
-        return decoder(match);
-      } catch {
-        return match;
-      }
-    });
-  }
-};
-var tryDecodeURI = (str) => tryDecode(str, decodeURI);
-var getPath = (request) => {
-  const url = request.url;
-  const start = url.indexOf("/", url.indexOf(":") + 4);
-  let i = start;
-  for (; i < url.length; i++) {
-    const charCode = url.charCodeAt(i);
-    if (charCode === 37) {
-      const queryIndex = url.indexOf("?", i);
-      const path = url.slice(start, queryIndex === -1 ? void 0 : queryIndex);
-      return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
-    } else if (charCode === 63) {
-      break;
-    }
-  }
-  return url.slice(start, i);
-};
-var getPathNoStrict = (request) => {
-  const result = getPath(request);
-  return result.length > 1 && result.at(-1) === "/" ? result.slice(0, -1) : result;
-};
-var mergePath = (base, sub, ...rest) => {
-  if (rest.length) {
-    sub = mergePath(sub, ...rest);
-  }
-  return `${base?.[0] === "/" ? "" : "/"}${base}${sub === "/" ? "" : `${base?.at(-1) === "/" ? "" : "/"}${sub?.[0] === "/" ? sub.slice(1) : sub}`}`;
-};
-var checkOptionalParameter = (path) => {
-  if (path.charCodeAt(path.length - 1) !== 63 || !path.includes(":")) {
-    return null;
-  }
-  const segments = path.split("/");
-  const results = [];
-  let basePath = "";
-  segments.forEach((segment) => {
-    if (segment !== "" && !/\:/.test(segment)) {
-      basePath += "/" + segment;
-    } else if (/\:/.test(segment)) {
-      if (/\?/.test(segment)) {
-        if (results.length === 0 && basePath === "") {
-          results.push("/");
-        } else {
-          results.push(basePath);
-        }
-        const optionalSegment = segment.replace("?", "");
-        basePath += "/" + optionalSegment;
-        results.push(basePath);
-      } else {
-        basePath += "/" + segment;
-      }
-    }
-  });
-  return results.filter((v, i, a) => a.indexOf(v) === i);
-};
-var _decodeURI = (value) => {
-  if (!/[%+]/.test(value)) {
-    return value;
-  }
-  if (value.indexOf("+") !== -1) {
-    value = value.replace(/\+/g, " ");
-  }
-  return value.indexOf("%") !== -1 ? tryDecode(value, decodeURIComponent_) : value;
-};
-var _getQueryParam = (url, key, multiple) => {
-  let encoded;
-  if (!multiple && key && !/[%+]/.test(key)) {
-    let keyIndex2 = url.indexOf("?", 8);
-    if (keyIndex2 === -1) {
-      return void 0;
-    }
-    if (!url.startsWith(key, keyIndex2 + 1)) {
-      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
-    }
-    while (keyIndex2 !== -1) {
-      const trailingKeyCode = url.charCodeAt(keyIndex2 + key.length + 1);
-      if (trailingKeyCode === 61) {
-        const valueIndex = keyIndex2 + key.length + 2;
-        const endIndex = url.indexOf("&", valueIndex);
-        return _decodeURI(url.slice(valueIndex, endIndex === -1 ? void 0 : endIndex));
-      } else if (trailingKeyCode == 38 || isNaN(trailingKeyCode)) {
-        return "";
-      }
-      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
-    }
-    encoded = /[%+]/.test(url);
-    if (!encoded) {
-      return void 0;
-    }
-  }
-  const results = {};
-  encoded ??= /[%+]/.test(url);
-  let keyIndex = url.indexOf("?", 8);
-  while (keyIndex !== -1) {
-    const nextKeyIndex = url.indexOf("&", keyIndex + 1);
-    let valueIndex = url.indexOf("=", keyIndex);
-    if (valueIndex > nextKeyIndex && nextKeyIndex !== -1) {
-      valueIndex = -1;
-    }
-    let name = url.slice(
-      keyIndex + 1,
-      valueIndex === -1 ? nextKeyIndex === -1 ? void 0 : nextKeyIndex : valueIndex
-    );
-    if (encoded) {
-      name = _decodeURI(name);
-    }
-    keyIndex = nextKeyIndex;
-    if (name === "") {
-      continue;
-    }
-    let value;
-    if (valueIndex === -1) {
-      value = "";
-    } else {
-      value = url.slice(valueIndex + 1, nextKeyIndex === -1 ? void 0 : nextKeyIndex);
-      if (encoded) {
-        value = _decodeURI(value);
-      }
-    }
-    if (multiple) {
-      if (!(results[name] && Array.isArray(results[name]))) {
-        results[name] = [];
-      }
-      results[name].push(value);
-    } else {
-      results[name] ??= value;
-    }
-  }
-  return key ? results[key] : results;
-};
-var getQueryParam = _getQueryParam;
-var getQueryParams = (url, key) => {
-  return _getQueryParam(url, key, true);
-};
-var decodeURIComponent_ = decodeURIComponent;
-
-// src/request.ts
-var tryDecodeURIComponent = (str) => tryDecode(str, decodeURIComponent_);
-var HonoRequest = class {
-  /**
-   * `.raw` can get the raw Request object.
-   *
-   * @see {@link https://hono.dev/docs/api/request#raw}
-   *
-   * @example
-   * ```ts
-   * // For Cloudflare Workers
-   * app.post('/', async (c) => {
-   *   const metadata = c.req.raw.cf?.hostMetadata?
-   *   ...
-   * })
-   * ```
-   */
-  raw;
-  #validatedData;
-  // Short name of validatedData
-  #matchResult;
-  routeIndex = 0;
-  /**
-   * `.path` can get the pathname of the request.
-   *
-   * @see {@link https://hono.dev/docs/api/request#path}
-   *
-   * @example
-   * ```ts
-   * app.get('/about/me', (c) => {
-   *   const pathname = c.req.path // `/about/me`
-   * })
-   * ```
-   */
-  path;
-  bodyCache = {};
-  constructor(request, path = "/", matchResult = [[]]) {
-    this.raw = request;
-    this.path = path;
-    this.#matchResult = matchResult;
-    this.#validatedData = {};
-  }
-  param(key) {
-    return key ? this.#getDecodedParam(key) : this.#getAllDecodedParams();
-  }
-  #getDecodedParam(key) {
-    const paramKey = this.#matchResult[0][this.routeIndex][1][key];
-    const param = this.#getParamValue(paramKey);
-    return param && /\%/.test(param) ? tryDecodeURIComponent(param) : param;
-  }
-  #getAllDecodedParams() {
-    const decoded = {};
-    const keys = Object.keys(this.#matchResult[0][this.routeIndex][1]);
-    for (const key of keys) {
-      const value = this.#getParamValue(this.#matchResult[0][this.routeIndex][1][key]);
-      if (value !== void 0) {
-        decoded[key] = /\%/.test(value) ? tryDecodeURIComponent(value) : value;
-      }
-    }
-    return decoded;
-  }
-  #getParamValue(paramKey) {
-    return this.#matchResult[1] ? this.#matchResult[1][paramKey] : paramKey;
-  }
-  query(key) {
-    return getQueryParam(this.url, key);
-  }
-  queries(key) {
-    return getQueryParams(this.url, key);
-  }
-  header(name) {
-    if (name) {
-      return this.raw.headers.get(name) ?? void 0;
-    }
-    const headerData = {};
-    this.raw.headers.forEach((value, key) => {
-      headerData[key] = value;
-    });
-    return headerData;
-  }
-  async parseBody(options) {
-    return this.bodyCache.parsedBody ??= await parseBody(this, options);
-  }
-  #cachedBody = (key) => {
-    const { bodyCache, raw } = this;
-    const cachedBody = bodyCache[key];
-    if (cachedBody) {
-      return cachedBody;
-    }
-    const anyCachedKey = Object.keys(bodyCache)[0];
-    if (anyCachedKey) {
-      return bodyCache[anyCachedKey].then((body) => {
-        if (anyCachedKey === "json") {
-          body = JSON.stringify(body);
-        }
-        return new Response(body)[key]();
-      });
-    }
-    return bodyCache[key] = raw[key]();
-  };
-  /**
-   * `.json()` can parse Request body of type `application/json`
-   *
-   * @see {@link https://hono.dev/docs/api/request#json}
-   *
-   * @example
-   * ```ts
-   * app.post('/entry', async (c) => {
-   *   const body = await c.req.json()
-   * })
-   * ```
-   */
-  json() {
-    return this.#cachedBody("text").then((text) => JSON.parse(text));
-  }
-  /**
-   * `.text()` can parse Request body of type `text/plain`
-   *
-   * @see {@link https://hono.dev/docs/api/request#text}
-   *
-   * @example
-   * ```ts
-   * app.post('/entry', async (c) => {
-   *   const body = await c.req.text()
-   * })
-   * ```
-   */
-  text() {
-    return this.#cachedBody("text");
-  }
-  /**
-   * `.arrayBuffer()` parse Request body as an `ArrayBuffer`
-   *
-   * @see {@link https://hono.dev/docs/api/request#arraybuffer}
-   *
-   * @example
-   * ```ts
-   * app.post('/entry', async (c) => {
-   *   const body = await c.req.arrayBuffer()
-   * })
-   * ```
-   */
-  arrayBuffer() {
-    return this.#cachedBody("arrayBuffer");
-  }
-  /**
-   * Parses the request body as a `Blob`.
-   * @example
-   * ```ts
-   * app.post('/entry', async (c) => {
-   *   const body = await c.req.blob();
-   * });
-   * ```
-   * @see https://hono.dev/docs/api/request#blob
-   */
-  blob() {
-    return this.#cachedBody("blob");
-  }
-  /**
-   * Parses the request body as `FormData`.
-   * @example
-   * ```ts
-   * app.post('/entry', async (c) => {
-   *   const body = await c.req.formData();
-   * });
-   * ```
-   * @see https://hono.dev/docs/api/request#formdata
-   */
-  formData() {
-    return this.#cachedBody("formData");
-  }
-  /**
-   * Adds validated data to the request.
-   *
-   * @param target - The target of the validation.
-   * @param data - The validated data to add.
-   */
-  addValidatedData(target, data) {
-    this.#validatedData[target] = data;
-  }
-  valid(target) {
-    return this.#validatedData[target];
-  }
-  /**
-   * `.url()` can get the request url strings.
-   *
-   * @see {@link https://hono.dev/docs/api/request#url}
-   *
-   * @example
-   * ```ts
-   * app.get('/about/me', (c) => {
-   *   const url = c.req.url // `http://localhost:8787/about/me`
-   *   ...
-   * })
-   * ```
-   */
-  get url() {
-    return this.raw.url;
-  }
-  /**
-   * `.method()` can get the method name of the request.
-   *
-   * @see {@link https://hono.dev/docs/api/request#method}
-   *
-   * @example
-   * ```ts
-   * app.get('/about/me', (c) => {
-   *   const method = c.req.method // `GET`
-   * })
-   * ```
-   */
-  get method() {
-    return this.raw.method;
-  }
-  get [GET_MATCH_RESULT]() {
-    return this.#matchResult;
-  }
-  /**
-   * `.matchedRoutes()` can return a matched route in the handler
-   *
-   * @deprecated
-   *
-   * Use matchedRoutes helper defined in "hono/route" instead.
-   *
-   * @see {@link https://hono.dev/docs/api/request#matchedroutes}
-   *
-   * @example
-   * ```ts
-   * app.use('*', async function logger(c, next) {
-   *   await next()
-   *   c.req.matchedRoutes.forEach(({ handler, method, path }, i) => {
-   *     const name = handler.name || (handler.length < 2 ? '[handler]' : '[middleware]')
-   *     console.log(
-   *       method,
-   *       ' ',
-   *       path,
-   *       ' '.repeat(Math.max(10 - path.length, 0)),
-   *       name,
-   *       i === c.req.routeIndex ? '<- respond from here' : ''
-   *     )
-   *   })
-   * })
-   * ```
-   */
-  get matchedRoutes() {
-    return this.#matchResult[0].map(([[, route]]) => route);
-  }
-  /**
-   * `routePath()` can retrieve the path registered within the handler
-   *
-   * @deprecated
-   *
-   * Use routePath helper defined in "hono/route" instead.
-   *
-   * @see {@link https://hono.dev/docs/api/request#routepath}
-   *
-   * @example
-   * ```ts
-   * app.get('/posts/:id', (c) => {
-   *   return c.json({ path: c.req.routePath })
-   * })
-   * ```
-   */
-  get routePath() {
-    return this.#matchResult[0].map(([[, route]]) => route)[this.routeIndex].path;
-  }
-};
-
-// src/context.ts
-var TEXT_PLAIN = "text/plain; charset=UTF-8";
-var setDefaultContentType = (contentType, headers) => {
-  return {
-    "Content-Type": contentType,
-    ...headers
-  };
-};
-var Context = class {
-  #rawRequest;
-  #req;
-  /**
-   * `.env` can get bindings (environment variables, secrets, KV namespaces, D1 database, R2 bucket etc.) in Cloudflare Workers.
-   *
-   * @see {@link https://hono.dev/docs/api/context#env}
-   *
-   * @example
-   * ```ts
-   * // Environment object for Cloudflare Workers
-   * app.get('*', async c => {
-   *   const counter = c.env.COUNTER
-   * })
-   * ```
-   */
-  env = {};
-  #var;
-  finalized = false;
-  /**
-   * `.error` can get the error object from the middleware if the Handler throws an error.
-   *
-   * @see {@link https://hono.dev/docs/api/context#error}
-   *
-   * @example
-   * ```ts
-   * app.use('*', async (c, next) => {
-   *   await next()
-   *   if (c.error) {
-   *     // do something...
-   *   }
-   * })
-   * ```
-   */
-  error;
-  #status;
-  #executionCtx;
-  #res;
-  #layout;
-  #renderer;
-  #notFoundHandler;
-  #preparedHeaders;
-  #matchResult;
-  #path;
-  /**
-   * Creates an instance of the Context class.
-   *
-   * @param req - The Request object.
-   * @param options - Optional configuration options for the context.
-   */
-  constructor(req, options) {
-    this.#rawRequest = req;
-    if (options) {
-      this.#executionCtx = options.executionCtx;
-      this.env = options.env;
-      this.#notFoundHandler = options.notFoundHandler;
-      this.#path = options.path;
-      this.#matchResult = options.matchResult;
-    }
-  }
-  /**
-   * `.req` is the instance of {@link HonoRequest}.
-   */
-  get req() {
-    this.#req ??= new HonoRequest(this.#rawRequest, this.#path, this.#matchResult);
-    return this.#req;
-  }
-  /**
-   * @see {@link https://hono.dev/docs/api/context#event}
-   * The FetchEvent associated with the current request.
-   *
-   * @throws Will throw an error if the context does not have a FetchEvent.
-   */
-  get event() {
-    if (this.#executionCtx && "respondWith" in this.#executionCtx) {
-      return this.#executionCtx;
-    } else {
-      throw Error("This context has no FetchEvent");
-    }
-  }
-  /**
-   * @see {@link https://hono.dev/docs/api/context#executionctx}
-   * The ExecutionContext associated with the current request.
-   *
-   * @throws Will throw an error if the context does not have an ExecutionContext.
-   */
-  get executionCtx() {
-    if (this.#executionCtx) {
-      return this.#executionCtx;
-    } else {
-      throw Error("This context has no ExecutionContext");
-    }
-  }
-  /**
-   * @see {@link https://hono.dev/docs/api/context#res}
-   * The Response object for the current request.
-   */
-  get res() {
-    return this.#res ||= new Response(null, {
-      headers: this.#preparedHeaders ??= new Headers()
-    });
-  }
-  /**
-   * Sets the Response object for the current request.
-   *
-   * @param _res - The Response object to set.
-   */
-  set res(_res) {
-    if (this.#res && _res) {
-      _res = new Response(_res.body, _res);
-      for (const [k, v] of this.#res.headers.entries()) {
-        if (k === "content-type") {
-          continue;
-        }
-        if (k === "set-cookie") {
-          const cookies = this.#res.headers.getSetCookie();
-          _res.headers.delete("set-cookie");
-          for (const cookie of cookies) {
-            _res.headers.append("set-cookie", cookie);
-          }
-        } else {
-          _res.headers.set(k, v);
-        }
-      }
-    }
-    this.#res = _res;
-    this.finalized = true;
-  }
-  /**
-   * `.render()` can create a response within a layout.
-   *
-   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
-   *
-   * @example
-   * ```ts
-   * app.get('/', (c) => {
-   *   return c.render('Hello!')
-   * })
-   * ```
-   */
-  render = (...args) => {
-    this.#renderer ??= (content) => this.html(content);
-    return this.#renderer(...args);
-  };
-  /**
-   * Sets the layout for the response.
-   *
-   * @param layout - The layout to set.
-   * @returns The layout function.
-   */
-  setLayout = (layout) => this.#layout = layout;
-  /**
-   * Gets the current layout for the response.
-   *
-   * @returns The current layout function.
-   */
-  getLayout = () => this.#layout;
-  /**
-   * `.setRenderer()` can set the layout in the custom middleware.
-   *
-   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
-   *
-   * @example
-   * ```tsx
-   * app.use('*', async (c, next) => {
-   *   c.setRenderer((content) => {
-   *     return c.html(
-   *       <html>
-   *         <body>
-   *           <p>{content}</p>
-   *         </body>
-   *       </html>
-   *     )
-   *   })
-   *   await next()
-   * })
-   * ```
-   */
-  setRenderer = (renderer) => {
-    this.#renderer = renderer;
-  };
-  /**
-   * `.header()` can set headers.
-   *
-   * @see {@link https://hono.dev/docs/api/context#header}
-   *
-   * @example
-   * ```ts
-   * app.get('/welcome', (c) => {
-   *   // Set headers
-   *   c.header('X-Message', 'Hello!')
-   *   c.header('Content-Type', 'text/plain')
-   *
-   *   return c.body('Thank you for coming')
-   * })
-   * ```
-   */
-  header = (name, value, options) => {
-    if (this.finalized) {
-      this.#res = new Response(this.#res.body, this.#res);
-    }
-    const headers = this.#res ? this.#res.headers : this.#preparedHeaders ??= new Headers();
-    if (value === void 0) {
-      headers.delete(name);
-    } else if (options?.append) {
-      headers.append(name, value);
-    } else {
-      headers.set(name, value);
-    }
-  };
-  status = (status) => {
-    this.#status = status;
-  };
-  /**
-   * `.set()` can set the value specified by the key.
-   *
-   * @see {@link https://hono.dev/docs/api/context#set-get}
-   *
-   * @example
-   * ```ts
-   * app.use('*', async (c, next) => {
-   *   c.set('message', 'Hono is hot!!')
-   *   await next()
-   * })
-   * ```
-   */
-  set = (key, value) => {
-    this.#var ??= /* @__PURE__ */ new Map();
-    this.#var.set(key, value);
-  };
-  /**
-   * `.get()` can use the value specified by the key.
-   *
-   * @see {@link https://hono.dev/docs/api/context#set-get}
-   *
-   * @example
-   * ```ts
-   * app.get('/', (c) => {
-   *   const message = c.get('message')
-   *   return c.text(`The message is "${message}"`)
-   * })
-   * ```
-   */
-  get = (key) => {
-    return this.#var ? this.#var.get(key) : void 0;
-  };
-  /**
-   * `.var` can access the value of a variable.
-   *
-   * @see {@link https://hono.dev/docs/api/context#var}
-   *
-   * @example
-   * ```ts
-   * const result = c.var.client.oneMethod()
-   * ```
-   */
-  // c.var.propName is a read-only
-  get var() {
-    if (!this.#var) {
-      return {};
-    }
-    return Object.fromEntries(this.#var);
-  }
-  #newResponse(data, arg, headers) {
-    const responseHeaders = this.#res ? new Headers(this.#res.headers) : this.#preparedHeaders ?? new Headers();
-    if (typeof arg === "object" && "headers" in arg) {
-      const argHeaders = arg.headers instanceof Headers ? arg.headers : new Headers(arg.headers);
-      for (const [key, value] of argHeaders) {
-        if (key.toLowerCase() === "set-cookie") {
-          responseHeaders.append(key, value);
-        } else {
-          responseHeaders.set(key, value);
-        }
-      }
-    }
-    if (headers) {
-      for (const [k, v] of Object.entries(headers)) {
-        if (typeof v === "string") {
-          responseHeaders.set(k, v);
-        } else {
-          responseHeaders.delete(k);
-          for (const v2 of v) {
-            responseHeaders.append(k, v2);
-          }
-        }
-      }
-    }
-    const status = typeof arg === "number" ? arg : arg?.status ?? this.#status;
-    return new Response(data, { status, headers: responseHeaders });
-  }
-  newResponse = (...args) => this.#newResponse(...args);
-  /**
-   * `.body()` can return the HTTP response.
-   * You can set headers with `.header()` and set HTTP status code with `.status`.
-   * This can also be set in `.text()`, `.json()` and so on.
-   *
-   * @see {@link https://hono.dev/docs/api/context#body}
-   *
-   * @example
-   * ```ts
-   * app.get('/welcome', (c) => {
-   *   // Set headers
-   *   c.header('X-Message', 'Hello!')
-   *   c.header('Content-Type', 'text/plain')
-   *   // Set HTTP status code
-   *   c.status(201)
-   *
-   *   // Return the response body
-   *   return c.body('Thank you for coming')
-   * })
-   * ```
-   */
-  body = (data, arg, headers) => this.#newResponse(data, arg, headers);
-  /**
-   * `.text()` can render text as `Content-Type:text/plain`.
-   *
-   * @see {@link https://hono.dev/docs/api/context#text}
-   *
-   * @example
-   * ```ts
-   * app.get('/say', (c) => {
-   *   return c.text('Hello!')
-   * })
-   * ```
-   */
-  text = (text, arg, headers) => {
-    return !this.#preparedHeaders && !this.#status && !arg && !headers && !this.finalized ? new Response(text) : this.#newResponse(
-      text,
-      arg,
-      setDefaultContentType(TEXT_PLAIN, headers)
-    );
-  };
-  /**
-   * `.json()` can render JSON as `Content-Type:application/json`.
-   *
-   * @see {@link https://hono.dev/docs/api/context#json}
-   *
-   * @example
-   * ```ts
-   * app.get('/api', (c) => {
-   *   return c.json({ message: 'Hello!' })
-   * })
-   * ```
-   */
-  json = (object, arg, headers) => {
-    return this.#newResponse(
-      JSON.stringify(object),
-      arg,
-      setDefaultContentType("application/json", headers)
-    );
-  };
-  html = (html, arg, headers) => {
-    const res = (html2) => this.#newResponse(html2, arg, setDefaultContentType("text/html; charset=UTF-8", headers));
-    return typeof html === "object" ? resolveCallback(html, HtmlEscapedCallbackPhase.Stringify, false, {}).then(res) : res(html);
-  };
-  /**
-   * `.redirect()` can Redirect, default status code is 302.
-   *
-   * @see {@link https://hono.dev/docs/api/context#redirect}
-   *
-   * @example
-   * ```ts
-   * app.get('/redirect', (c) => {
-   *   return c.redirect('/')
-   * })
-   * app.get('/redirect-permanently', (c) => {
-   *   return c.redirect('/', 301)
-   * })
-   * ```
-   */
-  redirect = (location, status) => {
-    const locationString = String(location);
-    this.header(
-      "Location",
-      // Multibyes should be encoded
-      // eslint-disable-next-line no-control-regex
-      !/[^\x00-\xFF]/.test(locationString) ? locationString : encodeURI(locationString)
-    );
-    return this.newResponse(null, status ?? 302);
-  };
-  /**
-   * `.notFound()` can return the Not Found Response.
-   *
-   * @see {@link https://hono.dev/docs/api/context#notfound}
-   *
-   * @example
-   * ```ts
-   * app.get('/notfound', (c) => {
-   *   return c.notFound()
-   * })
-   * ```
-   */
-  notFound = () => {
-    this.#notFoundHandler ??= () => new Response();
-    return this.#notFoundHandler(this);
   };
 };
 
@@ -41611,7 +47492,7 @@ var logger = (fn = console.log) => {
 };
 
 // src/middleware/timeout/index.ts
-var defaultTimeoutException = new HTTPException$1(504, {
+var defaultTimeoutException = new HTTPException$2(504, {
   message: "Gateway Timeout"
 });
 var timeout = (duration, exception = defaultTimeoutException) => {
@@ -41946,7 +47827,7 @@ var buildOutgoingHttpHeaders = (headers) => {
 var X_ALREADY_SENT = "x-hono-already-sent";
 var webFetch = global.fetch;
 if (typeof global.crypto === "undefined") {
-  global.crypto = require$$0;
+  global.crypto = crypto$1;
 }
 global.fetch = (info, init) => {
   init = {
@@ -44452,6 +50333,209 @@ var stream = (c, cb, onError3) => {
   })();
   return c.newResponse(stream2.responseReadable);
 };
+var util2;
+(function(util22) {
+  util22.assertEqual = (_) => {
+  };
+  function assertIs(_arg) {
+  }
+  util22.assertIs = assertIs;
+  function assertNever(_x) {
+    throw new Error();
+  }
+  util22.assertNever = assertNever;
+  util22.arrayToEnum = (items) => {
+    const obj = {};
+    for (const item of items) {
+      obj[item] = item;
+    }
+    return obj;
+  };
+  util22.getValidEnumValues = (obj) => {
+    const validKeys = util22.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
+    const filtered = {};
+    for (const k of validKeys) {
+      filtered[k] = obj[k];
+    }
+    return util22.objectValues(filtered);
+  };
+  util22.objectValues = (obj) => {
+    return util22.objectKeys(obj).map(function(e) {
+      return obj[e];
+    });
+  };
+  util22.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object) => {
+    const keys = [];
+    for (const key in object) {
+      if (Object.prototype.hasOwnProperty.call(object, key)) {
+        keys.push(key);
+      }
+    }
+    return keys;
+  };
+  util22.find = (arr, checker) => {
+    for (const item of arr) {
+      if (checker(item))
+        return item;
+    }
+    return void 0;
+  };
+  util22.isInteger = typeof Number.isInteger === "function" ? (val) => Number.isInteger(val) : (val) => typeof val === "number" && Number.isFinite(val) && Math.floor(val) === val;
+  function joinValues(array, separator = " | ") {
+    return array.map((val) => typeof val === "string" ? `'${val}'` : val).join(separator);
+  }
+  util22.joinValues = joinValues;
+  util22.jsonStringifyReplacer = (_, value) => {
+    if (typeof value === "bigint") {
+      return value.toString();
+    }
+    return value;
+  };
+})(util2 || (util2 = {}));
+var objectUtil;
+(function(objectUtil2) {
+  objectUtil2.mergeShapes = (first, second) => {
+    return {
+      ...first,
+      ...second
+      // second overwrites first
+    };
+  };
+})(objectUtil || (objectUtil = {}));
+util2.arrayToEnum([
+  "string",
+  "nan",
+  "number",
+  "integer",
+  "float",
+  "boolean",
+  "date",
+  "bigint",
+  "symbol",
+  "function",
+  "undefined",
+  "null",
+  "array",
+  "object",
+  "unknown",
+  "promise",
+  "void",
+  "never",
+  "map",
+  "set"
+]);
+util2.arrayToEnum([
+  "invalid_type",
+  "invalid_literal",
+  "custom",
+  "invalid_union",
+  "invalid_union_discriminator",
+  "invalid_enum_value",
+  "unrecognized_keys",
+  "invalid_arguments",
+  "invalid_return_type",
+  "invalid_date",
+  "invalid_string",
+  "too_small",
+  "too_big",
+  "invalid_intersection_types",
+  "not_multiple_of",
+  "not_finite"
+]);
+var ZodError = class _ZodError extends Error {
+  get errors() {
+    return this.issues;
+  }
+  constructor(issues) {
+    super();
+    this.issues = [];
+    this.addIssue = (sub) => {
+      this.issues = [...this.issues, sub];
+    };
+    this.addIssues = (subs = []) => {
+      this.issues = [...this.issues, ...subs];
+    };
+    const actualProto = new.target.prototype;
+    if (Object.setPrototypeOf) {
+      Object.setPrototypeOf(this, actualProto);
+    } else {
+      this.__proto__ = actualProto;
+    }
+    this.name = "ZodError";
+    this.issues = issues;
+  }
+  format(_mapper) {
+    const mapper = _mapper || function(issue) {
+      return issue.message;
+    };
+    const fieldErrors = { _errors: [] };
+    const processError = (error) => {
+      for (const issue of error.issues) {
+        if (issue.code === "invalid_union") {
+          issue.unionErrors.map(processError);
+        } else if (issue.code === "invalid_return_type") {
+          processError(issue.returnTypeError);
+        } else if (issue.code === "invalid_arguments") {
+          processError(issue.argumentsError);
+        } else if (issue.path.length === 0) {
+          fieldErrors._errors.push(mapper(issue));
+        } else {
+          let curr = fieldErrors;
+          let i = 0;
+          while (i < issue.path.length) {
+            const el = issue.path[i];
+            const terminal = i === issue.path.length - 1;
+            if (!terminal) {
+              curr[el] = curr[el] || { _errors: [] };
+            } else {
+              curr[el] = curr[el] || { _errors: [] };
+              curr[el]._errors.push(mapper(issue));
+            }
+            curr = curr[el];
+            i++;
+          }
+        }
+      }
+    };
+    processError(this);
+    return fieldErrors;
+  }
+  static assert(value) {
+    if (!(value instanceof _ZodError)) {
+      throw new Error(`Not a ZodError: ${value}`);
+    }
+  }
+  toString() {
+    return this.message;
+  }
+  get message() {
+    return JSON.stringify(this.issues, util2.jsonStringifyReplacer, 2);
+  }
+  get isEmpty() {
+    return this.issues.length === 0;
+  }
+  flatten(mapper = (issue) => issue.message) {
+    const fieldErrors = {};
+    const formErrors = [];
+    for (const sub of this.issues) {
+      if (sub.path.length > 0) {
+        const firstEl = sub.path[0];
+        fieldErrors[firstEl] = fieldErrors[firstEl] || [];
+        fieldErrors[firstEl].push(mapper(sub));
+      } else {
+        formErrors.push(mapper(sub));
+      }
+    }
+    return { formErrors, fieldErrors };
+  }
+  get formErrors() {
+    return this.flatten();
+  }
+};
+ZodError.create = (issues) => {
+  const error = new ZodError(issues);
+  return error;
+};
 var authenticationMiddleware = async (c, next) => {
   const mastra = c.get("mastra");
   const authConfig = mastra.getServer()?.auth;
@@ -44645,12 +50729,47 @@ var MastraServer = class extends MastraServer$1 {
     const queryParams = request.query();
     let body;
     if (route.method === "POST" || route.method === "PUT" || route.method === "PATCH") {
-      try {
-        body = await request.json();
-      } catch {
+      const contentType = request.header("content-type") || "";
+      if (contentType.includes("multipart/form-data")) {
+        try {
+          const formData = await request.formData();
+          body = await this.parseFormData(formData);
+        } catch (error) {
+          console.error("Failed to parse multipart form data:", error);
+          if (error instanceof Error && error.message.toLowerCase().includes("size")) {
+            throw error;
+          }
+        }
+      } else {
+        try {
+          body = await request.json();
+        } catch (error) {
+          console.error("Failed to parse JSON body:", error);
+        }
       }
     }
     return { urlParams, queryParams, body };
+  }
+  /**
+   * Parse FormData into a plain object, converting File objects to Buffers.
+   */
+  async parseFormData(formData) {
+    const result = {};
+    for (const [key, value] of formData.entries()) {
+      if (value instanceof File) {
+        const arrayBuffer = await value.arrayBuffer();
+        result[key] = Buffer.from(arrayBuffer);
+      } else if (typeof value === "string") {
+        try {
+          result[key] = JSON.parse(value);
+        } catch {
+          result[key] = value;
+        }
+      } else {
+        result[key] = value;
+      }
+    }
+    return result;
   }
   async sendResponse(route, response, result) {
     if (route.responseType === "json") {
@@ -44723,10 +50842,13 @@ var MastraServer = class extends MastraServer$1 {
             params.queryParams = await this.parseQueryParams(route, params.queryParams);
           } catch (error) {
             console.error("Error parsing query params", error);
+            if (error instanceof ZodError) {
+              return c.json(formatZodError(error, "query parameters"), 400);
+            }
             return c.json(
               {
                 error: "Invalid query parameters",
-                details: error instanceof Error ? error.message : "Unknown error"
+                issues: [{ field: "unknown", message: error instanceof Error ? error.message : "Unknown error" }]
               },
               400
             );
@@ -44737,10 +50859,13 @@ var MastraServer = class extends MastraServer$1 {
             params.body = await this.parseBody(route, params.body);
           } catch (error) {
             console.error("Error parsing body:", error instanceof Error ? error.message : String(error));
+            if (error instanceof ZodError) {
+              return c.json(formatZodError(error, "request body"), 400);
+            }
             return c.json(
               {
                 error: "Invalid request body",
-                details: error instanceof Error ? error.message : "Unknown error"
+                issues: [{ field: "unknown", message: error instanceof Error ? error.message : "Unknown error" }]
               },
               400
             );
@@ -44839,13 +50964,13 @@ function isHotReloadDisabled() {
 }
 function handleError(error, defaultMessage) {
   const apiError = error;
-  throw new HTTPException$1(apiError.status || 500, {
+  throw new HTTPException$2(apiError.status || 500, {
     message: apiError.message || defaultMessage,
     cause: apiError.cause
   });
 }
 function errorHandler(err, c, isDev) {
-  if (err instanceof HTTPException$1) {
+  if (err instanceof HTTPException$2) {
     if (isDev) {
       return c.json({ error: err.message, cause: err.cause, stack: err.stack }, err.status);
     }
@@ -44979,6 +51104,7 @@ var html2 = `
 `;
 
 // src/server/index.ts
+var getStudioPath = () => process.env.MASTRA_STUDIO_PATH || "./playground";
 function getToolExports(tools) {
   try {
     return tools.reduce((acc, toolModule) => {
@@ -45014,7 +51140,13 @@ async function createHonoServer(mastra, options = {
       customRouteAuthConfig.set(routeKey, requiresAuth);
     }
   }
-  app.onError((err, c) => errorHandler(err, c, options.isDev));
+  const customOnError = server?.onError;
+  app.onError((err, c) => {
+    if (customOnError) {
+      return customOnError(err, c);
+    }
+    return errorHandler(err, c, options.isDev);
+  });
   const bodyLimitOptions = {
     maxSize: server?.bodySizeLimit ?? 4.5 * 1024 * 1024,
     // 4.5 MB,
@@ -45155,10 +51287,11 @@ async function createHonoServer(mastra, options = {
         });
       }
     );
+    const studioPath = getStudioPath();
     app.use(
       `${studioBasePath}/assets/*`,
       serveStatic({
-        root: "./playground/assets",
+        root: join(studioPath, "assets"),
         rewriteRequestPath: (path) => {
           let rewritten = path;
           if (studioBasePath && rewritten.startsWith(studioBasePath)) {
@@ -45182,7 +51315,8 @@ async function createHonoServer(mastra, options = {
     }
     const isPlaygroundRoute = studioBasePath === "" || requestPath === studioBasePath || requestPath.startsWith(`${studioBasePath}/`);
     if (options?.playground && isPlaygroundRoute) {
-      let indexHtml = await readFile(join$1(process.cwd(), "./playground/index.html"), "utf-8");
+      const studioPath = getStudioPath();
+      let indexHtml = await readFile(join(studioPath, "index.html"), "utf-8");
       const port = serverOptions?.port ?? (Number(process.env.PORT) || 4111);
       const hideCloudCta = process.env.MASTRA_HIDE_CLOUD_CTA === "true";
       const host = serverOptions?.host ?? "localhost";
@@ -45199,11 +51333,12 @@ async function createHonoServer(mastra, options = {
     return c.newResponse(html2, 200, { "Content-Type": "text/html" });
   });
   if (options?.playground) {
+    const studioPath = getStudioPath();
     const playgroundPath = studioBasePath ? `${studioBasePath}/*` : "*";
     app.use(
       playgroundPath,
       serveStatic({
-        root: "./playground",
+        root: studioPath,
         rewriteRequestPath: (path) => {
           if (studioBasePath && path.startsWith(studioBasePath)) {
             return path.slice(studioBasePath.length);
@@ -45276,4 +51411,4 @@ var distMEN73GGI = /*#__PURE__*/Object.freeze({
   openai: openai
 });
 
-export { InvalidResponseDataError as I, NoSuchModelError as N, TooManyEmbeddingValuesForCallError as T, UnsupportedFunctionalityError as U, __commonJS as _, __require22 as a, resolve$1 as b, combineHeaders$1 as c, postJsonToApi$1 as d, createJsonResponseHandler$1 as e, createEventSourceResponseHandler$1 as f, convertUint8ArrayToBase64 as g, createJsonErrorResponseHandler$1 as h, generateId as i, isParsableJson as j, convertBase64ToUint8Array as k, loadApiKey as l, postFormDataToApi as m, __commonJS$1 as n, require_token_error$1 as o, parseProviderOptions as p, __require22$1 as q, require_token_error as r, withoutTrailingSlash$1 as w };
+export { InvalidResponseDataError as I, NoSuchModelError as N, TooManyEmbeddingValuesForCallError as T, UnsupportedFunctionalityError as U, __commonJS as _, __require2 as a, __commonJS$2 as b, require_token_error$2 as c, __require2$2 as d, combineHeaders$1 as e, resolve$1 as f, postJsonToApi$1 as g, createJsonResponseHandler$1 as h, createEventSourceResponseHandler$1 as i, convertUint8ArrayToBase64 as j, createJsonErrorResponseHandler$1 as k, loadApiKey as l, generateId as m, isParsableJson as n, convertBase64ToUint8Array as o, parseProviderOptions as p, postFormDataToApi as q, require_token_error as r, __commonJS$1 as s, require_token_error$1 as t, __require22 as u, withoutTrailingSlash$1 as w };

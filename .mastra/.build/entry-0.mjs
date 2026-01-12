@@ -1,54 +1,128 @@
-import require$$0 from 'crypto';
 import 'dotenv/config';
 import { Mastra } from '@mastra/core';
+import { registerApiRoute } from '@mastra/core/server';
+import { stream } from 'hono/streaming';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
-import { ToolCallFilter, TokenLimiter } from '@mastra/core/processors';
-import { PostgresStore } from '@mastra/pg';
+import { openai as openai$1 } from '@ai-sdk/openai';
+import { PostgresStore, PgVector } from '@mastra/pg';
+import { Pool } from 'pg';
+import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import axios from 'axios';
 import { google } from 'googleapis';
-import { createClient } from '@supabase/supabase-js';
+import axios from 'axios';
 import OpenAI from 'openai';
 import { createStep, createWorkflow } from '@mastra/core/workflows';
 
 "use strict";
-const LOCATION_IQ_KEY = process.env.LOCATIONIQ_API_KEY;
-const propiedadMasCercanaTool = createTool({
-  id: "encontrar_propiedad_cercana",
-  description: "Calcula la distancia entre una direcci\xF3n nueva y las visitas agendadas en el calendario para optimizar la log\xEDstica.",
-  inputSchema: z.object({
-    nueva_direccion: z.string().describe("La direcci\xF3n de la propiedad que se quiere evaluar"),
-    eventos_calendario: z.array(z.any()).describe("Lista de eventos obtenidos del calendario")
-  }),
-  execute: async (context) => {
-    const { nueva_direccion, eventos_calendario } = context;
-    const geoBase = await axios.get("https://us1.locationiq.com/v1/search.php", {
-      params: { key: LOCATION_IQ_KEY, q: `${nueva_direccion}, Buenos Aires, Argentina`, format: "json", limit: 1 }
-    });
-    const base = { lat: geoBase.data[0].lat, lon: geoBase.data[0].lon };
-    const visitas = eventos_calendario.filter((e) => e.summary?.toLowerCase().includes("visita"));
-    const calculos = await Promise.all(visitas.map(async (evento) => {
-      try {
-        const geoEv = await axios.get("https://us1.locationiq.com/v1/search.php", {
-          params: { key: LOCATION_IQ_KEY, q: `${evento.location}, Buenos Aires, Argentina`, format: "json", limit: 1 }
-        });
-        const distRes = await axios.get(`https://us1.locationiq.com/v1/directions/driving/${base.lon},${base.lat};${geoEv.data[0].lon},${geoEv.data[0].lat}`, {
-          params: { key: LOCATION_IQ_KEY }
-        });
-        return {
-          direccion: evento.location,
-          fecha: evento.start?.dateTime || evento.start,
-          distancia_metros: distRes.data.routes[0].distance
-        };
-      } catch (err) {
-        return null;
-      }
-    }));
-    return calculos.filter((c) => c !== null).sort((a, b) => a.distancia_metros - b.distancia_metros).slice(0, 5);
-  }
+const connectionString = process.env.SUPABASE_POSTGRES_URL;
+if (!connectionString) {
+  throw new Error("\u274C SUPABASE_POSTGRES_URL missing");
+}
+const pool = new Pool({
+  connectionString,
+  max: 10,
+  // Límite conservador para dejar espacio a las instancias de Mastra
+  idleTimeoutMillis: 3e4
 });
+const storage = new PostgresStore({
+  id: "pg-store",
+  connectionString
+});
+const vectorStore = new PgVector({
+  id: "pg-vector",
+  connectionString,
+  tableName: "memory_messages",
+  columnName: "embedding",
+  dims: 1536
+});
+class ThreadContextService {
+  static async getContext(threadId) {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT metadata FROM mastra_threads WHERE id = $1`,
+        [threadId]
+      );
+      return res.rows[0]?.metadata || {};
+    } catch (err) {
+      console.error("\u{1F525} Error DB GetContext:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async updateContext(threadId, resourceId, newClientData) {
+    if (!newClientData || Object.keys(newClientData).length === 0) {
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const jsonString = JSON.stringify(newClientData);
+      const query = `
+        INSERT INTO mastra_threads (id, "resourceId", title, metadata, "createdAt", "updatedAt")
+        VALUES ($1, $2, 'Nueva Conversaci\xF3n', $3::jsonb, NOW(), NOW())
+        ON CONFLICT (id) 
+        DO UPDATE SET 
+          metadata = COALESCE(mastra_threads.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+          "updatedAt" = NOW()
+          -- Nota: No tocamos el title en el update para no borrar res\xFAmenes previos
+        RETURNING metadata; 
+      `;
+      const result = await client.query(query, [threadId, resourceId, jsonString]);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] ERROR CR\xCDTICO AL GUARDAR:", err);
+    } finally {
+      client.release();
+    }
+  }
+  static async getResourceProfile(resourceId) {
+    if (!resourceId) return {};
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT "workingMemory" FROM mastra_resources WHERE id = $1 LIMIT 1`,
+        [resourceId]
+      );
+      const rawText = res.rows[0]?.workingMemory || "";
+      if (!rawText) return {};
+      const extract = (key) => {
+        const regex = new RegExp(`- \\*\\*${key}\\*\\*:\\s*(.*)`, "i");
+        const match = rawText.match(regex);
+        return match && match[1].trim() ? match[1].trim() : void 0;
+      };
+      return {
+        // Asegúrate que estas keys coincidan con tu Template de Mastra
+        nombre: extract("First Name") || extract("Name"),
+        // Fallback por si acaso
+        apellido: extract("Last Name"),
+        email: extract("Email"),
+        telefono: extract("Phone") || extract("Tel\xE9fono")
+      };
+    } catch (err) {
+      console.error("\u{1F525} Error leyendo Mastra Resources:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async clearThreadMessages(threadId) {
+    const client = await pool.connect();
+    try {
+      console.log(`\u{1F9F9} [Storage] Limpiando historial para thread: ${threadId}`);
+      await client.query(
+        `DELETE FROM mastra_messages WHERE "thread_id" = $1`,
+        [threadId]
+      );
+      console.log(`\u2705 [Storage] Historial eliminado exitosamente.`);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] Error al limpiar mensajes:", err);
+    } finally {
+      client.release();
+    }
+  }
+}
 
 "use strict";
 const getGoogleCalendar = () => {
@@ -65,16 +139,16 @@ const getGoogleCalendar = () => {
 };
 const getSanitizedDates = (startIso, endIso) => {
   const now = /* @__PURE__ */ new Date();
-  const currentYear = now.getFullYear();
   let startDate = new Date(startIso);
   let endDate = new Date(endIso);
-  if (startDate.getFullYear() < currentYear) {
-    startDate.setFullYear(currentYear);
-    endDate.setFullYear(currentYear);
+  if (startDate < now) {
+    console.log("Detectada fecha pasada, corrigiendo a\xF1o...");
+    startDate.setFullYear(startDate.getFullYear() + 1);
+    endDate.setFullYear(endDate.getFullYear() + 1);
   }
   return {
-    finalStart: startDate.toISOString(),
-    finalEnd: endDate.toISOString()
+    start: startDate.toISOString(),
+    end: endDate.toISOString()
   };
 };
 const calendarManagerTools = {
@@ -83,28 +157,32 @@ const calendarManagerTools = {
    */
   createCalendarEvent: createTool({
     id: "create_calendar_event",
-    description: `Crea un nuevo evento o visita en Google Calendar. HOY ES: ${(/* @__PURE__ */ new Date()).toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" })}. Corrige autom\xE1ticamente el a\xF1o si el agente intenta agendar en el pasado.`,
+    description: "Registra citas de visitas inmobiliarias.",
     inputSchema: z.object({
-      summary: z.string().describe("T\xEDtulo del evento (ej: Visita Propiedad X)"),
+      title: z.string().optional().describe('T\xEDtulo descriptivo del evento (ej: "Visita propiedad - cliente: ...")'),
+      summary: z.string().optional().describe('Resumen corto (ej: "Visita propiedad - [Direccion]")'),
       location: z.string().describe("Direcci\xF3n completa de la propiedad"),
-      start: z.string().describe("Fecha y hora de inicio en formato ISO"),
-      end: z.string().describe("Fecha y hora de fin en formato ISO")
+      description: z.string().describe("Detalles de contacto y cliente y propiedad"),
+      start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${(/* @__PURE__ */ new Date()).toLocaleDateString()} y agend\xE1s para un mes anterior, us\xE1 el a\xF1o ${(/* @__PURE__ */ new Date()).getFullYear()}.`),
+      end: z.string().describe("Fecha fin ISO8601")
     }),
-    execute: async ({ summary, location, start, end }) => {
+    execute: async (input) => {
       const calendar = getGoogleCalendar();
-      const { finalStart, finalEnd } = getSanitizedDates(start, end);
+      const { start, end } = getSanitizedDates(input.start, input.end);
+      const eventSummary = input.title || input.summary || "Visita Propiedad";
       try {
         const response = await calendar.events.insert({
           calendarId: "primary",
           requestBody: {
-            summary,
-            location,
+            summary: eventSummary,
+            location: input.location,
+            description: input.description,
             start: {
-              dateTime: finalStart,
+              dateTime: start,
               timeZone: "America/Argentina/Buenos_Aires"
             },
             end: {
-              dateTime: finalEnd,
+              dateTime: end,
               timeZone: "America/Argentina/Buenos_Aires"
             }
           }
@@ -113,8 +191,8 @@ const calendarManagerTools = {
           success: true,
           eventId: response.data.id,
           link: response.data.htmlLink,
-          scheduledStart: finalStart,
-          message: start !== finalStart ? "Fecha corregida al a\xF1o actual autom\xE1ticamente." : "Agendado correctamente."
+          scheduledStart: start,
+          message: input.start !== start ? "Fecha corregida al a\xF1o actual autom\xE1ticamente." : "Agendado correctamente."
         };
       } catch (error) {
         console.error("Error creando evento en Google Calendar:", error);
@@ -146,6 +224,259 @@ const calendarManagerTools = {
         return response.data.items || [];
       } catch (error) {
         console.error("Error listando eventos de Google Calendar:", error);
+        return { success: false, error: error.message };
+      }
+    }
+  }),
+  /**
+   * Herramienta para obtener un evento por ID
+   */
+  getCalendarEvent: createTool({
+    id: "get_calendar_event",
+    description: "Obtiene los detalles de un evento espec\xEDfico de Google Calendar usando su ID.",
+    inputSchema: z.object({
+      eventId: z.string().describe("ID del evento a obtener")
+    }),
+    execute: async ({ eventId }) => {
+      const calendar = getGoogleCalendar();
+      try {
+        const response = await calendar.events.get({
+          calendarId: "primary",
+          eventId
+        });
+        return response.data;
+      } catch (error) {
+        console.error("Error obteniendo evento:", error);
+        return { success: false, error: error.message };
+      }
+    }
+  }),
+  /**
+   * Herramienta para actualizar un evento existente
+   */
+  updateCalendarEvent: createTool({
+    id: "update_calendar_event",
+    description: "Actualiza un evento existente en Google Calendar. Puede cambiar horario, t\xEDtulo, descripci\xF3n o ubicaci\xF3n.",
+    inputSchema: z.object({
+      eventId: z.string().describe("ID del evento a modificar"),
+      summary: z.string().optional().describe("Nuevo t\xEDtulo del evento"),
+      description: z.string().optional().describe("Nueva descripci\xF3n"),
+      location: z.string().optional().describe("Nueva ubicaci\xF3n"),
+      start: z.string().optional().describe("Nueva fecha de inicio (ISO)"),
+      end: z.string().optional().describe("Nueva fecha de fin (ISO)"),
+      userEmail: z.string().optional().describe("Email del usuario para enviar notificaciones de actualizaci\xF3n (opcional)")
+    }),
+    execute: async ({ eventId, summary, description, location, start, end, userEmail }) => {
+      const calendar = getGoogleCalendar();
+      let currentEvent;
+      try {
+        const getRes = await calendar.events.get({ calendarId: "primary", eventId });
+        currentEvent = getRes.data;
+      } catch (e) {
+        return { success: false, error: "Evento no encontrado: " + e.message };
+      }
+      let startBody = currentEvent.start;
+      let endBody = currentEvent.end;
+      if (start && end) {
+        const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
+        startBody = { dateTime: sanitizedStart, timeZone: "America/Argentina/Buenos_Aires" };
+        endBody = { dateTime: sanitizedEnd, timeZone: "America/Argentina/Buenos_Aires" };
+      }
+      const requestBody = {
+        ...currentEvent,
+        summary: summary || currentEvent.summary,
+        description: description || currentEvent.description,
+        location: location || currentEvent.location,
+        start: startBody,
+        end: endBody
+      };
+      try {
+        const response = await calendar.events.update({
+          calendarId: "primary",
+          eventId,
+          requestBody,
+          sendUpdates: userEmail ? "all" : "none"
+          // Enviar correo si se provee email
+        });
+        return {
+          success: true,
+          eventId: response.data.id,
+          link: response.data.htmlLink,
+          updatedFields: { summary, location, start, end },
+          message: "Evento actualizado correctamente."
+        };
+      } catch (error) {
+        console.error("Error actualizando evento:", error);
+        return { success: false, error: error.message };
+      }
+    }
+  }),
+  /**
+   * Herramienta para eliminar un evento
+   */
+  deleteCalendarEvent: createTool({
+    id: "delete_calendar_event",
+    description: "Elimina (cancela) un evento de Google Calendar permanentemente.",
+    inputSchema: z.object({
+      eventId: z.string().describe("ID del evento a eliminar"),
+      notifyStart: z.boolean().optional().describe("No utilizado, pero mantenido por compatibilidad")
+    }),
+    execute: async ({ eventId }) => {
+      const calendar = getGoogleCalendar();
+      try {
+        await calendar.events.delete({
+          calendarId: "primary",
+          eventId
+        });
+        return { success: true, message: "Evento eliminado correctamente." };
+      } catch (error) {
+        console.error("Error eliminando evento:", error);
+        return { success: false, error: error.message };
+      }
+    }
+  }),
+  /**
+   * Herramienta para obtener horarios disponibles
+   */
+  getAvailableSlots: createTool({
+    id: "get_available_slots",
+    description: "Obtiene slots de horarios disponibles de 10:00 a 16:00 para los pr\xF3ximos 5 d\xEDas, excluyendo fines de semana.",
+    inputSchema: z.object({}),
+    execute: async () => {
+      const calendar = getGoogleCalendar();
+      const now = /* @__PURE__ */ new Date();
+      const daysToCheck = 5;
+      const workStartHour = 10;
+      const workEndHour = 16;
+      const slotDurationMinutes = 40;
+      const bufferMinutes = 30;
+      const availableSlots = [];
+      let daysFound = 0;
+      let dayOffset = 1;
+      while (daysFound < daysToCheck) {
+        const currentDate = new Date(now);
+        currentDate.setDate(now.getDate() + dayOffset);
+        dayOffset++;
+        const dayOfWeek = currentDate.getDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+        daysFound++;
+        const dayStart = new Date(currentDate);
+        dayStart.setHours(workStartHour, 0, 0, 0);
+        const dayEnd = new Date(currentDate);
+        dayEnd.setHours(workEndHour, 0, 0, 0);
+        let timeCursor = new Date(dayStart);
+        try {
+          const response = await calendar.events.list({
+            calendarId: "primary",
+            timeMin: dayStart.toISOString(),
+            timeMax: dayEnd.toISOString(),
+            singleEvents: true,
+            orderBy: "startTime"
+          });
+          const events = response.data.items || [];
+          while (timeCursor < dayEnd) {
+            const proposedEnd = new Date(timeCursor.getTime() + slotDurationMinutes * 6e4);
+            if (proposedEnd > dayEnd) break;
+            const hasConflict = events.some((event) => {
+              if (!event.start.dateTime || !event.end.dateTime) return false;
+              const eventStart = new Date(event.start.dateTime);
+              const eventEnd = new Date(event.end.dateTime);
+              const busyStartWithBuffer = new Date(eventStart.getTime() - bufferMinutes * 6e4);
+              const busyEndWithBuffer = new Date(eventEnd.getTime() + bufferMinutes * 6e4);
+              return timeCursor >= busyStartWithBuffer && timeCursor < busyEndWithBuffer || proposedEnd > busyStartWithBuffer && proposedEnd <= busyEndWithBuffer || timeCursor <= busyStartWithBuffer && proposedEnd >= busyEndWithBuffer;
+            });
+            if (!hasConflict) {
+              availableSlots.push({
+                fecha: timeCursor.toLocaleDateString("es-AR", { weekday: "long", day: "numeric" }),
+                hora: timeCursor.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }),
+                iso: timeCursor.toISOString()
+              });
+              timeCursor = new Date(timeCursor.getTime() + 60 * 6e4);
+            } else {
+              timeCursor = new Date(timeCursor.getTime() + 15 * 6e4);
+            }
+          }
+        } catch (error) {
+          console.error(`Error fetching events for ${currentDate.toISOString()}:`, error);
+        }
+      }
+      return availableSlots.slice(0, 5);
+    }
+  }),
+  /**
+   * Herramienta para buscar eventos usando lenguaje natural
+   * Ej: "Lunes 12 de enero a las 12", "el lunes a mediodía"
+   */
+  findEventByNaturalDate: createTool({
+    id: "find_event_by_natural_date",
+    description: 'Busca eventos en el calendario usando una fecha/hora en lenguaje natural (ej. "lunes 12 a las 12", "ma\xF1ana al mediod\xEDa"). Retorna los eventos encontrados en esa fecha/hora exacta o aproximada.',
+    inputSchema: z.object({
+      query: z.string().describe('La fecha y hora en lenguaje natural. Ej: "Lunes 12 de enero a las 12", "12/01 a las 12:00"')
+    }),
+    execute: async ({ query }) => {
+      const chrono = await import('chrono-node');
+      const calendar = getGoogleCalendar();
+      let normalizedQuery = query.toLowerCase().replace(/mediod[ií]a/g, "12:00").replace(/del d[ií]a/g, "").replace(/de la ma[ñn]ana/g, "am").replace(/de la tarde/g, "pm").replace(/de la noche/g, "pm");
+      const results = chrono.es.parse(normalizedQuery, /* @__PURE__ */ new Date());
+      if (results.length === 0) {
+        return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser m\xE1s espec\xEDfico (ej. 'Lunes 12 de enero a las 15:00')." };
+      }
+      const result = results[0];
+      const date = result.start.date();
+      const hasTime = result.start.isCertain("hour");
+      let timeMin;
+      let timeMax;
+      if (hasTime) {
+        const searchCenter = date.getTime();
+        const minDate = new Date(searchCenter - 15 * 6e4);
+        const maxDate = new Date(searchCenter + 60 * 6e4);
+        timeMin = minDate.toISOString();
+        timeMax = maxDate.toISOString();
+      } else {
+        const startOfDay = new Date(date);
+        startOfDay.setHours(0, 0, 0, 0);
+        const endOfDay = new Date(date);
+        endOfDay.setHours(23, 59, 59, 999);
+        timeMin = startOfDay.toISOString();
+        timeMax = endOfDay.toISOString();
+      }
+      try {
+        const response = await calendar.events.list({
+          calendarId: "primary",
+          timeMin,
+          timeMax,
+          singleEvents: true,
+          orderBy: "startTime"
+        });
+        const events = response.data.items || [];
+        if (events.length === 0) {
+          const dateStr = date.toLocaleDateString("es-AR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+          const timeStr = hasTime ? ` a las ${date.getHours()}:${date.getMinutes().toString().padStart(2, "0")}` : "";
+          return {
+            success: true,
+            events: [],
+            message: `No encontr\xE9 eventos para el ${dateStr}${timeStr}.`,
+            parsedDate: date.toISOString(),
+            isTimeSpecific: hasTime
+          };
+        }
+        const mappedEvents = events.map((e) => ({
+          id: e.id,
+          summary: e.summary,
+          start: e.start.dateTime || e.start.date,
+          end: e.end.dateTime || e.end.date,
+          location: e.location,
+          description: e.description,
+          link: e.htmlLink
+        }));
+        return {
+          success: true,
+          events: mappedEvents,
+          parsedDate: date.toISOString(),
+          isTimeSpecific: hasTime
+        };
+      } catch (error) {
+        console.error("Error buscando eventos por fecha natural:", error);
         return { success: false, error: error.message };
       }
     }
@@ -226,221 +557,43 @@ const gmailManagerTools = {
 "use strict";
 const apifyScraperTool = createTool({
   id: "apify-web-scraper",
-  description: "Scrapea sitios web complejos y devuelve el contenido en Markdown usando Apify.",
+  description: `Extrae el contenido textual crudo de una URL.`,
   inputSchema: z.object({
-    url: z.string().url().describe("La URL de la propiedad o sitio a scrapear")
-  }),
-  execute: async (input) => {
-    const APIFY_TOKEN = process.env.APIFY_TOKEN;
-    if (!APIFY_TOKEN) {
-      throw new Error("APIFY_TOKEN is missing in environment variables");
-    }
-    const ACTOR_ID = "aYG0l9s7dbB7j3gbS";
-    const payload = {
-      startUrls: [{ url: input.url, method: "GET" }],
-      crawlerType: "playwright:adaptive",
-      proxyConfiguration: {
-        useApifyProxy: true,
-        apifyProxyGroups: ["RESIDENTIAL"],
-        apifyProxyCountry: "AR"
-      },
-      saveMarkdown: true,
-      removeCookieWarnings: true,
-      htmlTransformer: "readableText",
-      useStealth: true
-    };
-    try {
-      const runResponse = await axios.post(
-        `https://api.apify.com/v2/acts/${ACTOR_ID}/runs`,
-        payload,
-        { headers: { Authorization: `Bearer ${APIFY_TOKEN}` } }
-      );
-      const runId = runResponse.data.data.id;
-      let status = runResponse.data.data.status;
-      let defaultDatasetId = "";
-      console.log(`Job iniciado: ${runId}. Esperando finalizaci\xF3n...`);
-      while (status !== "SUCCEEDED" && status !== "FAILED" && status !== "ABORTED") {
-        await new Promise((resolve) => setTimeout(resolve, 1e4));
-        const checkResponse = await axios.get(
-          `https://api.apify.com/v2/actor-runs/${runId}`,
-          { headers: { Authorization: `Bearer ${APIFY_TOKEN}` } }
-        );
-        status = checkResponse.data.data.status;
-        if (status === "SUCCEEDED") {
-          defaultDatasetId = checkResponse.data.data.defaultDatasetId;
-        }
-      }
-      if (status !== "SUCCEEDED") {
-        throw new Error(`El actor de Apify fall\xF3 con estatus: ${status}`);
-      }
-      const datasetResponse = await axios.get(
-        `https://api.apify.com/v2/datasets/${defaultDatasetId}/items`,
-        { headers: { Authorization: `Bearer ${APIFY_TOKEN}` } }
-      );
-      return {
-        markdown: datasetResponse.data[0]?.markdown || "No se pudo generar Markdown",
-        fullData: datasetResponse.data[0]
-      };
-    } catch (error) {
-      console.error("Error en Apify Tool:", error);
-      throw error;
-    }
-  }
-});
-
-"use strict";
-const getSupabase$2 = () => createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
-);
-const updateClientPreferencesTool = createTool({
-  id: "update_client_preferences",
-  description: "Actualiza o guarda los datos y preferencias del cliente (nombre, email, tel\xE9fono, presupuesto, zona, etc.) en la base de datos.",
-  inputSchema: z.object({
-    userId: z.string().describe("El identificador \xFAnico del usuario"),
-    preferences: z.object({
-      // DATOS DE CONTACTO (Añadidos para que no fallen)
-      nombre: z.string().optional().describe("Nombre del cliente"),
-      name: z.string().optional().describe("Nombre del cliente (alias)"),
-      email: z.string().email().optional().describe("Email de contacto"),
-      telefono: z.string().optional().describe("Tel\xE9fono de contacto"),
-      phone: z.string().optional().describe("Tel\xE9fono de contacto (alias)"),
-      // PREFERENCIAS INMOBILIARIAS
-      budget_max: z.number().optional().describe("Presupuesto m\xE1ximo"),
-      preferred_zones: z.array(z.string()).optional().describe("Zonas de inter\xE9s"),
-      min_rooms: z.number().optional().describe("Cantidad m\xEDnima de ambientes"),
-      operation_type: z.string().optional().describe("ALQUILER o VENTA"),
-      property_type: z.string().optional().describe("Tipo de propiedad (Casa, Depto, PH)")
-    }).passthrough().describe("Objeto con los datos detectados. Se permiten campos adicionales."),
-    // .passthrough() permite campos extra sin fallar
-    observations: z.string().optional().describe("Resumen de la interacci\xF3n o notas adicionales")
-  }),
-  execute: async ({ userId, preferences, observations }) => {
-    const supabase = getSupabase$2();
-    console.log(`\u{1F680} Iniciando persistencia para usuario: ${userId}`);
-    console.log("\u{1F4E6} Datos a guardar:", preferences);
-    try {
-      const { data: currentProfile } = await supabase.from("client_profiles").select("preferences, summary").eq("user_id", userId).single();
-      const mergedPreferences = {
-        ...currentProfile?.preferences || {},
-        ...preferences
-      };
-      const finalSummary = observations ? `${currentProfile?.summary ? currentProfile.summary + " | " : ""}${observations}` : currentProfile?.summary;
-      const { data, error } = await supabase.from("client_profiles").upsert({
-        user_id: userId,
-        preferences: mergedPreferences,
-        summary: finalSummary,
-        last_interaction: (/* @__PURE__ */ new Date()).toISOString()
-      }, {
-        onConflict: "user_id"
-      }).select();
-      if (error) {
-        console.error("\u274C Error de Supabase al hacer upsert:", error.message);
-        throw error;
-      }
-      console.log("\u2705 Datos persistidos correctamente en client_profiles");
-      return {
-        success: true,
-        message: `Memoria de ${userId} actualizada correctamente.`,
-        data: mergedPreferences
-      };
-    } catch (error) {
-      console.error("\u274C Error fatal en update_client_preferences:", error.message);
-      return {
-        success: false,
-        error: error.message
-      };
-    }
-  }
-});
-
-"use strict";
-const getSupabase$1 = () => createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
-);
-const getOpenAI = () => new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const searchPropertyMemoryTool = createTool({
-  id: "search_property_memory",
-  description: "Busca propiedades en la base de datos que coincidan con los deseos del cliente usando b\xFAsqueda sem\xE1ntica.",
-  inputSchema: z.object({
-    query: z.string().describe("Descripci\xF3n de lo que busca el cliente (ej: depto 2 ambientes con balc\xF3n en Lomas)"),
-    topK: z.number().optional().default(3).describe("Cantidad de propiedades a devolver"),
-    filter: z.object({
-      operation_type: z.enum(["ALQUILER", "VENTA"]).optional(),
-      max_price: z.number().optional()
-    }).optional()
-  }),
-  execute: async (input) => {
-    try {
-      const openai = getOpenAI();
-      const supabase = getSupabase$1();
-      const embeddingResponse = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: input.query
-      });
-      const [{ embedding }] = embeddingResponse.data;
-      const { data: properties, error } = await supabase.rpc("match_properties", {
-        query_embedding: embedding,
-        match_threshold: 0.5,
-        // Ajustar según precisión deseada
-        match_count: input.topK,
-        filter_op: input.filter?.operation_type || null,
-        filter_price: input.filter?.max_price || 999999999
-      });
-      if (error) throw error;
-      return {
-        success: true,
-        results: properties.map((p) => ({
-          id: p.id,
-          titulo: p.metadata.title,
-          precio: p.metadata.price,
-          descripcion: p.content,
-          link: p.metadata.url
-        }))
-      };
-    } catch (error) {
-      console.error("Error en RAG Tool:", error);
-      return { success: false, error: error.message };
-    }
-  }
-});
-const searchClientHistoryTool = createTool({
-  id: "search_client_history",
-  description: "Obtiene el resumen y preferencias de un cliente espec\xEDfico para el Admin.",
-  inputSchema: z.object({
-    userId: z.string().describe("El ID o tel\xE9fono del cliente")
-  }),
-  execute: async ({ userId }) => {
-    const supabase = getSupabase$1();
-    const { data: profile, error } = await supabase.from("client_profiles").select("nombre, preferences, summary, last_interaction").eq("user_id", userId).single();
-    if (error || !profile) {
-      return { success: false, message: "No encontr\xE9 a ning\xFAn cliente con ese ID." };
-    }
-    return {
-      success: true,
-      nombre: profile.nombre,
-      resumen: profile.summary || "No hay un resumen redactado a\xFAn.",
-      detalles: profile.preferences,
-      ultima_vez: profile.last_interaction
-    };
-  }
-});
-
-"use strict";
-const weatherTool = createTool({
-  id: "get-weather",
-  description: "Get current weather for a location",
-  inputSchema: z.object({
-    location: z.string().describe("City name")
+    url: z.string().url()
   }),
   outputSchema: z.object({
-    output: z.string()
+    success: z.boolean(),
+    data: z.array(z.any()).optional(),
+    error: z.string().optional()
   }),
-  execute: async () => {
-    return {
-      output: "The weather is sunny"
-    };
+  execute: async ({ url }) => {
+    const APIFY_TOKEN = process.env.APIFY_TOKEN;
+    const ACTOR_NAME = "apify~website-content-crawler";
+    if (!APIFY_TOKEN) {
+      return { success: false, error: "Falta APIFY_TOKEN en .env" };
+    }
+    try {
+      const response = await axios.post(
+        `https://api.apify.com/v2/acts/${ACTOR_NAME}/runs?token=${APIFY_TOKEN}`,
+        { startUrls: [{ url }] }
+      );
+      const runId = response.data.data.id;
+      const datasetId = response.data.data.defaultDatasetId;
+      let status = "RUNNING";
+      while (status === "RUNNING" || status === "READY") {
+        await new Promise((r) => setTimeout(r, 2e3));
+        const check = await axios.get(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`);
+        status = check.data.data.status;
+      }
+      const items = await axios.get(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`);
+      return {
+        success: true,
+        data: items.data
+      };
+    } catch (e) {
+      const msg = e.response?.data?.error?.message || e.message;
+      return { success: false, error: msg };
+    }
   }
 });
 
@@ -461,7 +614,7 @@ const potentialSaleEmailTool = createTool({
     telefono_cliente: z.string(),
     email_cliente: z.string().optional(),
     direccion_propiedad: z.string(),
-    url_propiedad: z.string().url()
+    url_propiedad: z.string().optional()
   }),
   execute: async (input) => {
     const gmail = getGmail();
@@ -514,7 +667,12 @@ const potentialSaleEmailTool = createTool({
         requestBody: { raw: encodedMessage }
       });
     });
-    Promise.all(sendPromises).catch((err) => console.error("Error enviando mails de venta:", err));
+    try {
+      await Promise.all(sendPromises);
+    } catch (err) {
+      console.error("Error enviando mails de venta:", err);
+      throw new Error("Fall\xF3 el env\xEDo del correo de venta. Revisa los logs.");
+    }
     return {
       status: "success",
       message: "La notificaci\xF3n ha sido enviada a los responsables de la inmobiliaria."
@@ -525,306 +683,629 @@ const potentialSaleEmailTool = createTool({
 "use strict";
 
 "use strict";
-const scrapeStep = createStep({
-  id: "scrape-property-step",
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    markdown: z.string(),
-    url: z.string()
-  }),
-  execute: async ({ inputData }) => {
-    const result = await apifyScraperTool.execute({
-      url: inputData.url
-    });
-    if (!result.markdown) {
-      throw new Error("No se obtuvo contenido de la web");
+const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
+const commonTools = {
+  ...calendarManagerTools,
+  ...gmailManagerTools
+};
+const salesTools = {
+  potential_sale_email: potentialSaleEmailTool
+  // Solo para ventas
+};
+const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
+  const memory = new Memory({
+    storage,
+    vector: vectorStore,
+    embedder: openai$1.embedding("text-embedding-3-small"),
+    options: {
+      lastMessages: 22,
+      semanticRecall: {
+        topK: 3,
+        messageRange: 3
+      },
+      workingMemory: {
+        enabled: true,
+        scope: "resource",
+        template: `# User Profile
+          - **First Name**:
+          - **Last Name**:
+          - **Email**:
+          - **Phone**:
+          - **Location**:
+          - **Budget Max**:
+          - **Preferred Zone**:
+          - **Property Type Interest**: (Casa/Depto/PH)
+          `
+      },
+      generateTitle: true
     }
-    return {
-      markdown: result.markdown,
-      url: inputData.url
-    };
+  });
+  const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
+  let selectedTools = { ...commonTools };
+  if (operacionTipo === "ALQUILAR") {
+    selectedTools = { ...selectedTools };
+  } else if (operacionTipo === "VENDER") {
+    selectedTools = { ...selectedTools, ...salesTools };
+  } else {
+    selectedTools = { ...selectedTools };
   }
-});
-const persistStep = createStep({
-  id: "persist-property-step",
-  inputSchema: z.object({
-    markdown: z.string(),
-    url: z.string()
-  }),
-  outputSchema: z.object({
-    status: z.string(),
-    propertyUrl: z.string()
-  }),
-  execute: async ({ getStepResult, mastra }) => {
-    const scrapedData = getStepResult("scrape-property-step");
-    if (!scrapedData) throw new Error("No hay datos del scraper");
-    const cleanContent = scrapedData.markdown.split("Preguntas para la inmobiliaria")[0].trim();
-    const embedding = await mastra.embed(cleanContent, {
-      provider: "OPENAI",
-      model: "text-embedding-3-small"
-    });
-    const storage = mastra.storage;
-    const db = await storage.getPg6();
-    await db.none(
-      `INSERT INTO public.property_memory (content, embedding, metadata) 
-       VALUES ($1, $2, $3)
-       ON CONFLICT ((metadata->>'url')) 
-       DO UPDATE SET 
-          content = EXCLUDED.content, 
-          embedding = EXCLUDED.embedding,
-          metadata = EXCLUDED.metadata`,
-      [
-        cleanContent,
-        `[${embedding.join(",")}]`,
-        JSON.stringify({
-          url: scrapedData.url,
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          source: "automated-workflow"
-        })
-      ]
-    );
-    return {
-      status: "success",
-      propertyUrl: scrapedData.url
-    };
-  }
-});
-const ingestionWorkflow = createWorkflow({
-  id: "ingesta-propiedades-v3",
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    status: z.string(),
-    propertyUrl: z.string()
-  })
-}).then(scrapeStep).then(persistStep).commit();
+  return new Agent({
+    // ID obligatorio para Mastra
+    id: "real-estate-agent",
+    name: "Real Estate Agent",
+    instructions: finalInstructions,
+    model: openai$1("gpt-4o"),
+    memory,
+    tools: selectedTools,
+    inputProcessors: [
+      new PromptInjectionDetector({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.8,
+        strategy: "block"
+      }),
+      new ModerationProcessor({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.7,
+        strategy: "block"
+      }),
+      new TokenLimiter(3e3)
+    ],
+    outputProcessors: [
+      new SystemPromptScrubber({
+        model: openai$1("gpt-4o-mini"),
+        strategy: "redact",
+        redactionMethod: "placeholder"
+      })
+    ]
+  });
+};
 
 "use strict";
-const procesarNuevaPropiedad = createTool({
-  id: "procesar_propiedad_link",
-  description: "Cuando el cliente env\xEDa un link, usa esta herramienta para analizarlo y guardarlo en el sistema.",
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+const realEstatePropertyFormatterTool = createTool({
+  id: "real-estate-property-formatter",
+  description: "Limpia, extrae y formatea informaci\xF3n t\xE9cnica de descripciones inmobiliarias.",
   inputSchema: z.object({
-    url: z.string().url()
+    keywordsZonaProp: z.string().describe("El texto bruto de la descripci\xF3n de la propiedad")
   }),
-  execute: async (input) => {
+  outputSchema: z.object({
+    formattedText: z.string().describe("El listado formateado y coherente")
+  }),
+  execute: async ({ keywordsZonaProp }) => {
+    console.log("   [Tool] \u{1F6E0}\uFE0F  Conectando directo con API OpenAI (gpt-4o-mini)...");
+    const systemPrompt = `Eres un motor de extracci\xF3n de datos t\xE9cnicos inmobiliarios. 
+    Tu \xFAnica tarea es extraer y limpiar los datos.
+    
+    Campos a extraer:
+    - Tipo
+    - Operaci\xF3n
+    - Ubicaci\xF3n (Barrio, Localidad)
+    - Superficie (solo n\xFAmeros y unidad)
+    - Ambientes (cantidad)
+
+    Reglas de Salida ESTRICTAS:
+    1. Devuelve SOLO la lista de datos. NADA de texto introductorio ("Aqu\xED tienes", "Revisando").
+    2. NO uses Markdown (ni negritas **, ni bloques, ni guiones -).
+    3. NO repitas informaci\xF3n.
+    4. Formato: "Campo: Valor".`;
+    const userPrompt = `Procesa este texto raw: "${keywordsZonaProp}"`;
     try {
-      const run = await ingestionWorkflow.execute({
-        triggerData: { url: input.url }
-        // Cambiamos inputData por triggerData
+      const completion = await openai.chat.completions.create({
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        model: "gpt-4o-mini",
+        temperature: 0.1
       });
+      const text = completion.choices[0]?.message?.content || "No se pudo generar texto";
+      console.log("   [Tool] \u2705 Respuesta recibida (Tokens usados: " + completion.usage?.total_tokens + ")");
       return {
-        resultado: "Propiedad analizada y guardada con \xE9xito",
-        detalles: run
-        // Mastra guarda los resultados en .results
+        formattedText: text
       };
     } catch (error) {
-      console.error("Error ejecutando workflow de ingesta:", error);
-      return {
-        resultado: "Error al procesar la propiedad",
-        error: error instanceof Error ? error.message : String(error)
-      };
+      console.error("   [Tool] \u274C Error Nativo OpenAI:", error.message);
+      if (error.status === 429) {
+        throw new Error("rate_limit_exceeded");
+      }
+      throw error;
     }
   }
 });
 
 "use strict";
-function dynamicInstructions(datos) {
-  const ahora = new Intl.DateTimeFormat("es-AR", {
-    timeZone: "America/Argentina/Buenos_Aires",
-    hour: "numeric",
-    hour12: false
-  }).format(/* @__PURE__ */ new Date());
-  const hora = parseInt(ahora);
-  let momentoDia = "\xA1Hola!";
-  if (hora >= 5 && hora < 12) momentoDia = "\xA1Buen d\xEDa!";
-  else if (hora >= 12 && hora < 20) momentoDia = "\xA1Buenas tardes!";
-  else momentoDia = "\xA1Buenas noches!";
-  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, qu\xE9 bueno saludarte de nuevo. Nico por ac\xE1 \u{1F44B}` : `${momentoDia} \xBFC\xF3mo va? Nico por ac\xE1, de Fausti Propiedades \u{1F44B}`;
-  const faltaEmail = !datos.email;
-  const faltaTelefono = !datos.telefono;
-  const faltaNombre = !datos.nombre;
-  console.log("=== DEBUG: Nico Agent ===");
-  console.log("Contexto:", { nombre: datos.nombre, email: datos.email, hora });
-  console.log("Faltantes:", { faltaNombre, faltaEmail, faltaTelefono });
-  console.log("=========================");
+const realEstateCleaningAgent = new Agent({
+  id: "real-estate-cleaning-agent",
+  name: "Real Estate Cleaning Agent",
+  tools: { realEstatePropertyFormatterTool },
+  instructions: `
+    Eres un experto en procesamiento de datos inmobiliarios. 
+    Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
+    Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
+    No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
+    El tono debe ser profesional y persuasivo, destacando los beneficios.
+    
+  `,
+  model: "openai/gpt-4.1-mini"
+});
+
+"use strict";
+const frasesRevisareLink = [
+  "Dame un toque que lo veo y te digo... \u{1F50D}",
+  "Ahora lo miro y te aviso... \u{1F440}",
+  "D\xE9jame revisarlo y te confirmo... \u{1F4F2}",
+  "Esper\xE1 que lo chequeo y te comento... \u{1F914}",
+  "Ahora le doy una mirada y te respondo... \u{1F517}",
+  "Voy a verlo y te digo... \u{1F4AC}",
+  "Lo reviso y te aviso... \u{1F4F1}",
+  "Dame un momento, lo veo y te aviso... \u23F3",
+  "Ahora lo abro y te doy mi opini\xF3n... \u2728",
+  "De una, lo miro y te contacto... \u{1F4AF}",
+  "Ya mismo lo veo y te cuento... \u{1F4DD}",
+  "D\xE9jame que lo analizo y te contesto... \u{1F9D0}",
+  "Ahora me fijo y te escribo... \u270D\uFE0F",
+  "Voy a echarle un ojo y te digo... \u{1F441}\uFE0F",
+  "Lo chequeo r\xE1pido y te mando mensaje... \u26A1",
+  "Ahora lo examino y te paso feedback... \u{1F50E}",
+  "Dejame verlo y te respondo enseguida... \u{1F680}",
+  "Ya lo abro, lo miro y te contacto... \u{1F4E8}",
+  "En un segundo lo reviso y te aviso... \u{1F552}",
+  "Ahora mismo lo veo y te tiro un mensaje... \u{1F4AD}"
+];
+const frasesDisponibilidad = [
+  "\xBFQu\xE9 d\xEDa y rango horario te queda c\xF3modo?",
+  "\xBFEn qu\xE9 d\xEDa y franja horaria tienes disponibilidad?",
+  "\xBFQu\xE9 fecha y horario se ajustan mejor a tu agenda?",
+  "\xBFQu\xE9 d\xEDa y rango de horas te viene bien?",
+  "\xBFCu\xE1l es el d\xEDa y el horario que m\xE1s te conviene?",
+  "\xBFEn qu\xE9 d\xEDa y qu\xE9 horas tienes libre?",
+  "\xBFQu\xE9 fecha y turno prefieres para coordinar?",
+  "\xBFQu\xE9 d\xEDa y per\xEDodo del d\xEDa te funciona mejor?",
+  "\xBFEn qu\xE9 jornada y momento del d\xEDa est\xE1s disponible?",
+  "\xBFQu\xE9 fecha y franja horaria se acomoda a tu tiempo?"
+];
+const frasesSolicitudDatos = [
+  "Para avanzar, necesitar\xEDa por favor tu nombre, apellido, email y tel\xE9fono.",
+  "Para continuar, requiero que proporciones tu nombre, apellido, correo electr\xF3nico y n\xFAmero de contacto.",
+  "Necesito tu nombre completo, direcci\xF3n de email y tel\xE9fono para proceder.",
+  "Para completar el proceso, por favor ingresa tu nombre, apellido, email y n\xFAmero telef\xF3nico.",
+  "Ser\xEDa necesario que me brindes tu nombre, apellido, correo y tel\xE9fono de contacto.",
+  "Para seguir adelante, te solicito tu nombre, apellidos, email y tel\xE9fono.",
+  "Requiero tu nombre y apellido, junto con tu email y n\xFAmero de tel\xE9fono.",
+  "Para poder ayudarte, necesito que me des tu nombre completo, email y tel\xE9fono.",
+  "Es necesario que proporciones tu nombre, apellido, direcci\xF3n de correo y tel\xE9fono.",
+  "Para finalizar, preciso que completes con tu nombre, apellido, email y n\xFAmero de contacto."
+];
+
+"use strict";
+function auditMissingFields(datos) {
+  const missing = [];
+  const isInvalid = (val) => !val || val === "" || val === "Preguntar" || val === "Ver chat";
+  if (isInvalid(datos.nombre)) missing.push("NOMBRE");
+  if (isInvalid(datos.apellido)) missing.push("APELLIDO");
+  if (isInvalid(datos.email)) missing.push("EMAIL");
+  if (isInvalid(datos.telefono)) missing.push("TEL\xC9FONO");
+  return missing;
+}
+function obtenerFraseAleatoriaRevisarLink() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesRevisareLink.length);
+  return frasesRevisareLink[indiceAleatorio];
+}
+function obtenerFraseAleatoriaDisponibilidad() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesDisponibilidad.length);
+  return frasesDisponibilidad[indiceAleatorio];
+}
+function obtenerFraseAleatoriaSolicitudDatos() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesSolicitudDatos.length);
+  return frasesSolicitudDatos[indiceAleatorio];
+}
+const CORE_IDENTITY = `
+# I. IDENTIDAD & ROL
+Eres NICO, asistente de IA de Fausti Propiedades.
+
+### \u{1F4F1} ESTILO DE COMUNICACI\xD3N (WHATSAPP MODE)
+Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
+- **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
+- **TONO**: Casual, emp\xE1tico, directo ("vos", "dale", "genial").
+- **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
+- **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
+- **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
+
+### Reglas Operativas
+- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
+- **Privacidad**:
+  1. TERCEROS: JAM\xC1S reveles datos de otros.
+  2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
+`;
+function getTemporalContext() {
+  return (/* @__PURE__ */ new Date()).toLocaleDateString("es-AR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+}
+const dynamicInstructions = (datos, op) => {
+  const opNormalizada = op ? op.toUpperCase() : "INDEFINIDO";
+  const missingFields = auditMissingFields(datos);
+  let statusBlock = "";
+  if (missingFields.length > 0) {
+    const missingString = missingFields.map((f) => f.toLowerCase()).join(", ").replace(/, ([^,]*)$/, " y $1");
+    statusBlock = `
+## \u{1F6A8} ESTADO: DATOS INCOMPLETOS
+Faltan: ${missingFields.join(", ")}.
+
+### \u26A1 TU OBJETIVO:
+Pide **TODOS** los datos faltantes en **UNA SOLA ORACI\xD3N** al final de tu respuesta.
+Formato: ${obtenerFraseAleatoriaSolicitudDatos()} **${missingString}**."
+(NO inventes datos. NO preguntes uno a uno).
+    `;
+  } else {
+    statusBlock = `
+## \u2705 ESTADO: FICHA COMPLETA
+Procede con el protocolo operativo.
+    `;
+  }
+  let protocolBlock = "";
+  if (opNormalizada === "ALQUILAR") {
+    protocolBlock = `
+# III. FLUJO: ALQUILER (OBJETIVO: CITA)
+1. **Validaci\xF3n**: Celebra la elecci\xF3n ("\xA1Excelente opci\xF3n!").
+2. **Acci\xF3n**: Pregunta DIRECTO: **${obtenerFraseAleatoriaDisponibilidad()}**
+   - Usa 'get_available_slots'.
+   - NO asumas horarios.
+3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+4. **PROHIBICI\xD3N**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+      `;
+  } else if (opNormalizada === "VENDER") {
+    protocolBlock = `
+# III. FLUJO: VENTA (OBJETIVO: DERIVAR)
+1. **Acci\xF3n**: usa 'potential_sale_email'.
+2. **Despedida**: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
+3. **Fin**: Cierra la conversaci\xF3n.
+      `;
+  }
   return `
-    PROMPT INTEGRAL: NICO - FAUSTI PROPIEDADES
-    
-    0) MODO DE ACCESO (SEGURIDAD):
-    ${datos.isAdmin ? "- EST\xC1S HABLANDO CON EL ADMIN (PROPIETARIO). Tienes permiso total para enviar emails, listar emails, crear borradores de emails, crear eventos, actualizar eventos, listar eventos, ver nombres de clientes y gestionar la agenda. Como ADMIN, puedes pedir res\xFAmenes de otros clientes. Si lo haces, busca en tu base de datos de perfiles y reporta los puntos clave: Inter\xE9s, Presupuesto y Estado de la visita." : '- EST\xC1S HABLANDO CON UN CLIENTE EXTERNO. Prohibido mostrar la agenda completa o datos de terceros. No puedes listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda"). Tampoco puedes mostrar nombres de clientes, direcciones de visitas ni horarios ocupados de forma detallada. Tampoco puedes enviar emails, crear o listar emails.'}
+  ${CORE_IDENTITY}
 
-    1) SEGURIDAD Y PRIVACIDAD DE DATOS (REGLA CR\xCDTICA)
-    - Tu interlocutor es un CLIENTE/INTERESADO.
-    - \u274C PROHIBIDO: Listar, mostrar o resumir eventos de la agenda si el usuario lo pide expl\xEDcitamente (ej: "qu\xE9 ten\xE9s en agenda").
-    - \u274C PRIVACIDAD: No reveles nombres de otros clientes, direcciones de otras visitas ni horarios ocupados de forma detallada.
-    - RESPUESTA ANTE PEDIDO DE AGENDA: "Mi funci\xF3n es ayudarte a encontrar una propiedad y coordinar una visita para vos. No puedo mostrarte la agenda completa, pero decime qu\xE9 d\xEDa te queda bien y me fijo si tenemos un hueco."
+  # II. DATOS ACTUALES
+  - Nombre: ${datos.nombre || "No registrado"}
+  - Apellido: ${datos.apellido || "No registrado"}
+  - Email: ${datos.email || "No registrado"}
+  - Tel\xE9fono: ${datos.telefono || "No registrado"}
+  
+  ${statusBlock}
 
-    2) IDENTIDAD Y ESTADO DEL CLIENTE
-    - Saludo: "${saludoInicial}"
-    - Tono: WhatsApp, c\xE1lido, profesional y natural. M\xE1ximo un emoji por mensaje.
-    - ESTADO ACTUAL:
-      ${faltaNombre ? "- \u26A0\uFE0F NOMBRE FALTANTE: Pedilo casualmente." : `- Nombre: ${datos.nombre}`}
-      ${faltaEmail ? "- \u26A0\uFE0F EMAIL FALTANTE: Obligatorio para agendar." : `- Email: ${datos.email}`}
-      ${faltaTelefono ? "- \u26A0\uFE0F TEL\xC9FONO FALTANTE: Obligatorio para agendar." : `- Tel\xE9fono: ${datos.telefono}`}
+  ${protocolBlock}
 
-    3) CLASIFICACI\xD3N DE OPERACI\xD3N (CR\xCDTICO)
-    Antes de responder, analiza el link o la propiedad:
-    - VENTA: Propiedades con precio de compra (USD). 
-      * Acci\xF3n: Si hay inter\xE9s, usar 'potential_sale_email'.
-      * Respuesta: "Genial, en el transcurso del d\xEDa te contactamos. Muchas gracias \u{1F60A}". NO ofrecer horarios de calendario.
-    - ALQUILER: Propiedades con precio mensual.
-      * Acci\xF3n: NO usar 'potential_sale_email'. Usar flujo de agendamiento manual/calendario.
-      * Respuesta: Informar requisitos y proponer horarios de visita (Lunes a Viernes 10-16hs).
-
-    4) REGLA DE ORO: CAPTURA DE DATOS
-    - Si el cliente quiere visitar o muestra inter\xE9s real:
-      a) Revisa si ya dio su email/tel\xE9fono en el chat reciente o si figuran en el "ESTADO ACTUAL".
-      b) Si YA los tenemos: No los vuelvas a pedir. Procede al cierre.
-      c) Si FALTAN: "\xA1Dale, me encanta esa unidad! Para que el equipo te contacte y coordinemos, \xBFme pasas tu email y un cel? \u{1F4E9}"
-    - Al recibir datos nuevos: Ejecutar inmediatamente 'update_client_preferences'.
-
-    5) L\xD3GICA DE AGENDAMIENTO (SOLO ALQUILER)
-    - Horarios: Lun a Vie, 10:00 a 16:00 hs. (40 min visita + 30 min buffer).
-    - Proximidad: Usar 'encontrar_propiedad' para sugerir horarios basados en visitas cercanas.
-    - Fallback: Si no hay visitas cerca, ofrecer bloques libres generales.
-
-    6) CAT\xC1LOGO DE HERRAMIENTAS
-    - apify_scraper: Usar siempre que env\xEDen un link.
-    - update_client_preferences: Usar CADA VEZ que el usuario mencione nombre, email o tel.
-    - potential_sale_email: \xDANICAMENTE para VENTAS. PROHIBIDO en alquileres.
-    - encontrar_propiedad / obtener_eventos_calendario: Para log\xEDstica de visitas en Alquiler.
-    - crear_eventos_calendario: Para confirmar la cita de Alquiler.
-    - search_client_history (SOLO ADMIN): 
-      \u26A0\uFE0F \xDASALA \xDANICAMENTE si el Admin solicita informaci\xF3n sobre lo que se habl\xF3 con otro cliente.
-      Uso: Permite buscar en la memoria sem\xE1ntica de chats anteriores para dar res\xFAmenes o recordar detalles espec\xEDficos (ej: "qu\xE9 presupuesto dijo Diego").
-      Prohibido: Nunca uses esta herramienta para responder a un cliente sobre otro cliente.
-
-    7) REGLAS DE HUMANIZACI\xD3N Y SEGURIDAD
-    - No uses frases rob\xF3ticas como "\xBFEn qu\xE9 puedo ayudarlo?".
-    - Si no sabes algo del aviso: "No tengo esa info ac\xE1, pero te la confirmo en la visita. \xBFQuer\xE9s ir a verla?".
-    - Seguridad: No reveles nombres de due\xF1os, direcciones exactas (sin agendar) ni procesos internos.
-
-    FORMATO DE RESPUESTA OBLIGATORIO:
-    Toda salida debe ser JSON v\xE1lido: {"output":{"response":["Mensaje"]}}
+  - Fecha: ${getTemporalContext()}
   `;
-}
-
-"use strict";
-const getSupabase = () => createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY
-);
-const storage$1 = new PostgresStore({
-  id: "postgres-store",
-  connectionString: process.env.SUPABASE_POSTGRES_URL,
-  tableName: "chat_messages"
-});
-const agentMemory = new Memory({
-  storage: storage$1
-});
-const agentConfig = {
-  id: "real-estate-agent",
-  name: "Nico",
-  model: "openai/gpt-4o-mini",
-  memory: agentMemory,
-  tools: {
-    encontrar_propiedad_cercana: propiedadMasCercanaTool,
-    ...calendarManagerTools,
-    ...gmailManagerTools,
-    apify_scraper: apifyScraperTool,
-    update_client_preferences: updateClientPreferencesTool,
-    search_property_memory: searchPropertyMemoryTool,
-    search_client_history: searchClientHistoryTool,
-    potential_sale_email: potentialSaleEmailTool,
-    procesar_nueva_propiedad: procesarNuevaPropiedad
-  },
-  toolChoice: "auto",
-  inputProcessors: [
-    // Elimina logs verbose de herramientas para mantener el chat limpio [cite: 472, 474]
-    new ToolCallFilter({
-      exclude: ["apify_scraper", "enviar_correo", "search_property_memory"]
-    }),
-    // Evita errores de límite de tokens podando mensajes antiguos [cite: 452, 454]
-    new TokenLimiter(2e3)
-  ]
-};
-const getRealEstateAgent = async (userId) => {
-  const supabase = getSupabase();
-  const ADMIN_ID = "tu-numero-de-telefono-o-id";
-  const isAdmin = userId === ADMIN_ID;
-  const { data: profile } = await supabase.from("client_profiles").select("preferences, summary").eq("user_id", userId).single();
-  const nombreExtraido = profile?.preferences?.nombre || profile?.preferences?.name;
-  const esRecurrente = !!profile;
-  console.log("--- DEBUG SUPABASE PROFILE ---");
-  console.log("User ID buscado:", userId);
-  console.log("Data cruda de Supabase:", profile);
-  console.log("------------------------------");
-  const instrucciones = dynamicInstructions({
-    nombre: nombreExtraido,
-    esRecurrente,
-    isAdmin: true
-  });
-  const ltmContext = profile ? `
-    
-RECUERDA SOBRE ESTE CLIENTE:
-    - Preferencias: ${JSON.stringify(profile.preferences)}
-    - Resumen: ${profile.summary || "Sin historial previo"}
-  ` : "";
-  return new Agent({
-    ...agentConfig,
-    instructions: instrucciones + ltmContext
-  });
 };
 
 "use strict";
-const scrapePropertyStep = createStep({
-  id: "scrape-property",
-  inputSchema: z.object({ url: z.string().url() }),
-  outputSchema: z.object({ details: z.string() }),
-  execute: async () => {
-    return { details: "Casa en Lomas, 3 ambientes, USD 120k" };
-  }
-});
-const geoProximityStep = createStep({
-  id: "check-proximity",
-  inputSchema: z.object({ details: z.string() }),
-  outputSchema: z.object({ suggestions: z.array(z.string()) }),
-  execute: async () => {
-    return { suggestions: ["Martes 10:00hs", "Jueves 15:00hs"] };
-  }
-});
-const nicoBookingWorkflow = createWorkflow({
-  id: "booking-flow",
-  inputSchema: z.object({ url: z.string().url() }),
-  outputSchema: z.object({ suggestions: z.array(z.string()) })
-}).then(scrapePropertyStep).then(geoProximityStep).commit();
+const sleep = async (seconds) => {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+};
 
 "use strict";
+const randomSleep = async (min, max) => {
+  const waitTime = Math.random() * (max - min) + min;
+  await sleep(waitTime);
+};
+
 "use strict";
-if (!global.crypto) {
-  global.crypto = require$$0;
-}
-const realEstateAgent = await getRealEstateAgent("placeholder-system");
-const storage = process.env.POSTGRES_URL ? new PostgresStore({
-  id: "pg-store",
-  connectionString: process.env.POSTGRES_URL
-  // Eliminamos tableName para que Mastra use su esquema estándar 
-  // y se mapee correctamente a tus tablas mastra_threads, mastra_messages, etc.
-}) : void 0;
-if (!storage) {
-  console.warn("\u26A0\uFE0F POSTGRES_URL missing. Using In-Memory storage (Non-persistent).");
-}
+const propertyDataProcessorTool = createTool({
+  id: "property-data-processor",
+  description: "Procesa los datos crudos de una propiedad (JSON) y extrae keywords, localidad y direcci\xF3n.",
+  inputSchema: z.object({
+    rawData: z.array(z.any())
+    // Recibe el array de objetos que retorna el scraper
+  }),
+  outputSchema: z.object({
+    keywords: z.string().optional(),
+    addressLocality: z.string().optional(),
+    streetAddress: z.string().optional(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""])
+  }),
+  execute: async ({ rawData }) => {
+    const dataItem = rawData[0];
+    if (!dataItem) {
+      return { operacionTipo: "" };
+    }
+    const metadata = dataItem.metadata || {};
+    const keywords = metadata.keywords;
+    let addressLocality;
+    let streetAddress;
+    let operacionTipo;
+    if (metadata.jsonLd && Array.isArray(metadata.jsonLd)) {
+      const itemWithAddress = metadata.jsonLd.find((item) => item?.address);
+      if (itemWithAddress && itemWithAddress.address) {
+        addressLocality = itemWithAddress.address.addressLocality;
+        streetAddress = itemWithAddress.address.streetAddress;
+      }
+    }
+    if (keywords) {
+      const upperKeywords = keywords.toUpperCase();
+      if (upperKeywords.includes("ALQUILAR") || upperKeywords.includes("ALQUILER") || upperKeywords.includes("ALQUILA")) {
+        operacionTipo = "ALQUILAR";
+      } else if (upperKeywords.includes("VENDER") || upperKeywords.includes("VENTA") || upperKeywords.includes("COMPRA")) {
+        operacionTipo = "VENDER";
+      } else {
+        operacionTipo = "";
+      }
+    } else {
+      operacionTipo = "";
+    }
+    return {
+      keywords,
+      addressLocality,
+      streetAddress,
+      operacionTipo
+    };
+  }
+});
+
+"use strict";
+const scrapeStep = createStep({
+  id: "scrapeStep",
+  inputSchema: z.object({
+    url: z.url()
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    data: z.any()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 1 (Scraping)");
+    console.log(`[Workflow] \u{1F310} Scrapeando URL: ${inputData.url}`);
+    await sleep(3);
+    const result = await apifyScraperTool.execute(
+      { url: inputData.url }
+    );
+    console.log(">>> FIN: PASO 1");
+    if (!("data" in result)) {
+      throw new Error("Scraping failed");
+    }
+    return {
+      success: true,
+      data: result.data || []
+    };
+  }
+});
+const extratDataFromScrapperTool = createStep({
+  id: "extratDataFromScrapperTool",
+  inputSchema: z.object({
+    data: z.any()
+  }),
+  outputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    keywords: z.string()
+  }),
+  maxRetries: 2,
+  retryDelay: 2500,
+  execute: async ({ inputData, mastra }) => {
+    try {
+      const result = await propertyDataProcessorTool.execute(
+        { rawData: inputData.data },
+        { mastra }
+      );
+      console.log(">>> DEBUG: propertyDataProcessorTool result:", JSON.stringify(result, null, 2));
+      if (!("operacionTipo" in result)) {
+        throw new Error("Validation failed in propertyDataProcessorTool");
+      }
+      console.log(">>> INICIO: PASO 2 (Formato)");
+      console.log(result);
+      console.log(">>> FIN: PASO 2");
+      return {
+        address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
+        operacionTipo: result.operacionTipo,
+        // Guaranteed by the check above
+        keywords: result.keywords || ""
+      };
+    } catch (error) {
+      if (error.message.includes("rate_limit_exceeded") || error.statusCode === 429) {
+        console.warn("\u26A0\uFE0F Rate limit detectado. Reintentando paso...");
+      }
+      throw error;
+    }
+  }
+});
+const cleanDataStep = createStep({
+  id: "cleanDataStep",
+  inputSchema: z.object({
+    keywords: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  outputSchema: z.object({
+    formattedText: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 3 (Limpieza/Formatter)");
+    const result = await realEstatePropertyFormatterTool.execute({
+      keywordsZonaProp: inputData.keywords
+    });
+    console.log(">>> DEBUG: Formatter result:", result);
+    console.log(">>> FIN: PASO 3");
+    return {
+      formattedText: result.formattedText || inputData.keywords,
+      // Fallback si falla
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const logicStep = createStep({
+  id: "logicStep",
+  inputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    formattedText: z.string()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    console.log(">>> INICIO: PASO 4 (Logic)");
+    console.log(">>> FIN: PASO 4");
+    return {
+      minimalDescription: inputData.formattedText,
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const propertyWorkflow = createWorkflow({
+  id: "property-intelligence-pipeline",
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  })
+}).then(scrapeStep).then(extratDataFromScrapperTool).then(cleanDataStep).then(logicStep).commit();
+
+"use strict";
+await storage.init();
+const realEstateAgent = await getRealEstateAgent("");
 const mastra = new Mastra({
   storage,
+  vectors: {
+    vectorStore
+  },
   agents: {
-    realEstateAgent
+    realEstateAgent,
+    realEstateCleaningAgent
+  },
+  tools: {
+    realEstatePropertyFormatterTool
   },
   workflows: {
-    nicoBookingWorkflow,
-    ingestionWorkflow
+    propertyWorkflow
+  },
+  server: {
+    port: 4111,
+    apiRoutes: [registerApiRoute("chat", {
+      method: "POST",
+      handler: async (c) => {
+        try {
+          const body = await c.req.json();
+          const {
+            message,
+            threadId,
+            userId,
+            clientData
+          } = body;
+          console.log("\n\u{1F525}\u{1F525}\u{1F525} INICIO DEL REQUEST \u{1F525}\u{1F525}\u{1F525}");
+          console.log("1. ThreadID recibido:", threadId);
+          console.log("2. ClientData CRUDA:", clientData);
+          console.log("3. \xBFTiene llaves?", clientData ? Object.keys(clientData) : "Es Null/Undefined");
+          if (!threadId) {
+            return c.json({
+              error: "ThreadID is required"
+            }, 400);
+          }
+          const currentThreadId = threadId || `chat_${userId}`;
+          const urlRegex = /(https?:\/\/[^\s]+)/g;
+          const linksEncontrados = message?.match(urlRegex);
+          let finalContextData = {};
+          finalContextData.operacionTipo = "";
+          let propertyOperationType = "";
+          try {
+            if (clientData && Object.keys(clientData).length > 0) {
+              const validResourceId = userId || "anonymous_user";
+              await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+            }
+            const dbContext = await ThreadContextService.getContext(threadId);
+            const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+            console.log("\u{1F9E0} [PERFIL MASTRA DETECTADO]:", mastraProfile);
+            console.log("\u{1F50D} [DB] Datos guardados en Base de Datos:", dbContext);
+            finalContextData = {
+              ...mastraProfile,
+              // 1. Base (Mastra)
+              ...dbContext,
+              // 2. Contexto Thread
+              ...clientData || {}
+              // 3. Override actual
+            };
+            console.log("\u{1F9E0} [MEMORIA FINAL] Esto es lo que sabr\xE1 el agente:", finalContextData);
+          } catch (err) {
+            console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
+            finalContextData = clientData || {};
+          }
+          return stream(c, async (streamInstance) => {
+            if (linksEncontrados && linksEncontrados.length > 0) {
+              const url = linksEncontrados[0].trim();
+              finalContextData.link = url;
+              if (currentThreadId) {
+                await ThreadContextService.clearThreadMessages(currentThreadId);
+              }
+              await randomSleep(1, 3);
+              await streamInstance.write(frasesRevisareLink[Math.floor(Math.random() * frasesRevisareLink.length)] + "\n\n");
+              try {
+                const workflow = mastra.getWorkflow("propertyWorkflow");
+                const run = await workflow.createRun();
+                console.log(`\u{1F680} Iniciando Workflow para: ${url}`);
+                const result = await run.start({
+                  inputData: {
+                    url
+                  }
+                });
+                if (result.status !== "success") {
+                  throw new Error(`Workflow failed: ${result.status}`);
+                }
+                const outputLogica = result.result;
+                if (outputLogica) {
+                  console.log("\u{1F4E6} Output Workflow recibido");
+                  if (outputLogica.minimalDescription) {
+                    await streamInstance.write(outputLogica.minimalDescription + "\n\n");
+                    await randomSleep(2, 4);
+                    await streamInstance.write(outputLogica.address + "\n\n");
+                  }
+                  if (outputLogica.operacionTipo) {
+                    propertyOperationType = outputLogica.operacionTipo;
+                    console.log("\u{1F680} Tipo de operaci\xF3n detectado ########## :", propertyOperationType);
+                    finalContextData.operacionTipo = outputLogica.operacionTipo;
+                    finalContextData.propertyAddress = outputLogica.address;
+                  }
+                }
+              } catch (workflowErr) {
+                console.error("\u274C Workflow error:", workflowErr);
+              }
+            }
+            try {
+              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
+              const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
+              console.log("\u{1F4DD} [PROMPT] Contexto adicional:", contextoAdicional);
+              const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
+              console.log("\u{1F6E0}\uFE0F Tools disponibles para el agente:", Object.keys(agent.tools || {}));
+              console.log("whatsapp-style: Volviendo a stream() por latencia. El estilo se manejar\xE1 via Prompt.");
+              const result = await agent.stream(message, {
+                threadId: currentThreadId,
+                resourceId: userId
+              });
+              if (result.textStream) {
+                for await (const chunk of result.textStream) {
+                  await streamInstance.write(chunk);
+                }
+              }
+            } catch (streamError) {
+              console.error("\u{1F4A5} Error en el stream del agente:", streamError);
+              await streamInstance.write("\n\n[Lo siento, tuve un problema procesando tu respuesta final.]");
+            }
+          });
+        } catch (error) {
+          console.error("\u{1F4A5} Error general en el handler:", error);
+          return c.json({
+            error: "Internal Server Error"
+          }, 500);
+        }
+      }
+    })]
   }
 });
 

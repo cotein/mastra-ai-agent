@@ -20,7 +20,7 @@ export const potentialSaleEmailTool = createTool({
     telefono_cliente: z.string(),
     email_cliente: z.string().optional(),
     direccion_propiedad: z.string(),
-    url_propiedad: z.string().url(),
+    url_propiedad: z.string().optional(),
   }),
   execute: async (input) => {
     const gmail = getGmail();
@@ -82,8 +82,13 @@ export const potentialSaleEmailTool = createTool({
 
     // IMPORTANTE: No usamos 'await' aquí si queremos que sea 100% asíncrono,
     // pero Mastra maneja las ejecuciones de tools de forma que si retornas el resultado rápido, el agente sigue.
-    Promise.all(sendPromises).catch(err => console.error("Error enviando mails de venta:", err));
-
+    try {
+        await Promise.all(sendPromises);
+    } catch (err) {
+        console.error("Error enviando mails de venta:", err);
+        throw new Error("Falló el envío del correo de venta. Revisa los logs.");
+    }
+    
     return { 
       status: 'success', 
       message: 'La notificación ha sido enviada a los responsables de la inmobiliaria.' 

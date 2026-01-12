@@ -1,9 +1,0 @@
-node_modules
-.git
-.env
-.DS_Store
-dist
-.mastra
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
