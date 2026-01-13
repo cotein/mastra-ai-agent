@@ -72,8 +72,8 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo) => {
 Faltan: ${missingFields.join(', ')}.
 
 ### ⚡ TU OBJETIVO:
-Pide **TODOS** los datos faltantes en **UNA SOLA ORACIÓN** al final de tu respuesta.
-Formato: ${obtenerFraseAleatoriaSolicitudDatos()} **${missingString}**."
+Pide amablemente los datos faltantes (${missingString}) para poder avanzar.
+Hazlo de forma conversacional y natural, integrado en tu respuesta (ej: "${obtenerFraseAleatoriaSolicitudDatos()} nombre y apellido?").
 (NO inventes datos. NO preguntes uno a uno).
     `;
   } else {

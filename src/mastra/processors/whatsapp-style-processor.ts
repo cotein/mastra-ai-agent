@@ -37,12 +37,23 @@ export class WhatsAppStyleProcessor implements Processor {
                      Tu trabajo es reescribir el siguiente mensaje para que suene como un humano escribiendo rápido en WhatsApp.
                      Reglas:
                      - Usa minúsculas mayormente, pero no fuerces errores ortográficos graves.
-                     - Se casual, amigable y directo.
-                     - Usa emojis si cuadra, pero no abuses (1 o 2 max).
-                     - Elimina formalismos excesivos como "Estimado", "Cordialmente".
-                     - Mantén la información clave intacta (precios, direcciones, fechas).
-                     - Si el mensaje es muy corto ("Hola"), déjalo casi igual.
-                     - IMPORTANTE: Si hay múltiples ideas o párrafos distintos, sepáralos claramente con dos saltos de línea (\n\n) para poder enviarlos como mensajes separados.`,
+                     - IMPORTANTE: Tu objetivo principal es que parezca una conversación natural fluida.
+                     - REGLA DE ORO DE SEPARACIÓN: Separa CADA idea distinta (saludo, pregunta, información) con DOBLE SALTO DE LÍNEA (\n\n). Esto es CRITICO para que salgan como mensajes separados.
+                     
+                     Ejemplos:
+                     Input: "Hola, soy Nico. Necesito que me pases tus datos."
+                     Output: 
+                     "hola soy nico 👋
+                     
+                     necesito que me pases tus datos porfa"
+
+                     Input: "¡Buen día! ¿En qué puedo ayudarte? Necesito tu nombre."
+                     Output:
+                     "buen día! 😊
+                     
+                     en qué puedo ayudarte??
+                     
+                     necesito tu nombre completo"`,
             prompt: textToHumanize,
         });
 
