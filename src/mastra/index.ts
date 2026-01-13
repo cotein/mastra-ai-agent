@@ -225,30 +225,40 @@ async function sendToManychat(subscriberId: string, text: string) {
     // HARDCODED API KEY (Per user request for PROD hotfix)
     const apiKey = "3448431:145f772cd4441c32e7a20cfc6d4868f6"; 
     
-    /*
-    const apiKey = process.env.MANYCHAT_API_KEY;
-    if (!apiKey) {
-        console.error("❌ MANYCHAT_API_KEY is missing in .env");
-        return;
-    }
-    */
+    const headers = {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+    };
 
     try {
-        console.log(`📤 Push a Manychat (${subscriberId})...`);
-        const res = await axios.post('https://api.manychat.com/fb/sending/sendContent', {
-            subscriber_id: subscriberId,
-            data: {
-                version: 'v2',
-                content: {
-                    messages: [{ type: 'text', text: text }]
-                }
-            }
-        }, { headers: { Authorization: `Bearer ${apiKey}` } });
+        console.log(`1️⃣ [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
         
-        console.log("✅ Manychat Push Resultado:", res.data); // <--- VER ESTO
+        // 1. Set Custom Fields
+        const setFieldRes = await axios.post('https://api.manychat.com/fb/subscriber/setCustomFields', {
+            subscriber_id: Number(subscriberId), // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
+            fields: [
+                {
+                    field_name: "response1",
+                    field_value: text
+                }
+            ]
+        }, { headers });
+        
+        console.log("✅ Custom Field Set:", setFieldRes.data);
+
+
+        console.log(`2️⃣ [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
+        
+        // 2. Send Flow
+        const sendFlowRes = await axios.post('https://api.manychat.com/fb/sending/sendFlow', {
+            subscriber_id: Number(subscriberId),
+            flow_ns: "content20250919131239_298410"
+        }, { headers });
+
+        console.log("✅ Flow Sent:", sendFlowRes.data);
 
     } catch (err: any) {
         // Loguear TODO el error para ver qué dice Manychat
-        console.error("❌ Error sending to Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
+        console.error("❌ Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
     }
 }
