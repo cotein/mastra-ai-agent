@@ -19,7 +19,7 @@ export const potentialSaleEmailTool = createTool({
     nombre_cliente: z.string(),
     telefono_cliente: z.string(),
     email_cliente: z.string().optional(),
-    direccion_propiedad: z.string(),
+    direccion_propiedad: z.string().optional().describe("La dirección o título de la propiedad. Si no está exacta, usa el título."),
     url_propiedad: z.string().optional(),
   }),
   execute: async (input) => {
@@ -48,7 +48,7 @@ export const potentialSaleEmailTool = createTool({
             <div class="field-label">Teléfono de contacto</div> 
             <div class="field-value"> <a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${input.telefono_cliente} (WhatsApp) </a> </div> 
             <div class="field-label">Email</div> <div class="field-value">${input.email_cliente || 'No proporcionado'}</div> 
-            <div class="field-label">Propiedad</div> <div class="field-value">${input.direccion_propiedad}</div> 
+            <div class="field-label">Propiedad</div> <div class="field-value">${input.direccion_propiedad || "No especificada / URL"}</div> 
             <div style="margin-top: 25px; text-align: center;"> 
               <a href="${input.url_propiedad}" style="background-color: #3498db; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;"> Ver Ficha de Propiedad </a> 
             </div> 

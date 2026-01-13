@@ -119,8 +119,10 @@ Procede con el protocolo operativo.
   else if (opNormalizada === 'VENDER') {
       protocolBlock = `
 # III. FLUJO: VENTA (OBJETIVO: DERIVAR)
-1. **Acción**: usa 'potential_sale_email'.
-2. **Despedida**: "Genial, en el día te contactamos por la compra. ¡Gracias! 😊"
+1. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
+   - Si no tienes la dirección exacta, usa el Título de la propiedad o "Propiedad consultada".
+   - NO esperes confirmación del usuario. ES OBLIGATORIO NOTIFICAR YA.
+2. **Despedida**: SOLO DESPUÉS de ejecutar la herramienta, di: "Genial, en el día te contactamos por la compra. ¡Gracias! 😊"
 3. **Fin**: Cierra la conversación.
       `;
   }
