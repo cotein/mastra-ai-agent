@@ -18,6 +18,7 @@ import { dynamicInstructions } from '../prompts/fausti-prompts';
 import { ClientData, OperacionTipo } from '../types';
 // Workflows
 import { propertyWorkflow } from "./workflows/scrapper-workflow";
+import { sleep } from '../helpers/sleep';
 
 /**
  * INICIALIZACIÓN DE STORAGE
@@ -249,6 +250,7 @@ async function sendToManychat(subscriberId: string, text: string) {
 
         console.log(`2️⃣ [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
         
+        await sleep(2)
         // 2. Send Flow
         const sendFlowRes = await axios.post('https://api.manychat.com/fb/sending/sendFlow', {
             subscriber_id: Number(subscriberId),
