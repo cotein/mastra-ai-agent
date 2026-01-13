@@ -222,11 +222,16 @@ export const mastra = new Mastra({
 
 // Helper para Manychat Push
 async function sendToManychat(subscriberId: string, text: string) {
+    // HARDCODED API KEY (Per user request for PROD hotfix)
+    const apiKey = "3448431:145f772cd4441c32e7a20cfc6d4868f6"; 
+    
+    /*
     const apiKey = process.env.MANYCHAT_API_KEY;
     if (!apiKey) {
         console.error("❌ MANYCHAT_API_KEY is missing in .env");
         return;
     }
+    */
 
     try {
         console.log(`📤 Push a Manychat (${subscriberId})...`);
