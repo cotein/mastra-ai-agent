@@ -81,11 +81,11 @@ export const calendarManagerTools = {
             location: input.location,
             description: input.description,
             start: { 
-              dateTime: start, 
+              dateTime: start.replace(/Z$/, ''), 
               timeZone: 'America/Argentina/Buenos_Aires' 
             },
             end: { 
-              dateTime: end, 
+              dateTime: end.replace(/Z$/, ''), 
               timeZone: 'America/Argentina/Buenos_Aires' 
             },
           },
@@ -195,8 +195,8 @@ export const calendarManagerTools = {
       
       if (start && end) {
          const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
-         startBody = { dateTime: sanitizedStart, timeZone: 'America/Argentina/Buenos_Aires' };
-         endBody = { dateTime: sanitizedEnd, timeZone: 'America/Argentina/Buenos_Aires' };
+         startBody = { dateTime: sanitizedStart.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
+         endBody = { dateTime: sanitizedEnd.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
       }
 
       const requestBody: any = {
