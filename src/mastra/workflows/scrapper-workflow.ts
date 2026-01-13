@@ -15,13 +15,10 @@ const scrapeStep = createStep({
     data: z.any(),
   }),
   execute: async ({ inputData }) => {
-    console.log('>>> INICIO: PASO 1 (Scraping)');
-    console.log(`[Workflow] 🌐 Scrapeando URL: ${inputData.url}`);
-    await sleep(3);
+    await sleep(1);
     const result = await apifyScraperTool.execute(
       { url: inputData.url },
     );
-    console.log('>>> FIN: PASO 1');
 
     if (!("data" in result)) {
       throw new Error("Scraping failed");
@@ -54,15 +51,12 @@ const extratDataFromScrapperTool = createStep({
         { mastra }
       );
       
-      console.log('>>> DEBUG: propertyDataProcessorTool result:', JSON.stringify(result, null, 2));
 
       if (!("operacionTipo" in result)) {
         throw new Error("Validation failed in propertyDataProcessorTool");
       }
 
       console.log('>>> INICIO: PASO 2 (Formato)');
-      console.log(result);
-      console.log('>>> FIN: PASO 2');
       return {
         address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
         operacionTipo: result.operacionTipo, // Guaranteed by the check above
@@ -92,15 +86,12 @@ const cleanDataStep = createStep({
     address: z.string(),
   }),
   execute: async ({ inputData }) => {
-    console.log('>>> INICIO: PASO 3 (Limpieza/Formatter)');
     
     // Llamamos a la herramienta de formateo
     const result = await realEstatePropertyFormatterTool.execute({
         keywordsZonaProp: inputData.keywords
     });
 
-    console.log('>>> DEBUG: Formatter result:', result);
-    console.log('>>> FIN: PASO 3');
 
     return {
       formattedText: result.formattedText || inputData.keywords, // Fallback si falla
@@ -124,9 +115,6 @@ const logicStep = createStep({
     address: z.string(),
   }),
   execute: async ({ inputData }) => {
-    console.log('>>> INICIO: PASO 4 (Logic)');
-    
-    console.log('>>> FIN: PASO 4');
     return {
       minimalDescription: inputData.formattedText,
       operacionTipo: inputData.operacionTipo,

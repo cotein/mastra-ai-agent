@@ -3,6 +3,7 @@ import { Memory } from "@mastra/memory";
 import { openai } from "@ai-sdk/openai"; 
 import { storage, vectorStore } from './../storage'; 
 import { TokenLimiter, ToolCallFilter, PromptInjectionDetector, ModerationProcessor, SystemPromptScrubber } from "@mastra/core/processors";
+import { WhatsAppStyleProcessor } from "../processors/whatsapp-style-processor";
 import { OperacionTipo } from "./../../types";
 // Herramientas
 import { calendarManagerTools } from '../tools/google-calendar';
@@ -90,6 +91,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
          strategy: 'redact',
          redactionMethod: 'placeholder',
        }),
+       new WhatsAppStyleProcessor(),
     ],
   });
 };

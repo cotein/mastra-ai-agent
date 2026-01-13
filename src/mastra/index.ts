@@ -49,8 +49,6 @@ export const mastra = new Mastra({
             // --- 🛑 ZONA DE DEBUGGING 🛑 ---
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
             console.log("1. ThreadID recibido:", threadId);
-            console.log("2. ClientData CRUDA:", clientData);
-            console.log("3. ¿Tiene llaves?", clientData ? Object.keys(clientData) : "Es Null/Undefined");
             // ------------------------------
 
             // Relaxed check: Manychat might not send threadId
@@ -82,17 +80,14 @@ export const mastra = new Mastra({
               // Usamos una variable temporal 'dbContext' para no confundir scopes
               const dbContext = await ThreadContextService.getContext(threadId);
 
-                const mastraProfile = await ThreadContextService.getResourceProfile(userId);
-                  console.log("🧠 [PERFIL MASTRA DETECTADO]:", mastraProfile);
+              const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+              console.log("🧠 [PERFIL MASTRA DETECTADO]:", mastraProfile);
 
-              console.log("🔍 [DB] Datos guardados en Base de Datos:", dbContext); // <--- AGREGA ESTO
-              // C. Mezclar: Prioridad a lo que dice la DB, fallback a clientData del request
               finalContextData = { 
                   ...mastraProfile, // 1. Base (Mastra)
                   ...dbContext,     // 2. Contexto Thread
                   ...(clientData || {}) // 3. Override actual
               } as ClientData;
-              console.log("🧠 [MEMORIA FINAL] Esto es lo que sabrá el agente:", finalContextData); // <--- ESTO ES LO QUE BUSCAS
 
             } catch (err) {
               console.error("⚠️ Error gestionando contexto en DB (usando fallback):", err);
@@ -108,30 +103,26 @@ export const mastra = new Mastra({
             console.log(`⏱️ [${new Date().toISOString()}] Inicio Request Handler`);
 
             // 1. RESPUESTA INMEDIATA (ACK) para evitar Timeout de Manychat
-            // Solo respondemos inmediatamente si es Manychat (tiene userId)
+            let ackResponse = undefined;
             if (userId && body.custom_fields) {
                console.log("⚡ Enviando ACK inmediato a Manychat para evitar timeout...");
-               // Enviamos respuesta HTTP 200 al instante
-               c.json({
+               ackResponse = c.json({
                    response_text: "🧐 Dame un momento, estoy analizando la información...",
                    status: "processing"
                });
-               // IMPORTANTE: NO hacemos return todavía si queremos que la función siga ejecutando en background.
-               // En Hono/Express, c.json() suele enviar la respuesta. asegurémosnos de no bloquear.
-               // Nota: En algunos frameworks serverless, el proceso muere al responder. En Node/Docker persistente (tu caso) sigue vivo.
             }
 
-            // 2. PROCESO EN BACKGROUND (Promise sin await bloquante al request HTTP inicial)
+            // 2. PROCESO EN BACKGROUND (Fire & Forget)
+            // No usamos await aquí para que no bloquee el return de abajo.
             (async () => {
                 try {
                     console.log("🏃‍♂️ Iniciando proceso en background...");
 
-                    // --- BLOQUE DE SCRAPING / WORKFLOW (Síncrono/Background) ---
+                    // --- BLOQUE DE SCRAPING / WORKFLOW ---
                     if (linksEncontrados && linksEncontrados.length > 0) {
                       const url = linksEncontrados[0].trim();
                       finalContextData.link = url;
 
-                      // Limpieza de contexto inmediata al detectar nueva propiedad
                       if (currentThreadId) {
                           await ThreadContextService.clearThreadMessages(currentThreadId);
                       }
@@ -149,7 +140,6 @@ export const mastra = new Mastra({
                             const outputLogica = result.result;
                             console.log("📦 Output Workflow recibido");
 
-                            // CAPTURAMOS el tipo de operación
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
                                 console.log("🚀 Tipo de operación detectado:", propertyOperationType);
@@ -186,24 +176,30 @@ export const mastra = new Mastra({
                         await sendToManychat(userId, response.text);
                         console.log("📤 Mensaje enviado proactivamente a Manychat.");
                     } else {
-                        // Si era un request normal (curl/postman) y ya respondimos ACK, no verán esto en la HTTP response.
-                        // Solo queda en log.
                         console.log("ℹ️ Respuesta generada (modo background), pero cliente no es Manychat/Async.");
                     }
 
                 } catch (bgError: any) {
                     console.error("💥 Error en proceso background:", bgError);
-                    // Opcional: Avisar a Manychat del error
                     if (userId && body.custom_fields) {
                          await sendToManychat(userId, "Lo siento, tuve un error técnico analizando esa propiedad.");
                     }
                 }
-            })(); // IIFE ejecutada inmediatamente
+            })(); 
 
-            // Si ya enviamos c.json() arriba, Hono/Mastra podría haber cerrado el stream.
-            // Para asegurar compatibilidad con la estructura devuelta, retornamos algo simple.
-            // Si el c.json() arriba ya envió headers, esto podría ser redundante pero seguro.
-            return; 
+            // RETORNAR LA RESPUESTA (IMPORTANTE)
+            // Si creamos un ACK, lo devolvemos. Si no, devolvemos un JSON genérico 'processing'
+            // (aunque en uso normal sin Manychat quizás esperarías la respuesta full, 
+            //  pero para unificar arquitectura async, devolvemos esto siempre o esperamos si no es Manychat).
+            
+            // Si NO es Manychat, idealmente deberíamos esperar el resultado (behavior original), 
+            // pero para arreglar Manychat YA, priorizamos devolver ackResponse.
+            if (ackResponse) {
+                return ackResponse;
+            }
+            
+            // Fallback para tools/pruebas simples que no mandan custom_fields:
+            return c.json({ status: "started_background_job" }); 
 
             /*
             // OLD SYNC BLOCK REMOVED
