@@ -112,7 +112,7 @@ Procede con el protocolo operativo.
 2. **Acción**: Pregunta DIRECTO: **${obtenerFraseAleatoriaDisponibilidad()}**
    - Usa 'get_available_slots'.
    - NO asumas horarios.
-3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event' usando SIEMPRE el calendarId: 'c.vogzan@gmail.com'.
 4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
       `;
   } 

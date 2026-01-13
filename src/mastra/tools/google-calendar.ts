@@ -57,6 +57,7 @@ export const calendarManagerTools = {
     id: 'create_calendar_event',
     description: 'Registra citas de visitas inmobiliarias.',
     inputSchema: z.object({
+      calendarId: z.string().optional().describe('ID del calendario donde agendar. Si no se provee, usa el calendario principal ("primary").'),
       title: z.string().optional().describe('Título descriptivo del evento (ej: "Visita propiedad - cliente: ...")'),
       summary: z.string().optional().describe('Resumen corto (ej: "Visita propiedad - [Direccion]")'),
       location: z.string().describe('Dirección completa de la propiedad'),
@@ -66,6 +67,7 @@ export const calendarManagerTools = {
     }),
     execute: async (input) => {
       const calendar = getGoogleCalendar();
+      const calendarId = input.calendarId || 'primary';
 
       // Aplicamos la limpieza de fechas antes de enviar a Google
       const { start, end } = getSanitizedDates(input.start, input.end);
@@ -75,7 +77,7 @@ export const calendarManagerTools = {
 
       try {
         const response = await calendar.events.insert({
-          calendarId: 'primary',
+          calendarId: calendarId,
           requestBody: {
             summary: eventSummary,
             location: input.location,
@@ -112,10 +114,12 @@ export const calendarManagerTools = {
     id: 'list_calendar_events',
     description: 'Lista los próximos eventos del calendario para verificar disponibilidad.',
     inputSchema: z.object({
+      calendarId: z.string().optional().describe('ID del calendario a consultar. (Default: "primary")'),
       daysAhead: z.number().default(15).describe('Número de días a futuro para consultar'),
     }),
-    execute: async ({ daysAhead }) => {
+    execute: async ({ daysAhead, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || 'primary';
       
       // timeMin es SIEMPRE el momento exacto de la ejecución
       const timeMin = new Date().toISOString();
@@ -123,7 +127,7 @@ export const calendarManagerTools = {
 
       try {
         const response = await calendar.events.list({
-          calendarId: 'primary',
+          calendarId,
           timeMin,
           timeMax,
           singleEvents: true,
@@ -146,12 +150,14 @@ export const calendarManagerTools = {
     description: 'Obtiene los detalles de un evento específico de Google Calendar usando su ID.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a obtener'),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
     }),
-    execute: async ({ eventId }) => {
+    execute: async ({ eventId, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || 'primary';
       try {
         const response = await calendar.events.get({
-          calendarId: 'primary',
+          calendarId,
           eventId: eventId,
         });
         return response.data;
@@ -170,6 +176,7 @@ export const calendarManagerTools = {
     description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a modificar'),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
       summary: z.string().optional().describe('Nuevo título del evento'),
       description: z.string().optional().describe('Nueva descripción'),
       location: z.string().optional().describe('Nueva ubicación'),
@@ -177,13 +184,14 @@ export const calendarManagerTools = {
       end: z.string().optional().describe('Nueva fecha de fin (ISO)'),
       userEmail: z.string().optional().describe('Email del usuario para enviar notificaciones de actualización (opcional)'),
     }),
-    execute: async ({ eventId, summary, description, location, start, end, userEmail }) => {
+    execute: async ({ eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || 'primary';
 
       // Recuperar evento actual para no perder datos que no se actualizan
       let currentEvent;
       try {
-        const getRes = await calendar.events.get({ calendarId: 'primary', eventId });
+        const getRes = await calendar.events.get({ calendarId, eventId });
         currentEvent = getRes.data;
       } catch (e: any) {
         return { success: false, error: "Evento no encontrado: " + e.message };
@@ -210,7 +218,7 @@ export const calendarManagerTools = {
 
       try {
         const response = await calendar.events.update({
-          calendarId: 'primary',
+          calendarId,
           eventId: eventId,
           requestBody: requestBody,
           sendUpdates: userEmail ? 'all' : 'none', // Enviar correo si se provee email
@@ -238,13 +246,15 @@ export const calendarManagerTools = {
     description: 'Elimina (cancela) un evento de Google Calendar permanentemente.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a eliminar'),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
       notifyStart: z.boolean().optional().describe('No utilizado, pero mantenido por compatibilidad'),
     }),
-    execute: async ({ eventId }) => {
+    execute: async ({ eventId, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || 'primary';
       try {
         await calendar.events.delete({
-          calendarId: 'primary',
+          calendarId,
           eventId: eventId,
         });
         return { success: true, message: "Evento eliminado correctamente." };
