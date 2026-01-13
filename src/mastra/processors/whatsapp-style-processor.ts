@@ -41,7 +41,8 @@ export class WhatsAppStyleProcessor implements Processor {
                      - Usa emojis si cuadra, pero no abuses (1 o 2 max).
                      - Elimina formalismos excesivos como "Estimado", "Cordialmente".
                      - Mantén la información clave intacta (precios, direcciones, fechas).
-                     - Si el mensaje es muy corto ("Hola"), déjalo casi igual.`,
+                     - Si el mensaje es muy corto ("Hola"), déjalo casi igual.
+                     - IMPORTANTE: Si hay múltiples ideas o párrafos distintos, sepáralos claramente con dos saltos de línea (\n\n) para poder enviarlos como mensajes separados.`,
             prompt: textToHumanize,
         });
 

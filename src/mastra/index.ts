@@ -108,7 +108,7 @@ export const mastra = new Mastra({
             if (userId && body.custom_fields) {
                console.log("⚡ Enviando ACK inmediato a Manychat para evitar timeout...");
                ackResponse = c.json({
-                   response_text: "🧐 Dame un momento, estoy analizando la información...",
+                   response_text: "",
                    status: "processing"
                });
             }
@@ -179,8 +179,24 @@ export const mastra = new Mastra({
 
                     if (userId && body.custom_fields) {
                         console.log("👉 Intentando llamar a sendToManychat...");
-                        await sendToManychat(userId, response.text);
-                        console.log("📤 Mensaje enviado proactivamente a Manychat.");
+                        
+                        // SPLIT Y ENVIO SECUENCIAL
+                        // Separamos por \n\n (o \n repetidos/espaciados)
+                        const parts = response.text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+                        
+                        console.log(`📦 Se detectaron ${parts.length} bloques de mensaje.`);
+
+                        for (const part of parts) {
+                            await sendToManychat(userId, part);
+                            // Pequeño delay aleatorio entre bloques (2-10s) para simular escritura humana
+                            if (parts.length > 1) {
+                                const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
+                                console.log(`⏳ Esperando ${randomDelay}s antes del siguiente mensaje...`);
+                                await sleep(randomDelay); 
+                            }
+                        }
+
+                        console.log("📤 Todos los mensajes han sido enviados a Manychat.");
                     } else {
                         console.log("ℹ️ Respuesta generada (modo background), pero cliente no es Manychat/Async.");
                     }
