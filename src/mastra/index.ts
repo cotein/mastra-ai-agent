@@ -28,6 +28,9 @@ await storage.init();
 // Instancia base del agente para el sistema Mastra (registro interno)
 const realEstateAgent = await getRealEstateAgent('');
 
+// Cache simple para deduplicar requests (TTL 15s)
+const activeProcessing = new Set<string>();
+
 export const mastra = new Mastra({
   storage,
   vectors: { vectorStore },
@@ -61,6 +64,29 @@ export const mastra = new Mastra({
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             const linksEncontrados = message?.match(urlRegex);
 
+            // 0. DEDUPLICACIÓN (Evitar re-procesar mismo mensaje si Manychat reintenta)
+            // Creamos un hash simple del request: ID + Mensaje
+            const requestHash = `${userId || 'anon'}_${message?.substring(0, 50)}`; // Usamos primeros 50 chars para hash
+            
+            // Variable global para tracking (definida fuera del handler, simulada aquí por scope del módulo)
+            // NOTA: Para que persista entre llamadas, 'activeProcessing' debe estar FUERA de 'registerApiRoute'
+            // Pero como no puedo editar fuera de este bloque fácilmente sin contexto, asumo que la definiré arriba.
+            // ... Espera, no puedo definirla arriba con solo replace de este bloque.
+            // Haremos un hack: usaremos una propiedad en el objeto global 'globalThis' o similar si fuera necesario, 
+            // pero mejor defino 'activeProcessing' en el ámbito del módulo en un paso separado o asumo que está.
+            // MEJOR ESTRATEGIA: Usaré una variable estática dentro del handler si pudiera, o mejor, editaré el archivo para agregar la variable arriba.
+            // ...
+            // Ok, dado las limitaciones de replace_file, haré un replace más grande que incluya la definición de la variable.
+            
+            if (activeProcessing.has(requestHash)) {
+                 console.log(`⚠️ Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
+                 return c.json({ status: "ignored_duplicate" }); 
+            }
+            
+            // Marcamos como activo con un TTL de seguridad (ej. 15 segs)
+            activeProcessing.add(requestHash);
+            setTimeout(() => activeProcessing.delete(requestHash), 15000); // Autolimpieza por si acaso
+
             // =================================================================================
             // 1. RESPUESTA INMEDIATA (ACK) - CRÍTICO PARA EVITAR RETRIES DE MANYCHAT
             // =================================================================================
@@ -82,6 +108,8 @@ export const mastra = new Mastra({
                     console.log("🏃‍♂️ Iniciando proceso en background...");
 
                     // A. GESTIÓN DE CONTEXTO (Movida al background)
+                    // ... (resto del código igual) ...
+                    
                     // Definimos una variable única para acumular datos
                     let finalContextData: ClientData = {};
                     finalContextData.operacionTipo = '';
@@ -187,6 +215,11 @@ export const mastra = new Mastra({
                     if (userId && body.custom_fields) {
                          await sendToManychat(userId, "Lo siento, tuve un error técnico analizando esa información.");
                     }
+                } finally {
+                    // Limpiamos el hash para permitir nuevos mensajes en el futuro
+                    // Pero dejamos un delay extra para asegurar que Manychat no reintente inmediatemente
+                    // activeProcessing.delete(requestHash); // Ya lo hace el setTimeout, pero si terminó antes...
+                    // Mejor confiamos en el setTimeout para el de-bounce de retries.
                 }
             })(); // Fin IIFE
 
