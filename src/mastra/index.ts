@@ -229,7 +229,7 @@ async function sendToManychat(subscriberId: string, text: string) {
 
     try {
         console.log(`📤 Push a Manychat (${subscriberId})...`);
-        await axios.post('https://api.manychat.com/fb/subscriber/sendContent', {
+        await axios.post('https://api.manychat.com/fb/sending/sendContent', {
             subscriber_id: subscriberId,
             data: {
                 version: 'v2',
