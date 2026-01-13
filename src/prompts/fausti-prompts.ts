@@ -55,6 +55,25 @@ function getTemporalContext() {
 }
 
 export const dynamicInstructions = (datos: ClientData, op: OperacionTipo) => {
+  // 1. Detección de Hora Argentina
+  const ahora = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    hour: 'numeric',
+    hour12: false
+  }).format(new Date());
+
+  const hora = parseInt(ahora);
+  
+  let momentoDia = "¡Hola!";
+  if (hora >= 5 && hora < 14) momentoDia = "¡Buen día!";
+  else if (hora >= 14 && hora < 20) momentoDia = "¡Buenas tardes!";
+  else momentoDia = "¡Buenas noches!";
+
+  // 2. Construcción del Saludo Dinámico
+  const saludoInicial = datos.nombre 
+    ? `${momentoDia} ${datos.nombre}, qué bueno saludarte de nuevo. Nico por acá 👋`
+    : `${momentoDia} ¿Cómo va? Nico por acá, de Fausti Propiedades 👋`;
+
   const opNormalizada = op ? op.toUpperCase() : 'INDEFINIDO';
   const missingFields = auditMissingFields(datos);
   
@@ -108,6 +127,9 @@ Procede con el protocolo operativo.
 
   return `
   ${CORE_IDENTITY}
+
+  # SALUDO INICIAL SUGERIDO
+  Usa este saludo para comenzar la conversación: "${saludoInicial}"
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || 'No registrado'}
