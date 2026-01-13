@@ -46,6 +46,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
           - **Budget Max**:
           - **Preferred Zone**:
           - **Property Type Interest**: (Casa/Depto/PH)
+          - **Consulted Properties History**: (List of URLs or addresses recently discussed or scraped)
           `,
       },
       generateTitle: true,
