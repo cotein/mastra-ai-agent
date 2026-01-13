@@ -225,7 +225,7 @@ async function sendToManychat(subscriberId: string, text: string) {
 
     try {
         console.log(`📤 Push a Manychat (${subscriberId})...`);
-        await axios.post('https://api.manychat.com/fb/sending/sendContent', {
+        const res = await axios.post('https://api.manychat.com/fb/sending/sendContent', {
             subscriber_id: subscriberId,
             data: {
                 version: 'v2',
@@ -235,7 +235,10 @@ async function sendToManychat(subscriberId: string, text: string) {
             }
         }, { headers: { Authorization: `Bearer ${apiKey}` } });
         
+        console.log("✅ Manychat Push Resultado:", res.data); // <--- VER ESTO
+
     } catch (err: any) {
-        console.error("❌ Error sending to Manychat:", err.response?.data || err.message);
+        // Loguear TODO el error para ver qué dice Manychat
+        console.error("❌ Error sending to Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
     }
 }
