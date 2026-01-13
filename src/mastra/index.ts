@@ -61,77 +61,67 @@ export const mastra = new Mastra({
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             const linksEncontrados = message?.match(urlRegex);
 
-            // 1. GESTIÓN DE CONTEXTO (MEMORIA)
-            // Definimos una variable única para acumular datos
-            let finalContextData: ClientData = {};
-            finalContextData.operacionTipo = '';
-            let propertyOperationType: OperacionTipo  = '';
-
-            try {
-              // A. Actualizar DB si viene info nueva del cliente
-              if (clientData && Object.keys(clientData).length > 0) {
-                  // CAMBIO AQUI: Le pasamos 'userId' como segundo parámetro
-                  // Asegúrate de que 'userId' no sea undefined. Si lo es, usa un default.
-                  const validResourceId = userId || "anonymous_user"; 
-                  
-                  await ThreadContextService.updateContext(threadId, validResourceId, clientData);
-              }
-
-              // B. Leer la verdad absoluta de la DB
-              // Usamos una variable temporal 'dbContext' para no confundir scopes
-              const dbContext = await ThreadContextService.getContext(threadId);
-
-              const mastraProfile = await ThreadContextService.getResourceProfile(userId);
-              console.log("🧠 [PERFIL MASTRA DETECTADO]:", mastraProfile);
-
-              finalContextData = { 
-                  ...mastraProfile, // 1. Base (Mastra)
-                  ...dbContext,     // 2. Contexto Thread
-                  ...(clientData || {}) // 3. Override actual
-              } as ClientData;
-
-            } catch (err) {
-              console.error("⚠️ Error gestionando contexto en DB (usando fallback):", err);
-              finalContextData = clientData || {} as ClientData; 
-            }
-
             // =================================================================================
-            // MODO SINCRONO (Generate) - Habilitado para WhatsAppStyleProcessor
+            // 1. RESPUESTA INMEDIATA (ACK) - CRÍTICO PARA EVITAR RETRIES DE MANYCHAT
             // =================================================================================
-            // =================================================================================
-            // MODO ASÍNCRONO (Ack & Push) - Manychat
-            // =================================================================================
-            console.log(`⏱️ [${new Date().toISOString()}] Inicio Request Handler`);
-
-            // 1. RESPUESTA INMEDIATA (ACK) para evitar Timeout de Manychat
+            // Enviamos el ACK *antes* de cualquier operación de base de datos o lógica pesada.
             let ackResponse = undefined;
             if (userId && body.custom_fields) {
-               console.log("⚡ Enviando ACK inmediato a Manychat para evitar timeout...");
+               console.log("⚡ Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
                ackResponse = c.json({
-                   response_text: "",
+                   response_text: "", // Texto vacío para que Manychat no muestre nada y espere el Push
                    status: "processing"
                });
             }
 
+            // =================================================================================
             // 2. PROCESO EN BACKGROUND (Fire & Forget)
-            // No usamos await aquí para que no bloquee el return de abajo.
+            // =================================================================================
             (async () => {
                 try {
                     console.log("🏃‍♂️ Iniciando proceso en background...");
 
-                    // --- BLOQUE DE SCRAPING / WORKFLOW ---
+                    // A. GESTIÓN DE CONTEXTO (Movida al background)
+                    // Definimos una variable única para acumular datos
+                    let finalContextData: ClientData = {};
+                    finalContextData.operacionTipo = '';
+                    let propertyOperationType: OperacionTipo  = '';
+
+                    try {
+                      // Actualizar DB si viene info nueva del cliente
+                      if (clientData && Object.keys(clientData).length > 0) {
+                          const validResourceId = userId || "anonymous_user"; 
+                          await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+                      }
+
+                      // Leer la verdad absoluta de la DB
+                      const dbContext = await ThreadContextService.getContext(threadId);
+                      const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+                      console.log("🧠 [PERFIL MASTRA DETECTADO]:", mastraProfile);
+
+                      finalContextData = { 
+                          ...mastraProfile, // 1. Base (Mastra)
+                          ...dbContext,     // 2. Contexto Thread
+                          ...(clientData || {}) // 3. Override actual
+                      } as ClientData;
+
+                    } catch (err) {
+                      console.error("⚠️ Error gestionando contexto en DB (usando fallback):", err);
+                      // Fallback: intentar seguir con lo que tenemos
+                      finalContextData = clientData || {} as ClientData; 
+                    }
+
+                    // B. WORKFLOW / LOGICA DE NEGOCIO
                     if (linksEncontrados && linksEncontrados.length > 0) {
                       const url = linksEncontrados[0].trim();
                       finalContextData.link = url;
-
                       if (currentThreadId) {
                           await ThreadContextService.clearThreadMessages(currentThreadId);
                       }
-
+                      
                       try {
                         const workflow = mastra.getWorkflow('propertyWorkflow');
                         const run = await workflow.createRun();
-                        
                         console.log(`🚀 Iniciando Workflow para: ${url}`);
                         const result = await run.start({ inputData: { url } });
 
@@ -140,7 +130,6 @@ export const mastra = new Mastra({
                         } else if (result.result) {
                             const outputLogica = result.result;
                             console.log("📦 Output Workflow recibido");
-
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
                                 console.log("🚀 Tipo de operación detectado:", propertyOperationType);
@@ -153,14 +142,13 @@ export const mastra = new Mastra({
                       }
                     }
 
-                    // 3. GENERACIÓN DEL PROMPT FINAL
+                    // C. GENERACIÓN DEL PROMPT FINAL
                     console.log("📝 [PROMPT] Generando instrucciones con:", finalContextData);
                     const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase() as OperacionTipo);
-                    console.log("📝 [PROMPT] Contexto adicional:", contextoAdicional);
-
-                    // 4. CREACIÓN DINÁMICA DEL AGENTE
+                    
+                    // D. CREACIÓN DINÁMICA DEL AGENTE
                     const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
-
+                    
                     // @ts-ignore
                     console.log("🛠️ Tools disponibles para el agente:", Object.keys((agent as any).tools || {}));
                     console.log("🤖 Generando respuesta final (Background)...");
@@ -172,30 +160,23 @@ export const mastra = new Mastra({
 
                     console.log("✅ Respuesta final generada:", response.text);
 
-                    // 5. ENVIAR A MANYCHAT (PUSH)
-                    // DEBUG: Verificamos valores antes de enviar
-                    const hasApiKey = !!process.env.MANYCHAT_API_KEY;
-                    console.log(`🧐 [DEBUG PRE-PUSH] userId: ${userId}, hasCustomFields: ${!!body.custom_fields}, hasApiKey: ${hasApiKey}`);
-
+                    // E. ENVIAR A MANYCHAT (PUSH)
                     if (userId && body.custom_fields) {
                         console.log("👉 Intentando llamar a sendToManychat...");
                         
                         // SPLIT Y ENVIO SECUENCIAL
-                        // Separamos por \n\n (o \n repetidos/espaciados)
                         const parts = response.text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-                        
                         console.log(`📦 Se detectaron ${parts.length} bloques de mensaje.`);
 
                         for (const part of parts) {
                             await sendToManychat(userId, part);
-                            // Pequeño delay aleatorio entre bloques (2-10s) para simular escritura humana
+                            // Pequeño delay aleatorio entre bloques (2-10s)
                             if (parts.length > 1) {
                                 const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
                                 console.log(`⏳ Esperando ${randomDelay}s antes del siguiente mensaje...`);
                                 await sleep(randomDelay); 
                             }
                         }
-
                         console.log("📤 Todos los mensajes han sido enviados a Manychat.");
                     } else {
                         console.log("ℹ️ Respuesta generada (modo background), pero cliente no es Manychat/Async.");
@@ -204,10 +185,18 @@ export const mastra = new Mastra({
                 } catch (bgError: any) {
                     console.error("💥 Error en proceso background:", bgError);
                     if (userId && body.custom_fields) {
-                         await sendToManychat(userId, "Lo siento, tuve un error técnico analizando esa propiedad.");
+                         await sendToManychat(userId, "Lo siento, tuve un error técnico analizando esa información.");
                     }
                 }
-            })(); 
+            })(); // Fin IIFE
+
+            // RETORNO INMEDIATO
+            if (ackResponse) {
+                return ackResponse;
+            }
+            
+            return c.json({ status: "started_background_job" }); 
+ 
 
             // RETORNAR LA RESPUESTA (IMPORTANTE)
             // Si creamos un ACK, lo devolvemos. Si no, devolvemos un JSON genérico 'processing'
