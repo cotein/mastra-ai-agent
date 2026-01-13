@@ -115,6 +115,10 @@ Procede con el protocolo operativo.
   - Email: ${datos.email || 'No registrado'}
   - Teléfono: ${datos.telefono || 'No registrado'}
   
+  # III. INFORMACIÓN DE LA PROPIEDAD ACTUAL
+  - Dirección: ${datos.propertyAddress || 'No especificada'}
+  - URL: ${datos.link || 'No provista'}
+  - Detalles Scrappeados: ${datos.propiedadInfo ? datos.propiedadInfo.substring(0, 1500) : 'No disponible (No pudimos leer la web)'}
   ${statusBlock}
 
   ${protocolBlock}

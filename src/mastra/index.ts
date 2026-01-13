@@ -163,6 +163,9 @@ export const mastra = new Mastra({
                                 console.log("🚀 Tipo de operación detectado:", propertyOperationType);
                                 finalContextData.operacionTipo = outputLogica.operacionTipo;
                                 finalContextData.propertyAddress = outputLogica.address;
+                                // FIX: Capturamos la descripción scrappeada
+                                finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
+                                finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
                             }
                         }
                       } catch (workflowErr) {
