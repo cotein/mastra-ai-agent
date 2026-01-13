@@ -172,7 +172,12 @@ export const mastra = new Mastra({
                     console.log("✅ Respuesta final generada:", response.text);
 
                     // 5. ENVIAR A MANYCHAT (PUSH)
+                    // DEBUG: Verificamos valores antes de enviar
+                    const hasApiKey = !!process.env.MANYCHAT_API_KEY;
+                    console.log(`🧐 [DEBUG PRE-PUSH] userId: ${userId}, hasCustomFields: ${!!body.custom_fields}, hasApiKey: ${hasApiKey}`);
+
                     if (userId && body.custom_fields) {
+                        console.log("👉 Intentando llamar a sendToManychat...");
                         await sendToManychat(userId, response.text);
                         console.log("📤 Mensaje enviado proactivamente a Manychat.");
                     } else {
