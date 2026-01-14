@@ -46,3 +46,26 @@ export const frasesSolicitudDatos: string[] = [
   "Es necesario que proporciones tu nombre, apellido, dirección de correo y teléfono.",
   "Para finalizar, preciso que completes con tu nombre, apellido, email y número de contacto."
 ];
+
+export const frasesSaludo: string[] = [
+  "qué bueno saludarte de nuevo. Nico por acá 👋",
+  "me alegra hayas vuelto. Nico acá 👋",
+  "un placer encontrarte de nuevo. Nico aquí 👋",
+  "qué gusto saludarte otra vez. Nico por acá 👋",
+  "encantado de verte de nuevo. Aquí Nico 👋",
+  "qué bien que regresaste. Nico por acá 👋",
+  "me da mucho gusto verte. Nico acá 👋",
+  "qué bueno saludarte otra vez. Nico por acá 👋",
+  "un honor verte de nuevo. Nico acá 👋",
+  "fantástico encontrarte otra vez. Nico por este lado 👋"
+];
+
+export const saludosFausti: string[] = [
+  "¿Cómo va? Nico por acá, de Fausti Propiedades 👋",
+  "¿Qué tal? Nico aquí, de Fausti Propiedades 👋",
+  "¿Cómo estás? Nico, de Fausti Propiedades 👋",
+  "¿Cómo te va? Nico por este lado, de Fausti Propiedades 👋",
+  "¿Todo bien? Nico por acá, del equipo de Fausti Propiedades 👋",
+  "¿Cómo andas? Nico habla, de Fausti Propiedades 👋",
+  "¿Cómo va todo? Nico habla, de Fausti Propiedades 👋",
+];

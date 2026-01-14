@@ -1,5 +1,5 @@
 import { OperacionTipo, ClientData } from "./../types";
-import { frasesRevisareLink, frasesDisponibilidad , frasesSolicitudDatos } from "../helpers/frases";
+import { frasesRevisareLink, frasesDisponibilidad , frasesSolicitudDatos, frasesSaludo, saludosFausti } from "../helpers/frases";
 // --- AUDITORÍA DE DATOS ---
 function auditMissingFields(datos: ClientData): string[] {
   const missing: string[] = [];
@@ -27,6 +27,16 @@ function obtenerFraseAleatoriaDisponibilidad(): string {
 function obtenerFraseAleatoriaSolicitudDatos(): string {
   const indiceAleatorio = Math.floor(Math.random() * frasesSolicitudDatos.length);
   return frasesSolicitudDatos[indiceAleatorio];
+}
+
+function obtenerFraseAleatoriaSaludo(): string {
+  const indiceAleatorio = Math.floor(Math.random() * frasesSaludo.length);
+  return frasesSaludo[indiceAleatorio];
+}
+
+function obtenerFraseAleatoriaSaludoFausti(): string {
+  const indiceAleatorio = Math.floor(Math.random() * saludosFausti.length);
+  return saludosFausti[indiceAleatorio];
 }
 
 // --- I. IDENTIDAD ---
@@ -71,8 +81,8 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo) => {
 
   // 2. Construcción del Saludo Dinámico
   const saludoInicial = datos.nombre 
-    ? `${momentoDia} ${datos.nombre}, qué bueno saludarte de nuevo. Nico por acá 👋`
-    : `${momentoDia} ¿Cómo va? Nico por acá, de Fausti Propiedades 👋`;
+    ? `${momentoDia} ${datos.nombre}, ${obtenerFraseAleatoriaSaludo()}`
+    : `${momentoDia} ${obtenerFraseAleatoriaSaludoFausti()}`;
 
   const opNormalizada = op ? op.toUpperCase() : 'INDEFINIDO';
   const missingFields = auditMissingFields(datos);
@@ -142,6 +152,7 @@ Procede con el protocolo operativo.
   - Dirección: ${datos.propertyAddress || 'No especificada'}
   - URL: ${datos.link || 'No provista'}
   - Detalles Scrappeados: ${datos.propiedadInfo ? datos.propiedadInfo.substring(0, 1500) : 'No disponible (No pudimos leer la web)'}
+
   ${statusBlock}
 
   ${protocolBlock}
