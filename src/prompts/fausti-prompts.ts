@@ -125,9 +125,12 @@ Hazlo de forma conversacional y natural, integrado en tu respuesta (ej: "${obten
 (NO inventes datos. NO preguntes uno a uno).
     `;
   } else {
+    const statusText = opNormalizada === 'INDEFINIDO' ? 
+      "## ✅ ESTADO: FICHA COMPLETA. (Sin operación definida todavía)\n### ⚡ TU OBJETIVO:\nSaluda amablemente, preséntate brevemente si no lo has hecho, y pregunta en qué puedes ayudarle hoy. NO asumas que quiere comprar o alquilar todavía. Espera su indicación.\n" :
+      "## ✅ ESTADO: FICHA COMPLETA\nProcede con el protocolo operativo.";
+
     statusBlock = `
-## ✅ ESTADO: FICHA COMPLETA
-Procede con el protocolo operativo.
+${statusText}
     `;
   }
 
