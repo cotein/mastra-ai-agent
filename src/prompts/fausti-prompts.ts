@@ -160,7 +160,7 @@ ${statusText}
       `;
   }
 
-  const saludo = determineGreeting(datos, momentoDia);
+  const saludo = determineGreeting(datos, saludoInicial);
 
   return `
   ${CORE_IDENTITY}
