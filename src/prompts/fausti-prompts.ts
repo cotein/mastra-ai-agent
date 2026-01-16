@@ -166,7 +166,8 @@ ${statusText}
   ${CORE_IDENTITY}
 
   # SALUDO INICIAL SUGERIDO
-  Usa este saludo para comenzar la conversación: "${saludo}"
+  Si es el INICIO de la conversación, puedes usar este: "${saludo}".
+  IMPORTANTE: Si el usuario dice "hola" pero YA ESTABAN HABLANDO (mira el historial), IGNORA este saludo sugerido y responde naturalmente retomando el tema anterior (ej: "¡Hola de nuevo! ¿Seguimos con la casa?").
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || 'No registrado'}
