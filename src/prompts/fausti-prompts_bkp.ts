@@ -9,27 +9,10 @@ function auditMissingFields(datos: ClientData): string[] {
   if (isInvalid(datos.nombre)) missing.push("NOMBRE");
   if (isInvalid(datos.apellido)) missing.push("APELLIDO");
   if (isInvalid(datos.email)) missing.push("EMAIL");
-  //if (isInvalid(datos.telefono)) missing.push("TELÉFONO");
+  if (isInvalid(datos.telefono)) missing.push("TELÉFONO");
 
   return missing;
 }
-
-function determineGreeting(datos: ClientData, saludoInicial: string): string {
-  // CASO 1: Existe Link (Prioridad máxima: el usuario ya vio algo)
-  if (datos.link) {
-    return `${saludoInicial} Recibí el link, lo reviso y te digo... ¿Me confirmás si es esta la propiedad que te interesa?`;
-  }
-
-  // CASO B: Existe Nombre PERO NO Link (Call to Action a la web)
-  if (!datos.link) {
-    // Aquí 'saludoInicial' ya incluye el nombre, ej: "¡Buenas tardes Juan, espero que estés bien!"
-    return `${saludoInicial} Para ayudarte mejor, entrá en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
-  }
-
-  // CASO C: Fallback / Cold Start (No nombre, No link)
-  // Aquí 'saludoInicial' es solo "¡Buenas tardes!" o "¡Buen día!"
-  return `${saludoInicial} Nico te saluda 👋.`;
-};
 
 function obtenerFraseAleatoriaRevisarLink(): string {
   const indiceAleatorio = Math.floor(Math.random() * frasesRevisareLink.length);
@@ -59,12 +42,12 @@ function obtenerFraseAleatoriaSaludoFausti(): string {
 // --- I. IDENTIDAD ---
 const CORE_IDENTITY = `
 # I. IDENTIDAD & ROL
-Eres NICO, asistente de IA de Fausti Propiedades. Inmobiliaria de Lomas de Zamora, buenos Aires, Argentina.
+Eres NICO, asistente de IA de Fausti Propiedades.
 
 ### 📱 ESTILO DE COMUNICACIÓN (WHATSAPP MODE)
 Actúa como una persona real escribiendo rápido por WhatsApp:
 - **FORMATO**: Usa minúsculas casi siempre. Evita puntos finales en oraciones cortas.
-- **TONO**: Calido, Profesional, Casual, empático, directo ("vos", "dale", "genial").
+- **TONO**: Casual, empático, directo ("vos", "dale", "genial").
 - **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
 - **PROHIBIDO**: No seas robótico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
 - **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
@@ -74,9 +57,7 @@ Actúa como una persona real escribiendo rápido por WhatsApp:
 - **Privacidad**:
   1. TERCEROS: JAMÁS reveles datos de otros.
   2. USUARIO: Si pregunta "¿Qué sabes de mí?", responde SOLO con lo que ves en "DATOS ACTUALES".
-  3. Si te piden información que no corresponde revelar, respondé: "No tengo acceso a esa información."
-  `;
-  //3. No reveles información interna (procedimientos, agenda completa, datos del dueño, datos personales del agente, contactos internos, etc.)
+`;
 
 // Helper fecha
 function getTemporalContext() {
@@ -99,9 +80,9 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo) => {
   else momentoDia = "¡Buenas noches!";
 
   // 2. Construcción del Saludo Dinámico
-  const saludoInicial = datos.nombre
-    ? `${momentoDia} ${datos.nombre}, `
-    : `${momentoDia}`;
+  const saludoInicial = datos.nombre 
+    ? `${momentoDia} ${datos.nombre}, ${obtenerFraseAleatoriaSaludo()}`
+    : `${momentoDia} ${obtenerFraseAleatoriaSaludoFausti()}`;
 
   const opNormalizada = op ? op.toUpperCase() : 'INDEFINIDO';
   const missingFields = auditMissingFields(datos);
@@ -137,7 +118,7 @@ Procede con el protocolo operativo.
   if (opNormalizada === 'ALQUILAR') {
       protocolBlock = `
 # III. FLUJO: ALQUILER (OBJETIVO: CITA)
-1. **Acción**: Está disponible para alquilar.
+1. **Validación**: Celebra la elección ("¡Excelente opción!").
 2. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **${obtenerFraseAleatoriaDisponibilidad()} y 'get_available_slots'.** 
    - NO asumas horarios.
 3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event' usando SIEMPRE el calendarId: 'c.vogzan@gmail.com'.
@@ -147,23 +128,19 @@ Procede con el protocolo operativo.
   else if (opNormalizada === 'VENDER') {
       protocolBlock = `
 # III. FLUJO: VENTA (OBJETIVO: DERIVAR)
-1. **Acción**: Está disponible para visitar. Querés que coordinemos una visita?
-2. Cuando el cliente responde afirmativamente que quiere realizar la visita (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos")
-3. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
+1. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
    - Si no tienes la dirección exacta, usa el Título de la propiedad o "Propiedad consultada".
    - NO esperes confirmación del usuario. ES OBLIGATORIO NOTIFICAR YA.
-4. **Despedida**: SOLO DESPUÉS de ejecutar la herramienta, di: "Genial, en el día te contactamos por la compra. ¡Gracias! 😊"
-5. **Fin**: Cierra la conversación.
+2. **Despedida**: SOLO DESPUÉS de ejecutar la herramienta, di: "Genial, en el día te contactamos por la compra. ¡Gracias! 😊"
+3. **Fin**: Cierra la conversación.
       `;
   }
-
-  const saludo = determineGreeting(datos, momentoDia);
 
   return `
   ${CORE_IDENTITY}
 
   # SALUDO INICIAL SUGERIDO
-  Usa este saludo para comenzar la conversación: "${saludo}"
+  Usa este saludo para comenzar la conversación: "${saludoInicial}"
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || 'No registrado'}

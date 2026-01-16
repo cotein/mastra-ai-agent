@@ -1,17 +1,17 @@
 import 'dotenv/config';
 import { Mastra } from '@mastra/core';
 import { registerApiRoute } from '@mastra/core/server';
-import { stream } from 'hono/streaming';
+import axios from 'axios';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
 import { openai as openai$1 } from '@ai-sdk/openai';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
+import { generateText } from 'ai';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
-import axios from 'axios';
 import OpenAI from 'openai';
 import { createStep, createWorkflow } from '@mastra/core/workflows';
 
@@ -125,6 +125,70 @@ class ThreadContextService {
 }
 
 "use strict";
+class WhatsAppStyleProcessor {
+  id = "whatsapp-style-processor";
+  name = "whatsapp-style-processor";
+  // Mastra parece requerir esto para Output Processors
+  async processOutputStep(args) {
+    return args;
+  }
+  // Este método se usa cuando se llama a agent.generate()
+  async processOutputResult(args) {
+    const lastMessage = args.messages[args.messages.length - 1];
+    let textToHumanize = "";
+    if (typeof lastMessage.content === "string") {
+      textToHumanize = lastMessage.content;
+    } else if (Array.isArray(lastMessage.content)) {
+      textToHumanize = lastMessage.content.map((c) => c.text || "").join("");
+    }
+    if (!textToHumanize) return args.messages;
+    try {
+      const { text } = await generateText({
+        model: openai$1("gpt-4o-mini"),
+        system: `Eres un experto en comunicaci\xF3n por WhatsApp. 
+                     Tu trabajo es reescribir el siguiente mensaje para que suene como un humano escribiendo r\xE1pido en WhatsApp.
+                     Reglas:
+                     - Usa min\xFAsculas mayormente, pero no fuerces errores ortogr\xE1ficos graves.
+                     - IMPORTANTE: Tu objetivo principal es que parezca una conversaci\xF3n natural fluida.
+                     - REGLA DE ORO DE SEPARACI\xD3N: Separa CADA idea distinta (saludo, pregunta, informaci\xF3n) con DOBLE SALTO DE L\xCDNEA (
+
+). Esto es CRITICO para que salgan como mensajes separados.
+                     
+                     Ejemplos:
+                     Input: "Hola, soy Nico. Necesito que me pases tus datos."
+                     Output: 
+                     "hola soy nico \u{1F44B}
+                     
+                     necesito que me pases tus datos porfa"
+
+                     Input: "\xA1Buen d\xEDa! \xBFEn qu\xE9 puedo ayudarte? Necesito tu nombre."
+                     Output:
+                     "buen d\xEDa! \u{1F60A}
+                     
+                     en qu\xE9 puedo ayudarte??
+                     
+                     necesito tu nombre completo"`,
+        prompt: textToHumanize
+      });
+      lastMessage.content = text;
+      return args.messages;
+    } catch (error) {
+      console.error("Error en WhatsAppStyleProcessor:", error);
+      return args.messages;
+    }
+  }
+  // Implementación vacía/passthrough para streaming por si acaso se llama,
+  // pero este processor está diseñado para funcionar mejor con generate() (no-streaming)
+  // o habría que implementar buffering complejo.
+  async processOutputStream(args) {
+    return args.part;
+  }
+  async processInput(args) {
+    return args.messages;
+  }
+}
+
+"use strict";
 const getGoogleCalendar = () => {
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -159,6 +223,7 @@ const calendarManagerTools = {
     id: "create_calendar_event",
     description: "Registra citas de visitas inmobiliarias.",
     inputSchema: z.object({
+      calendarId: z.string().optional().describe('ID del calendario donde agendar. Si no se provee, usa el calendario principal ("primary").'),
       title: z.string().optional().describe('T\xEDtulo descriptivo del evento (ej: "Visita propiedad - cliente: ...")'),
       summary: z.string().optional().describe('Resumen corto (ej: "Visita propiedad - [Direccion]")'),
       location: z.string().describe("Direcci\xF3n completa de la propiedad"),
@@ -168,21 +233,22 @@ const calendarManagerTools = {
     }),
     execute: async (input) => {
       const calendar = getGoogleCalendar();
+      const calendarId = input.calendarId || "primary";
       const { start, end } = getSanitizedDates(input.start, input.end);
       const eventSummary = input.title || input.summary || "Visita Propiedad";
       try {
         const response = await calendar.events.insert({
-          calendarId: "primary",
+          calendarId,
           requestBody: {
             summary: eventSummary,
             location: input.location,
             description: input.description,
             start: {
-              dateTime: start,
+              dateTime: start.replace(/Z$/, ""),
               timeZone: "America/Argentina/Buenos_Aires"
             },
             end: {
-              dateTime: end,
+              dateTime: end.replace(/Z$/, ""),
               timeZone: "America/Argentina/Buenos_Aires"
             }
           }
@@ -207,15 +273,17 @@ const calendarManagerTools = {
     id: "list_calendar_events",
     description: "Lista los pr\xF3ximos eventos del calendario para verificar disponibilidad.",
     inputSchema: z.object({
+      calendarId: z.string().optional().describe('ID del calendario a consultar. (Default: "primary")'),
       daysAhead: z.number().default(15).describe("N\xFAmero de d\xEDas a futuro para consultar")
     }),
-    execute: async ({ daysAhead }) => {
+    execute: async ({ daysAhead, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || "primary";
       const timeMin = (/* @__PURE__ */ new Date()).toISOString();
       const timeMax = new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1e3).toISOString();
       try {
         const response = await calendar.events.list({
-          calendarId: "primary",
+          calendarId,
           timeMin,
           timeMax,
           singleEvents: true,
@@ -235,13 +303,15 @@ const calendarManagerTools = {
     id: "get_calendar_event",
     description: "Obtiene los detalles de un evento espec\xEDfico de Google Calendar usando su ID.",
     inputSchema: z.object({
-      eventId: z.string().describe("ID del evento a obtener")
+      eventId: z.string().describe("ID del evento a obtener"),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")')
     }),
-    execute: async ({ eventId }) => {
+    execute: async ({ eventId, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || "primary";
       try {
         const response = await calendar.events.get({
-          calendarId: "primary",
+          calendarId,
           eventId
         });
         return response.data;
@@ -259,6 +329,7 @@ const calendarManagerTools = {
     description: "Actualiza un evento existente en Google Calendar. Puede cambiar horario, t\xEDtulo, descripci\xF3n o ubicaci\xF3n.",
     inputSchema: z.object({
       eventId: z.string().describe("ID del evento a modificar"),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
       summary: z.string().optional().describe("Nuevo t\xEDtulo del evento"),
       description: z.string().optional().describe("Nueva descripci\xF3n"),
       location: z.string().optional().describe("Nueva ubicaci\xF3n"),
@@ -266,11 +337,12 @@ const calendarManagerTools = {
       end: z.string().optional().describe("Nueva fecha de fin (ISO)"),
       userEmail: z.string().optional().describe("Email del usuario para enviar notificaciones de actualizaci\xF3n (opcional)")
     }),
-    execute: async ({ eventId, summary, description, location, start, end, userEmail }) => {
+    execute: async ({ eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || "primary";
       let currentEvent;
       try {
-        const getRes = await calendar.events.get({ calendarId: "primary", eventId });
+        const getRes = await calendar.events.get({ calendarId, eventId });
         currentEvent = getRes.data;
       } catch (e) {
         return { success: false, error: "Evento no encontrado: " + e.message };
@@ -279,8 +351,8 @@ const calendarManagerTools = {
       let endBody = currentEvent.end;
       if (start && end) {
         const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
-        startBody = { dateTime: sanitizedStart, timeZone: "America/Argentina/Buenos_Aires" };
-        endBody = { dateTime: sanitizedEnd, timeZone: "America/Argentina/Buenos_Aires" };
+        startBody = { dateTime: sanitizedStart.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
+        endBody = { dateTime: sanitizedEnd.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
       }
       const requestBody = {
         ...currentEvent,
@@ -292,7 +364,7 @@ const calendarManagerTools = {
       };
       try {
         const response = await calendar.events.update({
-          calendarId: "primary",
+          calendarId,
           eventId,
           requestBody,
           sendUpdates: userEmail ? "all" : "none"
@@ -319,13 +391,15 @@ const calendarManagerTools = {
     description: "Elimina (cancela) un evento de Google Calendar permanentemente.",
     inputSchema: z.object({
       eventId: z.string().describe("ID del evento a eliminar"),
+      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
       notifyStart: z.boolean().optional().describe("No utilizado, pero mantenido por compatibilidad")
     }),
-    execute: async ({ eventId }) => {
+    execute: async ({ eventId, calendarId: inputCalendarId }) => {
       const calendar = getGoogleCalendar();
+      const calendarId = inputCalendarId || "primary";
       try {
         await calendar.events.delete({
-          calendarId: "primary",
+          calendarId,
           eventId
         });
         return { success: true, message: "Evento eliminado correctamente." };
@@ -613,7 +687,7 @@ const potentialSaleEmailTool = createTool({
     nombre_cliente: z.string(),
     telefono_cliente: z.string(),
     email_cliente: z.string().optional(),
-    direccion_propiedad: z.string(),
+    direccion_propiedad: z.string().optional().describe("La direcci\xF3n o t\xEDtulo de la propiedad. Si no est\xE1 exacta, usa el t\xEDtulo."),
     url_propiedad: z.string().optional()
   }),
   execute: async (input) => {
@@ -640,7 +714,7 @@ const potentialSaleEmailTool = createTool({
             <div class="field-label">Tel\xE9fono de contacto</div> 
             <div class="field-value"> <a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${input.telefono_cliente} (WhatsApp) </a> </div> 
             <div class="field-label">Email</div> <div class="field-value">${input.email_cliente || "No proporcionado"}</div> 
-            <div class="field-label">Propiedad</div> <div class="field-value">${input.direccion_propiedad}</div> 
+            <div class="field-label">Propiedad</div> <div class="field-value">${input.direccion_propiedad || "No especificada / URL"}</div> 
             <div style="margin-top: 25px; text-align: center;"> 
               <a href="${input.url_propiedad}" style="background-color: #3498db; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;"> Ver Ficha de Propiedad </a> 
             </div> 
@@ -715,6 +789,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
           - **Budget Max**:
           - **Preferred Zone**:
           - **Property Type Interest**: (Casa/Depto/PH)
+          - **Consulted Properties History**: (List of URLs or addresses recently discussed or scraped)
           `
       },
       generateTitle: true
@@ -729,6 +804,9 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   } else {
     selectedTools = { ...selectedTools };
   }
+  console.log("#".repeat(50));
+  console.log(finalInstructions);
+  console.log("#".repeat(50));
   return new Agent({
     // ID obligatorio para Mastra
     id: "real-estate-agent",
@@ -755,7 +833,8 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
         model: openai$1("gpt-4o-mini"),
         strategy: "redact",
         redactionMethod: "placeholder"
-      })
+      }),
+      new WhatsAppStyleProcessor()
     ]
   });
 };
@@ -878,6 +957,27 @@ const frasesSolicitudDatos = [
   "Es necesario que proporciones tu nombre, apellido, direcci\xF3n de correo y tel\xE9fono.",
   "Para finalizar, preciso que completes con tu nombre, apellido, email y n\xFAmero de contacto."
 ];
+const frasesSaludo = [
+  "qu\xE9 bueno saludarte de nuevo. Nico por ac\xE1 \u{1F44B}",
+  "me alegra hayas vuelto. Nico ac\xE1 \u{1F44B}",
+  "un placer encontrarte de nuevo. Nico aqu\xED \u{1F44B}",
+  "qu\xE9 gusto saludarte otra vez. Nico por ac\xE1 \u{1F44B}",
+  "encantado de verte de nuevo. Aqu\xED Nico \u{1F44B}",
+  "qu\xE9 bien que regresaste. Nico por ac\xE1 \u{1F44B}",
+  "me da mucho gusto verte. Nico ac\xE1 \u{1F44B}",
+  "qu\xE9 bueno saludarte otra vez. Nico por ac\xE1 \u{1F44B}",
+  "un honor verte de nuevo. Nico ac\xE1 \u{1F44B}",
+  "fant\xE1stico encontrarte otra vez. Nico por este lado \u{1F44B}"
+];
+const saludosFausti = [
+  "\xBFC\xF3mo va? Nico por ac\xE1, de Fausti Propiedades \u{1F44B}",
+  "\xBFQu\xE9 tal? Nico aqu\xED, de Fausti Propiedades \u{1F44B}",
+  "\xBFC\xF3mo est\xE1s? Nico, de Fausti Propiedades \u{1F44B}",
+  "\xBFC\xF3mo te va? Nico por este lado, de Fausti Propiedades \u{1F44B}",
+  "\xBFTodo bien? Nico por ac\xE1, del equipo de Fausti Propiedades \u{1F44B}",
+  "\xBFC\xF3mo andas? Nico habla, de Fausti Propiedades \u{1F44B}",
+  "\xBFC\xF3mo va todo? Nico habla, de Fausti Propiedades \u{1F44B}"
+];
 
 "use strict";
 function auditMissingFields(datos) {
@@ -901,6 +1001,14 @@ function obtenerFraseAleatoriaSolicitudDatos() {
   const indiceAleatorio = Math.floor(Math.random() * frasesSolicitudDatos.length);
   return frasesSolicitudDatos[indiceAleatorio];
 }
+function obtenerFraseAleatoriaSaludo() {
+  const indiceAleatorio = Math.floor(Math.random() * frasesSaludo.length);
+  return frasesSaludo[indiceAleatorio];
+}
+function obtenerFraseAleatoriaSaludoFausti() {
+  const indiceAleatorio = Math.floor(Math.random() * saludosFausti.length);
+  return saludosFausti[indiceAleatorio];
+}
 const CORE_IDENTITY = `
 # I. IDENTIDAD & ROL
 Eres NICO, asistente de IA de Fausti Propiedades.
@@ -923,6 +1031,17 @@ function getTemporalContext() {
   return (/* @__PURE__ */ new Date()).toLocaleDateString("es-AR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
 const dynamicInstructions = (datos, op) => {
+  const ahora = new Intl.DateTimeFormat("es-AR", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    hour: "numeric",
+    hour12: false
+  }).format(/* @__PURE__ */ new Date());
+  const hora = parseInt(ahora);
+  let momentoDia = "\xA1Hola!";
+  if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
+  else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
+  else momentoDia = "\xA1Buenas noches!";
+  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, ${obtenerFraseAleatoriaSaludo()}` : `${momentoDia} ${obtenerFraseAleatoriaSaludoFausti()}`;
   const opNormalizada = op ? op.toUpperCase() : "INDEFINIDO";
   const missingFields = auditMissingFields(datos);
   let statusBlock = "";
@@ -933,8 +1052,8 @@ const dynamicInstructions = (datos, op) => {
 Faltan: ${missingFields.join(", ")}.
 
 ### \u26A1 TU OBJETIVO:
-Pide **TODOS** los datos faltantes en **UNA SOLA ORACI\xD3N** al final de tu respuesta.
-Formato: ${obtenerFraseAleatoriaSolicitudDatos()} **${missingString}**."
+Pide amablemente los datos faltantes (${missingString}) para poder avanzar.
+Hazlo de forma conversacional y natural, integrado en tu respuesta (ej: "${obtenerFraseAleatoriaSolicitudDatos()} nombre y apellido?").
 (NO inventes datos. NO preguntes uno a uno).
     `;
   } else {
@@ -948,22 +1067,26 @@ Procede con el protocolo operativo.
     protocolBlock = `
 # III. FLUJO: ALQUILER (OBJETIVO: CITA)
 1. **Validaci\xF3n**: Celebra la elecci\xF3n ("\xA1Excelente opci\xF3n!").
-2. **Acci\xF3n**: Pregunta DIRECTO: **${obtenerFraseAleatoriaDisponibilidad()}**
-   - Usa 'get_available_slots'.
+2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **${obtenerFraseAleatoriaDisponibilidad()} y 'get_available_slots'.** 
    - NO asumas horarios.
-3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event' usando SIEMPRE el calendarId: 'c.vogzan@gmail.com'.
 4. **PROHIBICI\xD3N**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
       `;
   } else if (opNormalizada === "VENDER") {
     protocolBlock = `
 # III. FLUJO: VENTA (OBJETIVO: DERIVAR)
-1. **Acci\xF3n**: usa 'potential_sale_email'.
-2. **Despedida**: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
+1. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
+   - Si no tienes la direcci\xF3n exacta, usa el T\xEDtulo de la propiedad o "Propiedad consultada".
+   - NO esperes confirmaci\xF3n del usuario. ES OBLIGATORIO NOTIFICAR YA.
+2. **Despedida**: SOLO DESPU\xC9S de ejecutar la herramienta, di: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
 3. **Fin**: Cierra la conversaci\xF3n.
       `;
   }
   return `
   ${CORE_IDENTITY}
+
+  # SALUDO INICIAL SUGERIDO
+  Usa este saludo para comenzar la conversaci\xF3n: "${saludoInicial}"
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || "No registrado"}
@@ -971,6 +1094,11 @@ Procede con el protocolo operativo.
   - Email: ${datos.email || "No registrado"}
   - Tel\xE9fono: ${datos.telefono || "No registrado"}
   
+  # III. INFORMACI\xD3N DE LA PROPIEDAD ACTUAL
+  - Direcci\xF3n: ${datos.propertyAddress || "No especificada"}
+  - URL: ${datos.link || "No provista"}
+  - Detalles Scrappeados: ${datos.propiedadInfo ? datos.propiedadInfo.substring(0, 1500) : "No disponible (No pudimos leer la web)"}
+
   ${statusBlock}
 
   ${protocolBlock}
@@ -982,12 +1110,6 @@ Procede con el protocolo operativo.
 "use strict";
 const sleep = async (seconds) => {
   return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
-};
-
-"use strict";
-const randomSleep = async (min, max) => {
-  const waitTime = Math.random() * (max - min) + min;
-  await sleep(waitTime);
 };
 
 "use strict";
@@ -1046,20 +1168,17 @@ const propertyDataProcessorTool = createTool({
 const scrapeStep = createStep({
   id: "scrapeStep",
   inputSchema: z.object({
-    url: z.url()
+    url: z.string().url()
   }),
   outputSchema: z.object({
     success: z.boolean(),
     data: z.any()
   }),
   execute: async ({ inputData }) => {
-    console.log(">>> INICIO: PASO 1 (Scraping)");
-    console.log(`[Workflow] \u{1F310} Scrapeando URL: ${inputData.url}`);
-    await sleep(3);
+    await sleep(1);
     const result = await apifyScraperTool.execute(
       { url: inputData.url }
     );
-    console.log(">>> FIN: PASO 1");
     if (!("data" in result)) {
       throw new Error("Scraping failed");
     }
@@ -1087,13 +1206,10 @@ const extratDataFromScrapperTool = createStep({
         { rawData: inputData.data },
         { mastra }
       );
-      console.log(">>> DEBUG: propertyDataProcessorTool result:", JSON.stringify(result, null, 2));
       if (!("operacionTipo" in result)) {
         throw new Error("Validation failed in propertyDataProcessorTool");
       }
       console.log(">>> INICIO: PASO 2 (Formato)");
-      console.log(result);
-      console.log(">>> FIN: PASO 2");
       return {
         address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
         operacionTipo: result.operacionTipo,
@@ -1121,12 +1237,9 @@ const cleanDataStep = createStep({
     address: z.string()
   }),
   execute: async ({ inputData }) => {
-    console.log(">>> INICIO: PASO 3 (Limpieza/Formatter)");
     const result = await realEstatePropertyFormatterTool.execute({
       keywordsZonaProp: inputData.keywords
     });
-    console.log(">>> DEBUG: Formatter result:", result);
-    console.log(">>> FIN: PASO 3");
     return {
       formattedText: result.formattedText || inputData.keywords,
       // Fallback si falla
@@ -1148,8 +1261,6 @@ const logicStep = createStep({
     address: z.string()
   }),
   execute: async ({ inputData }) => {
-    console.log(">>> INICIO: PASO 4 (Logic)");
-    console.log(">>> FIN: PASO 4");
     return {
       minimalDescription: inputData.formattedText,
       operacionTipo: inputData.operacionTipo,
@@ -1172,6 +1283,7 @@ const propertyWorkflow = createWorkflow({
 "use strict";
 await storage.init();
 const realEstateAgent = await getRealEstateAgent("");
+const activeProcessing = /* @__PURE__ */ new Set();
 const mastra = new Mastra({
   storage,
   vectors: {
@@ -1195,109 +1307,142 @@ const mastra = new Mastra({
         try {
           const body = await c.req.json();
           console.log("\u{1F4E8} RAW BODY RECIBIDO:", JSON.stringify(body, null, 2));
-          const {
-            message,
-            threadId,
-            userId,
-            clientData
-          } = body;
+          let message = body.custom_fields.endResponse;
+          let threadId = body.id;
+          let userId = body.id;
+          let clientData = {};
           console.log("\n\u{1F525}\u{1F525}\u{1F525} INICIO DEL REQUEST \u{1F525}\u{1F525}\u{1F525}");
           console.log("1. ThreadID recibido:", threadId);
-          console.log("2. ClientData CRUDA:", clientData);
-          console.log("3. \xBFTiene llaves?", clientData ? Object.keys(clientData) : "Es Null/Undefined");
-          if (!threadId) {
+          if (!threadId && !userId) {
             return c.json({
-              error: "ThreadID is required"
+              error: "Either ThreadID or UserID is required"
             }, 400);
           }
           const currentThreadId = threadId || `chat_${userId}`;
           const urlRegex = /(https?:\/\/[^\s]+)/g;
           const linksEncontrados = message?.match(urlRegex);
-          let finalContextData = {};
-          finalContextData.operacionTipo = "";
-          let propertyOperationType = "";
-          try {
-            if (clientData && Object.keys(clientData).length > 0) {
-              const validResourceId = userId || "anonymous_user";
-              await ThreadContextService.updateContext(threadId, validResourceId, clientData);
-            }
-            const dbContext = await ThreadContextService.getContext(threadId);
-            const mastraProfile = await ThreadContextService.getResourceProfile(userId);
-            console.log("\u{1F9E0} [PERFIL MASTRA DETECTADO]:", mastraProfile);
-            console.log("\u{1F50D} [DB] Datos guardados en Base de Datos:", dbContext);
-            finalContextData = {
-              ...mastraProfile,
-              // 1. Base (Mastra)
-              ...dbContext,
-              // 2. Contexto Thread
-              ...clientData || {}
-              // 3. Override actual
-            };
-            console.log("\u{1F9E0} [MEMORIA FINAL] Esto es lo que sabr\xE1 el agente:", finalContextData);
-          } catch (err) {
-            console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
-            finalContextData = clientData || {};
+          const requestHash = `${userId || "anon"}_${message?.substring(0, 50)}`;
+          if (activeProcessing.has(requestHash)) {
+            console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
+            return c.json({
+              status: "ignored_duplicate"
+            });
           }
-          return stream(c, async (streamInstance) => {
-            if (linksEncontrados && linksEncontrados.length > 0) {
-              const url = linksEncontrados[0].trim();
-              finalContextData.link = url;
-              if (currentThreadId) {
-                await ThreadContextService.clearThreadMessages(currentThreadId);
-              }
-              await randomSleep(1, 3);
-              await streamInstance.write(frasesRevisareLink[Math.floor(Math.random() * frasesRevisareLink.length)] + "\n\n");
-              try {
-                const workflow = mastra.getWorkflow("propertyWorkflow");
-                const run = await workflow.createRun();
-                console.log(`\u{1F680} Iniciando Workflow para: ${url}`);
-                const result = await run.start({
-                  inputData: {
-                    url
-                  }
-                });
-                if (result.status !== "success") {
-                  throw new Error(`Workflow failed: ${result.status}`);
-                }
-                const outputLogica = result.result;
-                if (outputLogica) {
-                  console.log("\u{1F4E6} Output Workflow recibido");
-                  if (outputLogica.minimalDescription) {
-                    await streamInstance.write(outputLogica.minimalDescription + "\n\n");
-                    await randomSleep(2, 4);
-                    await streamInstance.write(outputLogica.address + "\n\n");
-                  }
-                  if (outputLogica.operacionTipo) {
-                    propertyOperationType = outputLogica.operacionTipo;
-                    console.log("\u{1F680} Tipo de operaci\xF3n detectado ########## :", propertyOperationType);
-                    finalContextData.operacionTipo = outputLogica.operacionTipo;
-                    finalContextData.propertyAddress = outputLogica.address;
-                  }
-                }
-              } catch (workflowErr) {
-                console.error("\u274C Workflow error:", workflowErr);
-              }
-            }
+          activeProcessing.add(requestHash);
+          setTimeout(() => activeProcessing.delete(requestHash), 15e3);
+          let ackResponse = void 0;
+          if (userId && body.custom_fields) {
+            console.log("\u26A1 Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
+            ackResponse = c.json({
+              response_text: "",
+              // Texto vacío para que Manychat no muestre nada y espere el Push
+              status: "processing"
+            });
+          }
+          (async () => {
             try {
+              console.log("\u{1F3C3}\u200D\u2642\uFE0F Iniciando proceso en background...");
+              let finalContextData = {};
+              finalContextData.operacionTipo = "";
+              let propertyOperationType = "";
+              try {
+                if (clientData && Object.keys(clientData).length > 0) {
+                  const validResourceId = userId || "anonymous_user";
+                  await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+                }
+                const dbContext = await ThreadContextService.getContext(threadId);
+                const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+                console.log("\u{1F9E0} [PERFIL MASTRA DETECTADO]:", mastraProfile);
+                finalContextData = {
+                  ...mastraProfile,
+                  // 1. Base (Mastra)
+                  ...dbContext,
+                  // 2. Contexto Thread
+                  ...clientData || {}
+                  // 3. Override actual
+                };
+              } catch (err) {
+                console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
+                finalContextData = clientData || {};
+              }
+              if (linksEncontrados && linksEncontrados.length > 0) {
+                const url = linksEncontrados[0].trim();
+                finalContextData.link = url;
+                if (currentThreadId) {
+                  await ThreadContextService.clearThreadMessages(currentThreadId);
+                }
+                try {
+                  const workflow = mastra.getWorkflow("propertyWorkflow");
+                  const run = await workflow.createRun();
+                  console.log(`\u{1F680} Iniciando Workflow para: ${url}`);
+                  const result = await run.start({
+                    inputData: {
+                      url
+                    }
+                  });
+                  if (result.status !== "success") {
+                    console.error(`\u274C Workflow failed: ${result.status}`);
+                  } else if (result.result) {
+                    const outputLogica = result.result;
+                    console.log("\u{1F4E6} Output Workflow recibido");
+                    if (outputLogica.operacionTipo) {
+                      propertyOperationType = outputLogica.operacionTipo;
+                      console.log("\u{1F680} Tipo de operaci\xF3n detectado:", propertyOperationType);
+                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      finalContextData.propertyAddress = outputLogica.address;
+                      finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripci\xF3n disponible";
+                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                    }
+                  }
+                } catch (workflowErr) {
+                  console.error("\u274C Workflow error:", workflowErr);
+                }
+              }
               console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
               const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
-              console.log("\u{1F4DD} [PROMPT] Contexto adicional:", contextoAdicional);
               const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
               console.log("\u{1F6E0}\uFE0F Tools disponibles para el agente:", Object.keys(agent.tools || {}));
-              console.log("whatsapp-style: Volviendo a stream() por latencia. El estilo se manejar\xE1 via Prompt.");
-              const result = await agent.stream(message, {
+              console.log("\u{1F916} Generando respuesta final (Background)...");
+              const response = await agent.generate(message, {
                 threadId: currentThreadId,
                 resourceId: userId
               });
-              if (result.textStream) {
-                for await (const chunk of result.textStream) {
-                  await streamInstance.write(chunk);
+              console.log("\u2705 Respuesta final generada:", response.text);
+              if (userId && body.custom_fields) {
+                console.log("\u{1F449} Intentando llamar a sendToManychat...");
+                const parts = response.text.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+                console.log(`\u{1F4E6} Se detectaron ${parts.length} bloques de mensaje.`);
+                for (const part of parts) {
+                  await sendToManychat(userId, part);
+                  if (parts.length > 1) {
+                    const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
+                    console.log(`\u23F3 Esperando ${randomDelay}s antes del siguiente mensaje...`);
+                    await sleep(randomDelay);
+                  }
                 }
+                console.log("\u{1F4E4} Todos los mensajes han sido enviados a Manychat.");
+              } else {
+                console.log("\u2139\uFE0F Respuesta generada (modo background), pero cliente no es Manychat/Async.");
               }
-            } catch (streamError) {
-              console.error("\u{1F4A5} Error en el stream del agente:", streamError);
-              await streamInstance.write("\n\n[Lo siento, tuve un problema procesando tu respuesta final.]");
+            } catch (bgError) {
+              console.error("\u{1F4A5} Error en proceso background:", bgError);
+              if (userId && body.custom_fields) {
+                await sendToManychat(userId, "Lo siento, tuve un error t\xE9cnico analizando esa informaci\xF3n.");
+              }
+            } finally {
             }
+          })();
+          if (ackResponse) {
+            return ackResponse;
+          }
+          return c.json({
+            status: "started_background_job"
+          });
+          if (ackResponse) {
+            return ackResponse;
+          }
+          return c.json({
+            status: "started_background_job"
           });
         } catch (error) {
           console.error("\u{1F4A5} Error general en el handler:", error);
@@ -1309,5 +1454,37 @@ const mastra = new Mastra({
     })]
   }
 });
+async function sendToManychat(subscriberId, text) {
+  const apiKey = "3448431:145f772cd4441c32e7a20cfc6d4868f6";
+  const headers = {
+    "Authorization": `Bearer ${apiKey}`,
+    "Content-Type": "application/json"
+  };
+  try {
+    console.log(`1\uFE0F\u20E3 [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
+    const setFieldRes = await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
+      subscriber_id: Number(subscriberId),
+      // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
+      fields: [{
+        field_name: "response1",
+        field_value: text
+      }]
+    }, {
+      headers
+    });
+    console.log("\u2705 Custom Field Set:", setFieldRes.data);
+    console.log(`2\uFE0F\u20E3 [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
+    await sleep(2);
+    const sendFlowRes = await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
+      subscriber_id: Number(subscriberId),
+      flow_ns: "content20250919131239_298410"
+    }, {
+      headers
+    });
+    console.log("\u2705 Flow Sent:", sendFlowRes.data);
+  } catch (err) {
+    console.error("\u274C Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
+  }
+}
 
 export { mastra };
