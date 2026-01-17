@@ -36,9 +36,12 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
   if (opType === 'ALQUILER') {
     operationalProtocol = `
 ### 🏠 PROTOCOLO DE ALQUILER
-1. **Confirmación**: Menciona brevemente qué viste (Ubicación, Ambientes, Precio).
-2. **Disponibilidad**: Confirma que está disponible para alquilar.
-3. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **"¿Querés que coordinemos una visita?"**
+1. **Confirmación con ÉNFASIS EN REQUISITOS**:
+   - Saluda brevemente.
+   - Menciona la ubicación y precio.
+   - **OBLIGATORIO**: Detalla los **REQUISITOS** que figuran en la ficha (Garantías, recibos, etc). Esto es prioridad máxima.
+2. **Disponibilidad**: Confirma que está disponible.
+3. **Acción**: Recién después de dar los requisitos, pregunta: **"¿Querés que coordinemos una visita?"**
 4. Espera la respuesta de confirmación del usuario.
 5. Si el usuario acepta: EJECUTA: **get_available_slots**
    - NO asumas horarios.
