@@ -43,10 +43,11 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 2. **Disponibilidad**: Confirma que está disponible.
 3. **Acción**: Recién después de dar los requisitos, pregunta: **"¿Querés que coordinemos una visita?"**
 4. Espera la respuesta de confirmación del usuario.
-5. Si el usuario acepta: EJECUTA: **get_available_slots**
-   - NO asumas horarios.
-6. Agenda la visita con la herramienta **create_calendar_event**
-7. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+5. Si el usuario acepta: EJECUTA: **get_available_slots** y PRESÉNTALOS.
+   - "Tengo estos horarios: [Lista]. ¿Cuál te queda mejor?"
+6. **Selección**: Espera a que el usuario elija un horario.
+7. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event** (Usa los datos estructurados).
+8. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
   } else if (opType === 'VENTA') {
     operationalProtocol = `
