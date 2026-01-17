@@ -24,11 +24,12 @@ export const propertyDataProcessorTool = createTool({
 
     const metadata = dataItem.metadata || {};
     const keywords = metadata.keywords;
-    const text = metadata.text;
+    // FIX: Apify 'website-content-crawler' puts text in the root, not metadata
+    const text = dataItem.text || dataItem.markdown || metadata.text || "";
 
     let addressLocality: string | undefined;
     let streetAddress: string | undefined;
-    let operacionTipo: string | undefined;
+    let operacionTipo: OperacionTipo = "";
     // Buscamos en jsonLd
     if (metadata.jsonLd && Array.isArray(metadata.jsonLd)) {
       // Buscamos algún objeto que tenga "address"

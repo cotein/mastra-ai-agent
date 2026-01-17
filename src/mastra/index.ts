@@ -96,11 +96,6 @@ export const mastra = new Mastra({
             // =================================================================================
             (async () => {
                 try {
-                    console.log("🏃‍♂️ Iniciando proceso en background...");
-
-                    // A. GESTIÓN DE CONTEXTO (Movida al background)
-                    // ... (resto del código igual) ...
-                    
                     // Definimos una variable única para acumular datos
                     let finalContextData: ClientData = {};
                     finalContextData.telefono = whatsappPhone;
@@ -175,8 +170,6 @@ export const mastra = new Mastra({
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
 
-                                
-                                
                                 // ACTUALIZAR SESIÓN EN MEMORIA
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
                                 sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);

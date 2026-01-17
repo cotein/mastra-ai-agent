@@ -62,6 +62,7 @@ export const realEstatePropertyFormatterTool = createTool({
       const text = completion.choices[0]?.message?.content || "No se pudo generar texto";
 
       console.log("   [Tool] ✅ Respuesta recibida (Tokens usados: " + completion.usage?.total_tokens + ")");
+      console.log("   [Tool] 📦 DATA EXTRAÍDA:\n", text);
       
       return {
         formattedText: text,
