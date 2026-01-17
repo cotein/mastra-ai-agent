@@ -165,7 +165,7 @@ export const mastra = new Mastra({
                           console.error(`❌ Workflow failed: ${result.status}`);
                         } else if (result.result) {
                             const outputLogica = result.result;
-                            console.log("📦 Output Workflow recibido");
+                            console.log("📦 Output Workflow recibido",   outputLogica);
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
                                 console.log("🚀 Tipo de operación detectado:", propertyOperationType);
@@ -175,8 +175,7 @@ export const mastra = new Mastra({
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
 
-                                // ENVIAR INFORMACIÓN AL USUARIO
-                                await sendToManychat(userId, finalContextData.propiedadInfo);
+                                
                                 
                                 // ACTUALIZAR SESIÓN EN MEMORIA
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
