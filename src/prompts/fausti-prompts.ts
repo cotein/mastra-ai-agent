@@ -45,7 +45,8 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 4. Espera la respuesta de confirmación del usuario.
 5. Si el usuario acepta: EJECUTA: **get_available_slots**
    - NO asumas horarios.
-6. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+6. Agenda la visita con la herramienta **create_calendar_event**
+7. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
   } else if (opType === 'VENTA') {
     operationalProtocol = `
