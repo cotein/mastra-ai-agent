@@ -55,7 +55,11 @@ export const mastra = new Mastra({
             let whatsappPhone = body.whatsapp_phone;
             let threadId = body.id;
             let userId = body.id;
-            let clientData = {}
+            // FIX: Inicializar clientData con el teléfono si existe, para que sobreviva al merge de contextos
+            let clientData: any = {};
+            if (whatsappPhone) {
+                clientData.telefono = whatsappPhone;
+            }
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
             console.log("1. ThreadID recibido:", threadId);
 

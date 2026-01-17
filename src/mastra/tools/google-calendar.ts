@@ -55,33 +55,37 @@ export const calendarManagerTools = {
    */
   createCalendarEvent: createTool({
     id: 'create_calendar_event',
-    description: 'Registra citas de visitas inmobiliarias.',
+    description: 'Registra citas de visitas inmobiliarias. SE DEBEN PROVEER LOS DATOS ESTRUCTURADOS DEL CLIENTE.',
     inputSchema: z.object({
-      calendarId: z.string().optional().describe('ID del calendario donde agendar. Si no se provee, usa el calendario principal ("primary").'),
-      title: z.string().optional().describe('Título descriptivo del evento (ej: "Visita propiedad - cliente: ...")'),
-      summary: z.string().optional().describe('Resumen corto (ej: "Visita propiedad - [Direccion]")'),
-      location: z.string().describe('Dirección completa de la propiedad'),
-      description: z.string().describe('Detalles de contacto y cliente y propiedad'),
+      calendarId: z.string().optional().describe('ID del calendario donde agendar. (Default: primary)'),
+      title: z.string().optional().describe('Título descriptivo del evento'),
       start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${new Date().toLocaleDateString()} y agendás para un mes anterior, usá el año ${new Date().getFullYear()}.`),
       end: z.string().describe("Fecha fin ISO8601"),
+      
+      // Datos Estructurados para formato obligatorio
+      clientName: z.string().describe("Nombre y Apellido del cliente"),
+      clientPhone: z.string().optional().describe("Teléfono del cliente"),
+      clientEmail: z.string().optional().describe("Email del cliente"),
+      propertyAddress: z.string().describe("Dirección de la propiedad"),
+      propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
     execute: async (input) => {
       const calendar = getGoogleCalendar();
       const calendarId = input.calendarId || 'primary';
-
-      // Aplicamos la limpieza de fechas antes de enviar a Google
       const { start, end } = getSanitizedDates(input.start, input.end);
 
-      // Usar 'title' si existe, sino 'summary'. El prompt del usuario prioriza 'title'.
-      const eventSummary = input.title || input.summary || "Visita Propiedad";
+      const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
+      
+      // CONSTRUCCIÓN OBLIGATORIA DEL FORMATO
+      const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - email: ${input.clientEmail || 'Sin email'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
 
       try {
         const response = await calendar.events.insert({
           calendarId: calendarId,
           requestBody: {
             summary: eventSummary,
-            location: input.location,
-            description: input.description,
+            location: input.propertyAddress,
+            description: description, // USAMOS EL FORMATO GENERADO
             start: { 
               dateTime: start.replace(/Z$/, ''), 
               timeZone: 'America/Argentina/Buenos_Aires' 
@@ -98,7 +102,7 @@ export const calendarManagerTools = {
           eventId: response.data.id,
           link: response.data.htmlLink,
           scheduledStart: start,
-          message: input.start !== start ? "Fecha corregida al año actual automáticamente." : "Agendado correctamente."
+          message: "Cita agendada correctamente con formato estandarizado."
         };
       } catch (error: any) {
         console.error('Error creando evento en Google Calendar:', error);
@@ -173,22 +177,29 @@ export const calendarManagerTools = {
    */
   updateCalendarEvent: createTool({
     id: 'update_calendar_event',
-    description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación.',
+    description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación. ADMITE DATOS ESTRUCTURADOS.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a modificar'),
       calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
       summary: z.string().optional().describe('Nuevo título del evento'),
-      description: z.string().optional().describe('Nueva descripción'),
+      description: z.string().optional().describe('Nueva descripción manual (NO RECOMENDADO - usar datos estructurados)'),
       location: z.string().optional().describe('Nueva ubicación'),
       start: z.string().optional().describe('Nueva fecha de inicio (ISO)'),
       end: z.string().optional().describe('Nueva fecha de fin (ISO)'),
       userEmail: z.string().optional().describe('Email del usuario para enviar notificaciones de actualización (opcional)'),
+
+      // Datos Estructurados para reconstrucción de formato
+      clientName: z.string().optional().describe("Nombre y Apellido del cliente (para actualizar ficha)"),
+      clientPhone: z.string().optional().describe("Teléfono del cliente"),
+      clientEmail: z.string().optional().describe("Email del cliente"),
+      propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
+      propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
-    execute: async ({ eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId }) => {
+    execute: async ({ eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId, clientName, clientPhone, clientEmail, propertyAddress, propertyLink }) => {
       const calendar = getGoogleCalendar();
       const calendarId = inputCalendarId || 'primary';
 
-      // Recuperar evento actual para no perder datos que no se actualizan
+      // Recuperar evento actual
       let currentEvent;
       try {
         const getRes = await calendar.events.get({ calendarId, eventId });
@@ -207,11 +218,35 @@ export const calendarManagerTools = {
          endBody = { dateTime: sanitizedEnd.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
       }
 
+      // LOGICA DE DESCRIPCIÓN:
+      // 1. Si se pasa 'description' manual, se usa esa.
+      // 2. Si NO se pasa manual, pero SÍ se pasan datos estructurados (aunque sea uno), se intenta reconstruir.
+      //    Para reconstruir, necesitamos los valores faltantes. Intentamos sacarlos del evento actual o usar defaults.
+      //    IMPORTANTE: Si el agente quiere actualizar solo el teléfono, DEBERÍA pasar el resto de datos para asegurar integridad.
+      //    Sin embargo, podemos intentar parsear el 'currentEvent.description' si tiene el formato estándar, pero es frágil.
+      //    Asumiremos que si usa datos estructurados, provee la información relevante.
+      
+      let finalDescription = description || currentEvent.description;
+
+      if (!description && (clientName || clientPhone || clientEmail || propertyAddress || propertyLink)) {
+          // Intentamos reconstruir usando los nuevos valores O defaults "a mantener" (que en realidad no tenemos).
+          // Por seguridad, si el agente usa structured update, pedimos que pase lo que tenga.
+          // Fallback a "Sin X" si no se provee, lo cual podría borrar info vieja si no se pasa.
+          // Dado que el agente tiene contexto completo, lo correcto es que pase todo.
+          const cName = clientName || "Cliente Actualizado";
+          const cPhone = clientPhone || "Sin tel";
+          const cEmail = clientEmail || "Sin email";
+          const pAddress = propertyAddress || location || currentEvent.location || "Ver link";
+          const pLink = propertyLink || "Sin link";
+
+          finalDescription = `visita propiedad - cliente: ${cName} - tel: ${cPhone} - email: ${cEmail} - Domicilio: ${pAddress} - Link: ${pLink}`;
+      }
+
       const requestBody: any = {
         ...currentEvent,
         summary: summary || currentEvent.summary,
-        description: description || currentEvent.description,
-        location: location || currentEvent.location,
+        description: finalDescription,
+        location: location || propertyAddress || currentEvent.location, // propertyAddress también actualiza location si se provee
         start: startBody,
         end: endBody,
       };

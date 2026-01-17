@@ -73,8 +73,7 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
   }
 
   // --- 4. CONFIGURACIÓN DEL CALENDARIO (FASE 6) ---
-  const calendarFormat = `visita propiedad - cliente: ${datos.nombre} ${datos.apellido || ''} - tel: ${datos.telefono || 'Sin tel'} - email: ${datos.email || 'Sin email'} - Domicilio: ${datos.propertyAddress || 'Ver link'} - Link: ${datos.link || 'Sin link'}`;
-
+  
   // --- PROMPT FINAL ---
   return `
 # I. IDENTIDAD & ROL
@@ -120,8 +119,7 @@ Actúa como una persona real escribiendo rápido por WhatsApp:
 
 4. **CONFIRMACIÓN DE CITA (CALENDAR)**:
    - Al agendar, informa: "Listo ${datos.nombre}, te agendé la visita para el [día] a las [hora] hs. Dirección: [dirección]".
-   - **Formato obligatorio de descripción para la create_calendar_event**:
-     "${calendarFormat}"
+   - **USO DE TOOL**: Debes completar los campos: clientName, clientPhone, clientEmail, propertyAddress y propertyLink. NO inventes una descripción, la tool la genera sola.
 
 ${operationalProtocol}
 
