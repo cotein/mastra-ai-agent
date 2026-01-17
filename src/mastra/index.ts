@@ -33,6 +33,7 @@ const activeProcessing = new Set<string>();
 
 // Memoria de sesión para el tipo de operación (Persistencia RAM)
 const sessionOperationMap = new Map<string, OperacionTipo>();
+const sessionLinkMap = new Map<string, string>();
 
 export const mastra = new Mastra({
   storage,
@@ -144,10 +145,19 @@ export const mastra = new Mastra({
                       finalContextData = clientData || {} as ClientData; 
                     }
 
+                    // Recuperar LINK de la sesión (RAM) si existe para mantener contexto
+                    if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
+                        finalContextData.link = sessionLinkMap.get(currentThreadId);
+                    }
+
                     // B. WORKFLOW / LOGICA DE NEGOCIO
                     if (linksEncontrados && linksEncontrados.length > 0) {
                       const url = linksEncontrados[0].trim();
                       finalContextData.link = url;
+                      
+                      // ACTUALIZAR LINK EN SESIÓN
+                      sessionLinkMap.set(currentThreadId, url);
+                      
                       if (currentThreadId) {
                           await ThreadContextService.clearThreadMessages(currentThreadId);
                       }

@@ -9,14 +9,14 @@ import { PgVector, PostgresStore } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
 import { generateText } from 'ai';
-import { calendarManagerTools } from './tools/8b1a238f-9f4e-434d-be4b-c31c03890037.mjs';
-import { gmailManagerTools } from './tools/aef61a66-7fa7-44bb-a2da-2492cb33e2c2.mjs';
-import { potentialSaleEmailTool } from './tools/660497ea-94b9-4eb3-90b3-84c48bb3ceac.mjs';
-import { realEstatePropertyFormatterTool } from './tools/bbfb5b2c-4124-4733-8308-431cba40e39d.mjs';
+import { calendarManagerTools } from './tools/22b37d00-1ed9-4f68-88ac-4af428f2a809.mjs';
+import { gmailManagerTools } from './tools/e80cad26-60bd-4e77-9f12-fb4cbed549f7.mjs';
+import { potentialSaleEmailTool } from './tools/53e1b844-8c6d-4529-bd11-a6624fef3089.mjs';
+import { realEstatePropertyFormatterTool } from './tools/933cc9d1-3edd-4fa6-b554-409d37be153f.mjs';
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import z$1, { z, ZodOptional, ZodNullable, ZodArray, ZodRecord, ZodObject, ZodFirstPartyTypeKind } from 'zod';
-import { apifyScraperTool } from './tools/241984a1-1ba1-4b3a-b5f1-00b682471bb7.mjs';
-import { propertyDataProcessorTool } from './tools/26316762-8c7e-40e6-8e59-b41c78dad546.mjs';
+import { apifyScraperTool } from './tools/e1de35e5-3fae-4827-adac-14440f7003d9.mjs';
+import { propertyDataProcessorTool } from './tools/6fdd81f8-98fd-435d-958d-a06acebde053.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
@@ -266,7 +266,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   } else {
     selectedTools = { ...selectedTools };
   }
-  console.log("#".repeat(50));
+  console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
   return new Agent({
@@ -407,6 +407,7 @@ const dynamicInstructions = (datos, op) => {
   if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
   else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
   else momentoDia = "\xA1Buenas noches!";
+  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, ` : `${momentoDia}`;
   const opNormalizada = op ? op.toUpperCase() : "INDEFINIDO";
   const missingFields = auditMissingFields(datos);
   let statusBlock = "";
@@ -422,9 +423,9 @@ Hazlo de forma conversacional y natural, integrado en tu respuesta (ej: "${obten
 (NO inventes datos. NO preguntes uno a uno).
     `;
   } else {
+    const statusText = opNormalizada === "INDEFINIDO" ? "## \u2705 ESTADO: FICHA COMPLETA. (Sin operaci\xF3n definida todav\xEDa)\n### \u26A1 TU OBJETIVO:\nSaluda amablemente, pres\xE9ntate brevemente si no lo has hecho, y pregunta en qu\xE9 puedes ayudarle hoy. NO asumas que quiere comprar o alquilar todav\xEDa. Espera su indicaci\xF3n.\n" : "## \u2705 ESTADO: FICHA COMPLETA\nProcede con el protocolo operativo.";
     statusBlock = `
-## \u2705 ESTADO: FICHA COMPLETA
-Procede con el protocolo operativo.
+${statusText}
     `;
   }
   let protocolBlock = "";
@@ -449,12 +450,13 @@ Procede con el protocolo operativo.
 5. **Fin**: Cierra la conversaci\xF3n.
       `;
   }
-  const saludo = determineGreeting(datos, momentoDia);
+  const saludo = determineGreeting(datos, saludoInicial);
   return `
   ${CORE_IDENTITY}
 
   # SALUDO INICIAL SUGERIDO
-  Usa este saludo para comenzar la conversaci\xF3n: "${saludo}"
+  Si es el INICIO de la conversaci\xF3n, puedes usar este: "${saludo}".
+  IMPORTANTE: Si el usuario dice "hola" pero YA ESTABAN HABLANDO (mira el historial), IGNORA este saludo sugerido y responde naturalmente retomando el tema anterior (ej: "\xA1Hola de nuevo! \xBFSeguimos con la casa?").
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || "No registrado"}
@@ -597,6 +599,8 @@ const propertyWorkflow = createWorkflow({
 await storage.init();
 const realEstateAgent = await getRealEstateAgent();
 const activeProcessing = /* @__PURE__ */ new Set();
+const sessionOperationMap = /* @__PURE__ */ new Map();
+const sessionLinkMap = /* @__PURE__ */ new Map();
 const mastra = new Mastra({
   storage,
   vectors: {
@@ -656,8 +660,8 @@ const mastra = new Mastra({
             try {
               console.log("\u{1F3C3}\u200D\u2642\uFE0F Iniciando proceso en background...");
               let finalContextData = {};
-              finalContextData.operacionTipo = "";
-              let propertyOperationType = "";
+              let propertyOperationType = sessionOperationMap.get(currentThreadId) || "";
+              finalContextData.operacionTipo = propertyOperationType;
               try {
                 if (clientData && Object.keys(clientData).length > 0) {
                   const validResourceId = userId || "anonymous_user";
@@ -678,9 +682,13 @@ const mastra = new Mastra({
                 console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
                 finalContextData = clientData || {};
               }
+              if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
+                finalContextData.link = sessionLinkMap.get(currentThreadId);
+              }
               if (linksEncontrados && linksEncontrados.length > 0) {
                 const url = linksEncontrados[0].trim();
                 finalContextData.link = url;
+                sessionLinkMap.set(currentThreadId, url);
                 if (currentThreadId) {
                   await ThreadContextService.clearThreadMessages(currentThreadId);
                 }
@@ -705,6 +713,8 @@ const mastra = new Mastra({
                       finalContextData.propertyAddress = outputLogica.address;
                       finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripci\xF3n disponible";
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      sessionOperationMap.set(currentThreadId, propertyOperationType);
+                      console.log(`\u{1F4BE} [RAM] Tipo de operaci\xF3n guardado para ${currentThreadId}: ${propertyOperationType}`);
                     }
                   }
                 } catch (workflowErr) {

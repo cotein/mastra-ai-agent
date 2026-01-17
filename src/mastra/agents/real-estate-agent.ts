@@ -64,7 +64,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
       // Caso default (quizás solo herramientas de consulta)
       selectedTools = { ...selectedTools }; 
   }
-  console.log('#'.repeat(50));
+  console.log('#'.repeat(50) + ' REAL ESTATE AGENT ' + '#'.repeat(50));
   console.log(finalInstructions);
   console.log('#'.repeat(50));
   return new Agent({

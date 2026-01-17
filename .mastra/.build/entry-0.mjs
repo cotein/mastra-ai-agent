@@ -804,7 +804,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   } else {
     selectedTools = { ...selectedTools };
   }
-  console.log("#".repeat(50));
+  console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
   return new Agent({
@@ -905,7 +905,15 @@ const realEstateCleaningAgent = new Agent({
     Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
     No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
     El tono debe ser profesional y persuasivo, destacando los beneficios.
-    
+
+    Interpretar:
+    - Requisitos.
+    - Informaci\xF3n de mascotas (solo si est\xE1 expl\xEDcita).
+
+    Reglas:
+    - Si no hay info de mascotas, no mencionarlas.
+    - Si no hay requisitos: "Los requisitos son: garant\xEDa propietaria o seguro de cauci\xF3n, recibos que tripliquen el alquiler, mes de adelanto, dep\xF3sito y gastos de informes."
+    - No decir "en el aviso no figura".
   `,
   model: "openai/gpt-4.1-mini"
 });
@@ -986,9 +994,18 @@ function auditMissingFields(datos) {
   if (isInvalid(datos.nombre)) missing.push("NOMBRE");
   if (isInvalid(datos.apellido)) missing.push("APELLIDO");
   if (isInvalid(datos.email)) missing.push("EMAIL");
-  if (isInvalid(datos.telefono)) missing.push("TEL\xC9FONO");
   return missing;
 }
+function determineGreeting(datos, saludoInicial) {
+  if (datos.link) {
+    return `${saludoInicial} Recib\xED el link, lo reviso y te digo... \xBFMe confirm\xE1s si es esta la propiedad que te interesa?`;
+  }
+  if (!datos.link) {
+    return `${saludoInicial} Para ayudarte mejor, entr\xE1 en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
+  }
+  return `${saludoInicial} Nico te saluda \u{1F44B}.`;
+}
+;
 function obtenerFraseAleatoriaRevisarLink() {
   const indiceAleatorio = Math.floor(Math.random() * frasesRevisareLink.length);
   return frasesRevisareLink[indiceAleatorio];
@@ -1011,12 +1028,12 @@ function obtenerFraseAleatoriaSaludoFausti() {
 }
 const CORE_IDENTITY = `
 # I. IDENTIDAD & ROL
-Eres NICO, asistente de IA de Fausti Propiedades.
+Eres NICO, asistente de IA de Fausti Propiedades. Inmobiliaria de Lomas de Zamora, buenos Aires, Argentina.
 
 ### \u{1F4F1} ESTILO DE COMUNICACI\xD3N (WHATSAPP MODE)
 Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
-- **TONO**: Casual, emp\xE1tico, directo ("vos", "dale", "genial").
+- **TONO**: Calido, Profesional, Casual, emp\xE1tico, directo ("vos", "dale", "genial").
 - **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
 - **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
 - **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
@@ -1026,7 +1043,8 @@ Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **Privacidad**:
   1. TERCEROS: JAM\xC1S reveles datos de otros.
   2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
-`;
+  3. Si te piden informaci\xF3n que no corresponde revelar, respond\xE9: "No tengo acceso a esa informaci\xF3n."
+  `;
 function getTemporalContext() {
   return (/* @__PURE__ */ new Date()).toLocaleDateString("es-AR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 }
@@ -1041,7 +1059,7 @@ const dynamicInstructions = (datos, op) => {
   if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
   else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
   else momentoDia = "\xA1Buenas noches!";
-  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, ${obtenerFraseAleatoriaSaludo()}` : `${momentoDia} ${obtenerFraseAleatoriaSaludoFausti()}`;
+  const saludoInicial = datos.nombre ? `${momentoDia} ${datos.nombre}, ` : `${momentoDia}`;
   const opNormalizada = op ? op.toUpperCase() : "INDEFINIDO";
   const missingFields = auditMissingFields(datos);
   let statusBlock = "";
@@ -1057,16 +1075,16 @@ Hazlo de forma conversacional y natural, integrado en tu respuesta (ej: "${obten
 (NO inventes datos. NO preguntes uno a uno).
     `;
   } else {
+    const statusText = opNormalizada === "INDEFINIDO" ? "## \u2705 ESTADO: FICHA COMPLETA. (Sin operaci\xF3n definida todav\xEDa)\n### \u26A1 TU OBJETIVO:\nSaluda amablemente, pres\xE9ntate brevemente si no lo has hecho, y pregunta en qu\xE9 puedes ayudarle hoy. NO asumas que quiere comprar o alquilar todav\xEDa. Espera su indicaci\xF3n.\n" : "## \u2705 ESTADO: FICHA COMPLETA\nProcede con el protocolo operativo.";
     statusBlock = `
-## \u2705 ESTADO: FICHA COMPLETA
-Procede con el protocolo operativo.
+${statusText}
     `;
   }
   let protocolBlock = "";
   if (opNormalizada === "ALQUILAR") {
     protocolBlock = `
 # III. FLUJO: ALQUILER (OBJETIVO: CITA)
-1. **Validaci\xF3n**: Celebra la elecci\xF3n ("\xA1Excelente opci\xF3n!").
+1. **Acci\xF3n**: Est\xE1 disponible para alquilar.
 2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **${obtenerFraseAleatoriaDisponibilidad()} y 'get_available_slots'.** 
    - NO asumas horarios.
 3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event' usando SIEMPRE el calendarId: 'c.vogzan@gmail.com'.
@@ -1075,18 +1093,22 @@ Procede con el protocolo operativo.
   } else if (opNormalizada === "VENDER") {
     protocolBlock = `
 # III. FLUJO: VENTA (OBJETIVO: DERIVAR)
-1. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
+1. **Acci\xF3n**: Est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?
+2. Cuando el cliente responde afirmativamente que quiere realizar la visita (por ejemplo: "s\xED", "dale", "ok", "quiero visitar", "coordinemos")
+3. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA 'potential_sale_email' AHORA MISMO.
    - Si no tienes la direcci\xF3n exacta, usa el T\xEDtulo de la propiedad o "Propiedad consultada".
    - NO esperes confirmaci\xF3n del usuario. ES OBLIGATORIO NOTIFICAR YA.
-2. **Despedida**: SOLO DESPU\xC9S de ejecutar la herramienta, di: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
-3. **Fin**: Cierra la conversaci\xF3n.
+4. **Despedida**: SOLO DESPU\xC9S de ejecutar la herramienta, di: "Genial, en el d\xEDa te contactamos por la compra. \xA1Gracias! \u{1F60A}"
+5. **Fin**: Cierra la conversaci\xF3n.
       `;
   }
+  const saludo = determineGreeting(datos, saludoInicial);
   return `
   ${CORE_IDENTITY}
 
   # SALUDO INICIAL SUGERIDO
-  Usa este saludo para comenzar la conversaci\xF3n: "${saludoInicial}"
+  Si es el INICIO de la conversaci\xF3n, puedes usar este: "${saludo}".
+  IMPORTANTE: Si el usuario dice "hola" pero YA ESTABAN HABLANDO (mira el historial), IGNORA este saludo sugerido y responde naturalmente retomando el tema anterior (ej: "\xA1Hola de nuevo! \xBFSeguimos con la casa?").
 
   # II. DATOS ACTUALES
   - Nombre: ${datos.nombre || "No registrado"}
@@ -1284,6 +1306,8 @@ const propertyWorkflow = createWorkflow({
 await storage.init();
 const realEstateAgent = await getRealEstateAgent("");
 const activeProcessing = /* @__PURE__ */ new Set();
+const sessionOperationMap = /* @__PURE__ */ new Map();
+const sessionLinkMap = /* @__PURE__ */ new Map();
 const mastra = new Mastra({
   storage,
   vectors: {
@@ -1343,8 +1367,8 @@ const mastra = new Mastra({
             try {
               console.log("\u{1F3C3}\u200D\u2642\uFE0F Iniciando proceso en background...");
               let finalContextData = {};
-              finalContextData.operacionTipo = "";
-              let propertyOperationType = "";
+              let propertyOperationType = sessionOperationMap.get(currentThreadId) || "";
+              finalContextData.operacionTipo = propertyOperationType;
               try {
                 if (clientData && Object.keys(clientData).length > 0) {
                   const validResourceId = userId || "anonymous_user";
@@ -1365,9 +1389,13 @@ const mastra = new Mastra({
                 console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
                 finalContextData = clientData || {};
               }
+              if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
+                finalContextData.link = sessionLinkMap.get(currentThreadId);
+              }
               if (linksEncontrados && linksEncontrados.length > 0) {
                 const url = linksEncontrados[0].trim();
                 finalContextData.link = url;
+                sessionLinkMap.set(currentThreadId, url);
                 if (currentThreadId) {
                   await ThreadContextService.clearThreadMessages(currentThreadId);
                 }
@@ -1392,6 +1420,8 @@ const mastra = new Mastra({
                       finalContextData.propertyAddress = outputLogica.address;
                       finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripci\xF3n disponible";
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      sessionOperationMap.set(currentThreadId, propertyOperationType);
+                      console.log(`\u{1F4BE} [RAM] Tipo de operaci\xF3n guardado para ${currentThreadId}: ${propertyOperationType}`);
                     }
                   }
                 } catch (workflowErr) {
