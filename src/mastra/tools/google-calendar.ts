@@ -57,7 +57,7 @@ export const calendarManagerTools = {
     id: 'create_calendar_event',
     description: 'Registra citas de visitas inmobiliarias. SE DEBEN PROVEER LOS DATOS ESTRUCTURADOS DEL CLIENTE.',
     inputSchema: z.object({
-      calendarId: z.string().optional().describe('ID del calendario donde agendar. (Default: primary)'),
+      calendarId: z.string().optional().describe('ID del calendario donde agendar. c.vogzan@gmail.com'),
       title: z.string().optional().describe('Título descriptivo del evento'),
       start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${new Date().toLocaleDateString()} y agendás para un mes anterior, usá el año ${new Date().getFullYear()}.`),
       end: z.string().describe("Fecha fin ISO8601"),
@@ -71,7 +71,7 @@ export const calendarManagerTools = {
     }),
     execute: async (input) => {
       const calendar = getGoogleCalendar();
-      const calendarId = input.calendarId || 'primary';
+      const calendarId = input.calendarId || 'c.vogzan@gmail.com';
       const { start, end } = getSanitizedDates(input.start, input.end);
 
       const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
