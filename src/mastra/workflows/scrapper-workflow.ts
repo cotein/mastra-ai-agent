@@ -41,6 +41,7 @@ const extratDataFromScrapperTool = createStep({
     address: z.string(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
     keywords: z.string(),
+    text: z.string(),
   }),
   maxRetries: 2,
   retryDelay: 2500, 
@@ -60,7 +61,8 @@ const extratDataFromScrapperTool = createStep({
       return {
         address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
         operacionTipo: result.operacionTipo, // Guaranteed by the check above
-        keywords: result.keywords || ""
+        keywords: result.keywords || "",
+        text: result.text || ""
       };
     } catch (error: any) {
       // Si detectamos rate limit, lanzamos error para que el workflow reintente
@@ -79,6 +81,7 @@ const cleanDataStep = createStep({
     keywords: z.string(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
     address: z.string(),
+    text: z.string(),
   }),
   outputSchema: z.object({
     formattedText: z.string(),
@@ -89,12 +92,12 @@ const cleanDataStep = createStep({
     
     // Llamamos a la herramienta de formateo
     const result = await realEstatePropertyFormatterTool.execute({
-        keywordsZonaProp: inputData.keywords
+        keywordsZonaProp: inputData.text
     });
 
 
     return {
-      formattedText: result.formattedText || inputData.keywords, // Fallback si falla
+      formattedText: result.formattedText || inputData.text, // Fallback si falla
       operacionTipo: inputData.operacionTipo,
       address: inputData.address
     };

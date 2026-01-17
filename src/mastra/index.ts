@@ -34,6 +34,7 @@ const activeProcessing = new Set<string>();
 // Memoria de sesión para el tipo de operación (Persistencia RAM)
 const sessionOperationMap = new Map<string, OperacionTipo>();
 const sessionLinkMap = new Map<string, string>();
+const sessionPropiedadInfoMap = new Map<string, string>();
 
 export const mastra = new Mastra({
   storage,
@@ -55,12 +56,9 @@ export const mastra = new Mastra({
             let threadId = body.id;
             let userId = body.id;
             let clientData = {}
-            // --- 🛑 ZONA DE DEBUGGING 🛑 ---
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
             console.log("1. ThreadID recibido:", threadId);
-            // ------------------------------
 
-            // Relaxed check: Manychat might not send threadId
             if (!threadId && !userId) {
               return c.json({ error: "Either ThreadID or UserID is required" }, 400);
             }
@@ -69,19 +67,7 @@ export const mastra = new Mastra({
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             const linksEncontrados = message?.match(urlRegex);
 
-            // 0. DEDUPLICACIÓN (Evitar re-procesar mismo mensaje si Manychat reintenta)
-            // Creamos un hash simple del request: ID + Mensaje
-            const requestHash = `${userId || 'anon'}_${message?.substring(0, 50)}`; // Usamos primeros 50 chars para hash
-            
-            // Variable global para tracking (definida fuera del handler, simulada aquí por scope del módulo)
-            // NOTA: Para que persista entre llamadas, 'activeProcessing' debe estar FUERA de 'registerApiRoute'
-            // Pero como no puedo editar fuera de este bloque fácilmente sin contexto, asumo que la definiré arriba.
-            // ... Espera, no puedo definirla arriba con solo replace de este bloque.
-            // Haremos un hack: usaremos una propiedad en el objeto global 'globalThis' o similar si fuera necesario, 
-            // pero mejor defino 'activeProcessing' en el ámbito del módulo en un paso separado o asumo que está.
-            // MEJOR ESTRATEGIA: Usaré una variable estática dentro del handler si pudiera, o mejor, editaré el archivo para agregar la variable arriba.
-            // ...
-            // Ok, dado las limitaciones de replace_file, haré un replace más grande que incluya la definición de la variable.
+            const requestHash = `${userId || 'anon'}_${message?.substring(0, 50)}`; 
             
             if (activeProcessing.has(requestHash)) {
                  console.log(`⚠️ Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
@@ -151,6 +137,12 @@ export const mastra = new Mastra({
                         finalContextData.link = sessionLinkMap.get(currentThreadId);
                     }
 
+                    // Recuperar PropiedadInfo de la sesión (RAM) si existe
+                    if (!finalContextData.propiedadInfo && sessionPropiedadInfoMap.has(currentThreadId)) {
+                         finalContextData.propiedadInfo = sessionPropiedadInfoMap.get(currentThreadId);
+                         console.log(`💾 [RAM] Recuperando propiedadInfo de sesión para ${currentThreadId}`);
+                    }
+
                     // B. WORKFLOW / LOGICA DE NEGOCIO
                     if (linksEncontrados && linksEncontrados.length > 0) {
                       const url = linksEncontrados[0].trim();
@@ -188,7 +180,9 @@ export const mastra = new Mastra({
                                 
                                 // ACTUALIZAR SESIÓN EN MEMORIA
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
+                                sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
                                 console.log(`💾 [RAM] Tipo de operación guardado para ${currentThreadId}: ${propertyOperationType}`);
+                                console.log(`💾 [RAM] PropiedadInfo guardado para ${currentThreadId}`);
                             }
                         }
                       } catch (workflowErr) {

@@ -3,12 +3,13 @@ import { z } from "zod";
 import{ OperacionTipo } from "../../types";
 export const propertyDataProcessorTool = createTool({
   id: "property-data-processor",
-  description: "Procesa los datos crudos de una propiedad (JSON) y extrae keywords, localidad y dirección.",
+  description: "Procesa los datos crudos de una propiedad (JSON) y extrae caracteristicas, requisitos, localidad y dirección.",
   inputSchema: z.object({
     rawData: z.array(z.any()), // Recibe el array de objetos que retorna el scraper
   }),
   outputSchema: z.object({
     keywords: z.string().optional(),
+    text: z.string().optional(),
     addressLocality: z.string().optional(),
     streetAddress: z.string().optional(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
@@ -23,6 +24,7 @@ export const propertyDataProcessorTool = createTool({
 
     const metadata = dataItem.metadata || {};
     const keywords = metadata.keywords;
+    const text = metadata.text;
 
     let addressLocality: string | undefined;
     let streetAddress: string | undefined;
@@ -63,6 +65,7 @@ export const propertyDataProcessorTool = createTool({
       addressLocality,
       streetAddress,
       operacionTipo,
+      text,
     };
   },
 });

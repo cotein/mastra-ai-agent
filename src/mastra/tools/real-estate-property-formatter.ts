@@ -10,7 +10,7 @@ const openai = new OpenAI({
 
 export const realEstatePropertyFormatterTool = createTool({
   id: "real-estate-property-formatter",
-  description: "Limpia, extrae y formatea información técnica de descripciones inmobiliarias.",
+  description: "Limpia, extrae y formatea información de descripciones inmobiliarias.",
   inputSchema: z.object({
     keywordsZonaProp: z.string().describe("El texto bruto de la descripción de la propiedad"),
   }),
@@ -20,21 +20,32 @@ export const realEstatePropertyFormatterTool = createTool({
   execute: async ({ keywordsZonaProp }) => {
     console.log("   [Tool] 🛠️  Conectando directo con API OpenAI (gpt-4o-mini)...");
 
-    const systemPrompt = `Eres un motor de extracción de datos técnicos inmobiliarios. 
-    Tu única tarea es extraer y limpiar los datos.
+    const systemPrompt = `Eres un motor de extracción de datos técnicos inmobiliarios de Alta Precisión.
+    Analiza el texto desordenado y extrae la siguiente información estructurada.
     
-    Campos a extraer:
-    - Tipo
-    - Operación
-    - Ubicación (Barrio, Localidad)
-    - Superficie (solo números y unidad)
-    - Ambientes (cantidad)
+    ### CAMPOS A EXTRAER:
+    1. **Tipo Operación**: (Alquiler, Venta o Temporal).
+    2. **Ubicación**: Barrio y Localidad (Ej: "Palermo, CABA" o "El Cantón, Escobar"). Limpia nombres de inmobiliarias.
+    3. **Superficie**: Prioriza Metros Totales y Cubiertos (Ej: "800m² Totales / 200m² Cubiertos").
+    4. **Ambientes**: Cantidad de ambientes y dormitorios.
+    5. **Requisitos**: Busca menciones sobre garantías (Ej: "Garantía Propietaria", "Seguro Caución", "Recibo de sueldo"). Si no hay info explícita, pon "Consultar".
+    6. **Mascotas**: Busca "Acepta mascotas", "No acepta mascotas" o íconos. Si no dice nada, pon "A confirmar".
+    7. **Precio**: Moneda y Valor (Ej: "USD 2.100").
+    8. **Expensas**: Si figuran.
 
-    Reglas de Salida ESTRICTAS:
-    1. Devuelve SOLO la lista de datos. NADA de texto introductorio ("Aquí tienes", "Revisando").
-    2. NO uses Markdown (ni negritas **, ni bloques, ni guiones -).
-    3. NO repitas información.
-    4. Formato: "Campo: Valor".`;
+    ### REGLAS DE LIMPIEZA:
+    - Ignora textos de publicidad como "Garantías 100% online", "Avisarme si baja", etc, salvo que sirvan para deducir requisitos.
+    - Si hay datos contradictorios (ej: 4 amb y 6 amb), usa el más específico o el que aparezca en la descripción técnica.
+
+    ### FORMATO DE SALIDA (Texto Plano):
+    Operación: [Valor]
+    Ubicación: [Valor]
+    Superficie: [Valor]
+    Ambientes: [Valor]
+    Precio: [Valor]
+    Requisitos: [Valor]
+    Mascotas: [Valor]
+    `;
 
     const userPrompt = `Procesa este texto raw: "${keywordsZonaProp}"`;
 
