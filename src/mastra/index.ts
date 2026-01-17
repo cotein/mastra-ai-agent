@@ -181,6 +181,9 @@ export const mastra = new Mastra({
                                 // FIX: Capturamos la descripción scrappeada
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
+
+                                // ENVIAR INFORMACIÓN AL USUARIO
+                                await sendToManychat(userId, finalContextData.propiedadInfo);
                                 
                                 // ACTUALIZAR SESIÓN EN MEMORIA
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);

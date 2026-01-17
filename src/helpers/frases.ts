@@ -40,7 +40,7 @@ export const frasesSolicitudDatos: string[] = [
   "Necesito tu nombre completo, dirección de email y teléfono para proceder.",
   "Para completar el proceso, por favor ingresa tu nombre, apellido, email y número telefónico.",
   "Sería necesario que me brindes tu nombre, apellido, correo y teléfono de contacto.",
-  "Para seguir adelante, te solicito tu nombre, apellidos, email y teléfono.",
+  "Para seguir adelante, te solicito tu nombre, apellido, email y teléfono.",
   "Requiero tu nombre y apellido, junto con tu email y número de teléfono.",
   "Para poder ayudarte, necesito que me des tu nombre completo, email y teléfono.",
   "Es necesario que proporciones tu nombre, apellido, dirección de correo y teléfono.",
