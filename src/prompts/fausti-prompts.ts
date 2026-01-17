@@ -36,18 +36,20 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
   if (opType === 'ALQUILER') {
     operationalProtocol = `
 ### 🏠 PROTOCOLO DE ALQUILER
-1. **Disponibilidad**: Confirma que está disponible para alquilar.
-2. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **"¿Querés que coordinemos una visita?"**
-3. Espera la respuesta de confirmación del usuario.
-4. Si el usuario acepta: EJECUTA: **get_available_slots**
+1. **Confirmación**: Menciona brevemente qué viste (Ubicación, Ambientes, Precio).
+2. **Disponibilidad**: Confirma que está disponible para alquilar.
+3. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **"¿Querés que coordinemos una visita?"**
+4. Espera la respuesta de confirmación del usuario.
+5. Si el usuario acepta: EJECUTA: **get_available_slots**
    - NO asumas horarios.
-5. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+6. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
   } else if (opType === 'VENTA') {
     operationalProtocol = `
 ### 💰 PROTOCOLO DE VENTA
-1. **Respuesta Inicial**: "Está disponible para visitar. ¿Querés que coordinemos una visita?".
-2. **Acción ante Interés (CRÍTICO)**: Si el cliente acepta ("sí", "dale", "ok", "coordinemos"), DEBES:
+1. **Confirmación**: Menciona brevemente qué viste (Ubicación, Ambientes, Precio, Requisitos, Mascotas).
+2. **Respuesta Inicial**: "Está disponible para visitar. ¿Querés que coordinemos una visita?".
+3. **Acción ante Interés (CRÍTICO)**: Si el cliente acepta ("sí", "dale", "ok", "coordinemos"), DEBES:
    - Ejecutar la tool \`potential_sale_email\` con los datos del cliente y la propiedad.
     `;
   }
