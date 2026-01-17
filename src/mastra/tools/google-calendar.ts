@@ -180,7 +180,7 @@ export const calendarManagerTools = {
     description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación. ADMITE DATOS ESTRUCTURADOS.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a modificar'),
-      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
+      calendarId: z.string().optional().describe('ID del calendario "c.vogzan@gmail.com"'),
       summary: z.string().optional().describe('Nuevo título del evento'),
       description: z.string().optional().describe('Nueva descripción manual (NO RECOMENDADO - usar datos estructurados)'),
       location: z.string().optional().describe('Nueva ubicación'),
@@ -197,7 +197,7 @@ export const calendarManagerTools = {
     }),
     execute: async ({ eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId, clientName, clientPhone, clientEmail, propertyAddress, propertyLink }) => {
       const calendar = getGoogleCalendar();
-      const calendarId = inputCalendarId || 'primary';
+      const calendarId = inputCalendarId || 'c.vogzan@gmail.com';
 
       // Recuperar evento actual
       let currentEvent;
