@@ -50,7 +50,7 @@ export const mastra = new Mastra({
         handler: async (c: any) => {
           try {
             const body = await c.req.json();
-            console.log("📨 RAW BODY RECIBIDO:", JSON.stringify(body, null, 2)); // <--- ESTO IMPRIMIRÁ TODO LO QUE LLEGA
+            // Log movido abajo
             let message = body.custom_fields.endResponse;
             let whatsappPhone = body.whatsapp_phone;
             let threadId = body.id;
@@ -61,7 +61,10 @@ export const mastra = new Mastra({
                 clientData.telefono = whatsappPhone;
             }
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
+            console.log("📨 RAW BODY COMPLETO:", JSON.stringify(body, null, 2));
             console.log("1. ThreadID recibido:", threadId);
+            console.log("📱 WhatsApp Phone recibido:", whatsappPhone);
+            console.log("💬 Mensaje recibido:", message?.substring(0, 50) + "...");
 
             if (!threadId && !userId) {
               return c.json({ error: "Either ThreadID or UserID is required" }, 400);
