@@ -31,6 +31,9 @@ const realEstateAgent = await getRealEstateAgent('');
 // Cache simple para deduplicar requests (TTL 15s)
 const activeProcessing = new Set<string>();
 
+// Memoria de sesión para el tipo de operación (Persistencia RAM)
+const sessionOperationMap = new Map<string, OperacionTipo>();
+
 export const mastra = new Mastra({
   storage,
   vectors: { vectorStore },
@@ -112,8 +115,10 @@ export const mastra = new Mastra({
                     
                     // Definimos una variable única para acumular datos
                     let finalContextData: ClientData = {};
-                    finalContextData.operacionTipo = '';
-                    let propertyOperationType: OperacionTipo  = '';
+                    
+                    // Recuperar tipo de operación de la sesión (RAM) como default
+                    let propertyOperationType: OperacionTipo  = sessionOperationMap.get(currentThreadId) || '';
+                    finalContextData.operacionTipo = propertyOperationType;
 
                     try {
                       // Actualizar DB si viene info nueva del cliente
@@ -166,6 +171,10 @@ export const mastra = new Mastra({
                                 // FIX: Capturamos la descripción scrappeada
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
+                                
+                                // ACTUALIZAR SESIÓN EN MEMORIA
+                                sessionOperationMap.set(currentThreadId, propertyOperationType);
+                                console.log(`💾 [RAM] Tipo de operación guardado para ${currentThreadId}: ${propertyOperationType}`);
                             }
                         }
                       } catch (workflowErr) {
