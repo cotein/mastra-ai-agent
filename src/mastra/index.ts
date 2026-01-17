@@ -51,6 +51,7 @@ export const mastra = new Mastra({
             const body = await c.req.json();
             console.log("📨 RAW BODY RECIBIDO:", JSON.stringify(body, null, 2)); // <--- ESTO IMPRIMIRÁ TODO LO QUE LLEGA
             let message = body.custom_fields.endResponse;
+            let whatsappPhone = body.whatsapp_phone;
             let threadId = body.id;
             let userId = body.id;
             let clientData = {}
@@ -116,7 +117,7 @@ export const mastra = new Mastra({
                     
                     // Definimos una variable única para acumular datos
                     let finalContextData: ClientData = {};
-                    
+                    finalContextData.telefono = whatsappPhone;
                     // Recuperar tipo de operación de la sesión (RAM) como default
                     let propertyOperationType: OperacionTipo  = sessionOperationMap.get(currentThreadId) || '';
                     finalContextData.operacionTipo = propertyOperationType;
