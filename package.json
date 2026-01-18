@@ -5,7 +5,7 @@
   "scripts": {
     "test": "vitest run",
     "dev": "NODE_OPTIONS=\"--require ${PWD}/src/polyfill.js\" mastra dev",
-    "build": "mastra build",
+    "build": "mastra build --debug",
     "start": "mastra start"
   },
   "dependencies": {

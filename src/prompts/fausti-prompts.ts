@@ -48,7 +48,7 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 
   if (opType === 'ALQUILER') {
     operationalProtocol = `
-**SOLICITUD DE CONTACTO**:
+**SOLICITUD DE CONTACTO**
    - Al confirmar horario: "Perfecto, ¿me confirmás tu email para completar los datos de la agenda?". No insistas si no lo da.
 
 # IV 🏠 PROTOCOLO DE ALQUILER
@@ -71,7 +71,6 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 3. **Acción**: Ejecutar **potential_sale_email**.
 4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`get_available_slots\`. No ofrezcas slots de visita.
 5. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`create_calendar_event\`.
-
     `;
   }
 //4 CIERRE

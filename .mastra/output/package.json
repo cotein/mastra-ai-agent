@@ -9,7 +9,22 @@
   },
   "author": "Mastra",
   "license": "ISC",
-  "dependencies": {},
+  "dependencies": {
+    "@mastra/core": "1.0.0-beta.19",
+    "dotenv": "17.2.3",
+    "axios": "1.13.2",
+    "@mastra/memory": "1.0.0-beta.10",
+    "@ai-sdk/openai": "3.0.7",
+    "@mastra/pg": "1.0.0-beta.11",
+    "pg": "8.16.3",
+    "ai": "6.0.24",
+    "zod": "latest",
+    "googleapis": "169.0.0",
+    "openai": "6.15.0",
+    "hono": "4.11.1",
+    "chrono-node": "latest",
+    "typescript": "5.9.3"
+  },
   "pnpm": {
     "neverBuiltDependencies": []
   }
