@@ -52,7 +52,7 @@ const getGmail = () => {
       });
       return res.data;
     },
-  }),
+  });
 
   // LEER Y CLASIFICAR ÚLTIMOS EMAILS
   // LEER Y CLASIFICAR ÚLTIMOS EMAILS
@@ -78,4 +78,4 @@ const getGmail = () => {
       );
       return messages;
     },
-  }),
+  });
