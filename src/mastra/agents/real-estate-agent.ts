@@ -8,7 +8,7 @@ import { OperacionTipo } from "./../../types";
 // Herramientas
 import { calendarManagerTools } from '../tools/google-calendar';
 import { gmailManagerTools } from '../tools/google-gmail';
-import { potentialSaleEmailTool, alertaAvisoVentaTool } from '../tools/index';
+import { potentialSaleEmailTool } from '../tools/index';
 
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
@@ -19,7 +19,6 @@ const commonTools = {
 };
 const salesTools = {
     potential_sale_email: potentialSaleEmailTool, // Solo para ventas
-    alerta_aviso_venta: alertaAvisoVentaTool,
 };
 
 export const getRealEstateAgent = async (userId: string, instructionsInjected?: string, operacionTipo?: OperacionTipo) => {
