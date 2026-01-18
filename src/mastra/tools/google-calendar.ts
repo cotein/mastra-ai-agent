@@ -109,7 +109,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: error.message };
       }
     },
-  }),
+  });
 
   /**
    * Herramienta para listar eventos con ancla en el tiempo real
@@ -144,7 +144,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: error.message };
       }
     },
-  }),
+  });
 
   /**
    * Herramienta para obtener un evento por ID
@@ -170,7 +170,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: error.message };
       }
     },
-  }),
+  });
 
   /**
    * Herramienta para actualizar un evento existente
@@ -271,7 +271,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: error.message };
       }
     },
-  }),
+  });
 
   /**
    * Herramienta para eliminar un evento
@@ -298,7 +298,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: error.message };
       }
     },
-  }),
+  });
 
   /**
    * Herramienta para obtener horarios disponibles
@@ -397,7 +397,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
 
       return availableSlots.slice(0, 5); // Retornar top 5
     },
-  }),
+  });
 
   /**
    * Herramienta para buscar eventos usando lenguaje natural
@@ -509,4 +509,4 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
              return { success: false, error: error.message };
         }
     }
-  }),
+  });
