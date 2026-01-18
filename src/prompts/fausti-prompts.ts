@@ -52,10 +52,16 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
   } else if (opType === 'VENTA') {
     operationalProtocol = `
 ### 💰 PROTOCOLO DE VENTA
-1. **Confirmación**: Menciona brevemente qué viste (Ubicación, Ambientes, Precio, Requisitos, Mascotas).
-2. **Respuesta Inicial**: "Está disponible para visitar. ¿Querés que coordinemos una visita?".
-3. **Acción ante Interés (CRÍTICO)**: Si el cliente acepta ("sí", "dale", "ok", "coordinemos"), DEBES:
-   - Ejecutar la tool \`potential_sale_email\` con los datos del cliente y la propiedad.
+"Está disponible para visitar. Querés que coordinemos una visita?"
+
+**REGLAS PARA OPERACION DE VENTA:**
+
+a) Cuando el cliente responde afirmativamente que quiere realizar la visita (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos"):
+   - Ejecutar inmediatamente las siguientes herramientas:
+     • **potential_sale_email** con los datos extraídos (propiedad) y los datos del cliente (Nombre, Teléfono, Email).
+
+b) Luego de ejecutar los avisos, responder al cliente ÚNICAMENTE con:
+   "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
     `;
   }
 //4 CIERRE
