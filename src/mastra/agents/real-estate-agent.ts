@@ -6,18 +6,30 @@ import { TokenLimiter, ToolCallFilter, PromptInjectionDetector, ModerationProces
 import { WhatsAppStyleProcessor } from "../processors/whatsapp-style-processor";
 import { OperacionTipo } from "./../../types";
 // Herramientas
-import { calendarManagerTools } from '../tools/google-calendar';
-import { gmailManagerTools } from '../tools/google-gmail';
+import { 
+  createCalendarEvent, 
+  listCalendarEvents, 
+  getCalendarEvent, 
+  updateCalendarEvent, 
+  deleteCalendarEvent, 
+  getAvailableSlots,
+  findEventByNaturalDate
+} from '../tools/google-calendar';
+import { sendEmail, listEmails } from '../tools/google-gmail';
 import { potentialSaleEmailTool } from '../tools/index';
 
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
 
-const { getAvailableSlots, ...otherCalendarTools } = calendarManagerTools;
-
 const commonTools = {
-    ...otherCalendarTools, 
-    ...gmailManagerTools,
+    createCalendarEvent,
+    listCalendarEvents,
+    getCalendarEvent,
+    updateCalendarEvent,
+    deleteCalendarEvent,
+    findEventByNaturalDate,
+    sendEmail,
+    listEmails,
 };
 const salesTools = {
     potential_sale_email: potentialSaleEmailTool, // Solo para ventas
@@ -58,13 +70,15 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
 
   const selectedTools = operacionTipo === 'ALQUILAR' 
-    ? { ...commonTools, getAvailableSlots }
+    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent }
     : operacionTipo === 'VENDER'
-    ? { ...commonTools, ...salesTools }
-    : { ...commonTools };
+    ? { potential_sale_email: potentialSaleEmailTool }
+    : { };
+
   console.log('#'.repeat(50) + ' REAL ESTATE AGENT ' + '#'.repeat(50));
   console.log(finalInstructions);
   console.log('#'.repeat(50));
+
   return new Agent({
     // ID obligatorio para Mastra
     id: "real-estate-agent", 

@@ -49,11 +49,11 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
   };
 };
 
-export const calendarManagerTools = {
+// export const calendarManagerTools = {
   /**
    * Herramienta para crear eventos con validación de año automática
    */
-  createCalendarEvent: createTool({
+  export const createCalendarEvent = createTool({
     id: 'create_calendar_event',
     description: 'Registra citas de visitas inmobiliarias. SE DEBEN PROVEER LOS DATOS ESTRUCTURADOS DEL CLIENTE.',
     inputSchema: z.object({
@@ -114,7 +114,7 @@ export const calendarManagerTools = {
   /**
    * Herramienta para listar eventos con ancla en el tiempo real
    */
-  listCalendarEvents: createTool({
+  export const listCalendarEvents = createTool({
     id: 'list_calendar_events',
     description: 'Lista los próximos eventos del calendario para verificar disponibilidad.',
     inputSchema: z.object({
@@ -149,7 +149,7 @@ export const calendarManagerTools = {
   /**
    * Herramienta para obtener un evento por ID
    */
-  getCalendarEvent: createTool({
+  export const getCalendarEvent = createTool({
     id: 'get_calendar_event',
     description: 'Obtiene los detalles de un evento específico de Google Calendar usando su ID.',
     inputSchema: z.object({
@@ -175,7 +175,7 @@ export const calendarManagerTools = {
   /**
    * Herramienta para actualizar un evento existente
    */
-  updateCalendarEvent: createTool({
+  export const updateCalendarEvent = createTool({
     id: 'update_calendar_event',
     description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación. ADMITE DATOS ESTRUCTURADOS.',
     inputSchema: z.object({
@@ -276,7 +276,7 @@ export const calendarManagerTools = {
   /**
    * Herramienta para eliminar un evento
    */
-  deleteCalendarEvent: createTool({
+  export const deleteCalendarEvent = createTool({
     id: 'delete_calendar_event',
     description: 'Elimina (cancela) un evento de Google Calendar permanentemente.',
     inputSchema: z.object({
@@ -303,7 +303,7 @@ export const calendarManagerTools = {
   /**
    * Herramienta para obtener horarios disponibles
    */
-  getAvailableSlots: createTool({
+  export const getAvailableSlots = createTool({
     id: 'get_available_slots',
     description: 'Obtiene slots de horarios disponibles de 10:00 a 16:00 para los próximos 5 días, excluyendo fines de semana.',
     inputSchema: z.object({}),
@@ -403,7 +403,7 @@ export const calendarManagerTools = {
    * Herramienta para buscar eventos usando lenguaje natural
    * Ej: "Lunes 12 de enero a las 12", "el lunes a mediodía"
    */
-  findEventByNaturalDate: createTool({
+  export const findEventByNaturalDate = createTool({
     id: 'find_event_by_natural_date',
     description: 'Busca eventos en el calendario usando una fecha/hora en lenguaje natural (ej. "lunes 12 a las 12", "mañana al mediodía"). Retorna los eventos encontrados en esa fecha/hora exacta o aproximada.',
     inputSchema: z.object({
@@ -510,4 +510,3 @@ export const calendarManagerTools = {
         }
     }
   }),
-};

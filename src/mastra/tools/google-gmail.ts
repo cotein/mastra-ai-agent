@@ -15,9 +15,10 @@ const getGmail = () => {
   return google.gmail({ version: 'v1', auth });
 };
 
-export const gmailManagerTools = {
+// export const gmailManagerTools = {
   // ENVIAR EMAIL
-  sendEmail: createTool({
+  // ENVIAR EMAIL
+  export const sendEmail = createTool({
     id: 'send_gmail',
     description: 'Envía un correo electrónico a un cliente.',
     inputSchema: z.object({
@@ -54,7 +55,8 @@ export const gmailManagerTools = {
   }),
 
   // LEER Y CLASIFICAR ÚLTIMOS EMAILS
-  listEmails: createTool({
+  // LEER Y CLASIFICAR ÚLTIMOS EMAILS
+  export const listEmails = createTool({
     id: 'list_emails',
     description: 'Lee los últimos correos recibidos para clasificarlos.',
     inputSchema: z.object({
@@ -77,4 +79,3 @@ export const gmailManagerTools = {
       return messages;
     },
   }),
-};
