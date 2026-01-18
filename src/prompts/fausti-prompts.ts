@@ -46,7 +46,7 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
   // --- 3. LÓGICA DE OPERACIÓN (FASE 3 Y 4) ---
   let operationalProtocol = "";
 
-  if (opType === 'ALQUILER') {
+  if (opType === 'ALQUILAR') {
     operationalProtocol = `
 III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
 1. FASE DE IDENTIFICACIÓN (BLOQUEO)
@@ -186,7 +186,7 @@ Si el usuario confirma que quiere ver la propiedad, coordinar una cita o avanzar
   }
 //5 CIERRE
   let cierre = "";
-  if (opType === 'ALQUILER') {
+  if (opType === 'ALQUILAR') {
     cierre = `
 # VI. CIERRE DE CONVERSACIÓN
 - Si agradece: "Gracias a vos ${datos.nombre}. Cualquier cosa me escribís."
