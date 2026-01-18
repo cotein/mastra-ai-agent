@@ -8,10 +8,12 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 
-# Copiamos solo el código fuente (no node_modules gracias al .dockerignore)
+# Copiamos el código fuente
 COPY src ./src
 COPY tsconfig.json ./
-COPY *.config.* ./
+
+# Copiar archivos de configuración si existen (opcional)
+COPY .env-example .env-example* ./
 
 RUN npm run build
 
