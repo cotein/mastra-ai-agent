@@ -53,15 +53,12 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 
 # IV 🏠 PROTOCOLO DE ALQUILER
 1. **OBLIGATORIO**: Detalla los **REQUISITOS** que figuran en la ficha (Garantías, recibos, etc). Esto es prioridad máxima.
-2. **Menciona**: Otras características de la propiedad.
-3. **Disponibilidad**: Confirma que está disponible.
-4. **Acción**: Pregunta: **"¿Querés que coordinemos una visita?"**
-5. Espera la respuesta de confirmación del usuario.
-6. Si el usuario acepta: EJECUTA: **get_available_slots** y PRESÉNTALOS.
-   - "Tengo estos horarios: [Lista]. ¿Cuál te queda mejor?"
-6. **Selección**: Espera a que el usuario elija un horario.
-7. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event**.
-8. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
+2. **Acción**: **"La propiedad está disponible ¿Querés que coordinemos una visita?"**
+3. Espera la respuesta de confirmación del usuario.
+4. Si el usuario acepta: EJECUTA: **get_available_slots** y muestra los horarios disponibles.
+5. **Selección**: Espera a que el usuario elija un horario.
+6. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event**.
+7. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
   } else if (opType === 'VENDER') {
     operationalProtocol = `
