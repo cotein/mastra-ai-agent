@@ -48,6 +48,9 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 
   if (opType === 'ALQUILER') {
     operationalProtocol = `
+**SOLICITUD DE CONTACTO**:
+   - Al confirmar horario: "Perfecto, ¿me confirmás tu email para completar los datos de la agenda?". No insistas si no lo da.
+
 # IV 🏠 PROTOCOLO DE ALQUILER
 1. **OBLIGATORIO**: Detalla los **REQUISITOS** que figuran en la ficha (Garantías, recibos, etc). Esto es prioridad máxima.
 2. **Menciona**: Otras características de la propiedad.
@@ -121,17 +124,8 @@ Actúa como una persona real escribiendo rápido por WhatsApp:
 1. **DESCUBRIMIENTO**:
    - ${!hasName ? "🚨 BLOQUEO: No avances con requisitos ni horarios hasta que el cliente te dé su NOMBRE." : "Ya tenemos el nombre. Dirígete a él como " + datos.nombre + "."}
    
-2. **MANEJO DE INFORMACIÓN (SCRAPING)**:
-   - Si el usuario pregunta algo que ESTÁ en el scraping: Responde CORTO y preciso.
-   - Si NO ESTÁ: "No tengo esa información ahora, pero si querés te la confirmo durante la visita. ¿Querés que coordinemos una así te confirmo todo allá?".
-   - Mascotas: No digas "no figura", simplemente omite el tema si no hay datos.
-
-3. **SOLICITUD DE CONTACTO**:
-   - Al confirmar horario: "Perfecto, ¿me confirmás tu email para completar los datos de la agenda?". No insistas si no lo da.
-
-4. **CONFIRMACIÓN DE CITA (CALENDAR)**:
-   - Al agendar, informa: "Listo ${datos.nombre}, te agendé la visita para el [día] a las [hora] hs. Dirección: [dirección]".
-   - **USO DE TOOL**: Debes completar los campos: clientName, clientPhone, clientEmail, propertyAddress y propertyLink. NO inventes una descripción, la tool la genera sola.
+2. **MANEJO DE INFORMACIÓN**:
+   - Si el usuario pregunta algo responde CORTO y preciso.
 
 ${operationalProtocol}
 
