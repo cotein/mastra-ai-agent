@@ -13,8 +13,10 @@ import { potentialSaleEmailTool } from '../tools/index';
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
 
+const { getAvailableSlots, ...otherCalendarTools } = calendarManagerTools;
+
 const commonTools = {
-    ...calendarManagerTools, 
+    ...otherCalendarTools, 
     ...gmailManagerTools,
 };
 const salesTools = {
@@ -55,15 +57,11 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
 
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
 
-  let selectedTools = { ...commonTools };
-  if (operacionTipo === 'ALQUILAR') {
-      selectedTools = { ...selectedTools };
-  } else if (operacionTipo === 'VENDER') {
-      selectedTools = { ...selectedTools, ...salesTools };
-  } else {
-      // Caso default (quizás solo herramientas de consulta)
-      selectedTools = { ...selectedTools }; 
-  }
+  const selectedTools = operacionTipo === 'ALQUILAR' 
+    ? { ...commonTools, getAvailableSlots }
+    : operacionTipo === 'VENDER'
+    ? { ...commonTools, ...salesTools }
+    : { ...commonTools };
   console.log('#'.repeat(50) + ' REAL ESTATE AGENT ' + '#'.repeat(50));
   console.log(finalInstructions);
   console.log('#'.repeat(50));

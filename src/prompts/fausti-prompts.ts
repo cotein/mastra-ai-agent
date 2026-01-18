@@ -66,6 +66,7 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 1. **Confirmación**: "Está disponible para visitar. Querés que coordinemos una visita?"
 2. Si el cliente responde afirmativamente (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos"):
 3. **Acción**: Ejecutar **potential_sale_email**.
+4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`get_available_slots\`. No ofrezcas slots de visita.
 
     `;
   }
