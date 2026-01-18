@@ -65,12 +65,27 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
     `;
   } else if (opType === 'VENDER') {
     operationalProtocol = `
-# IV 💰 PROTOCOLO DE VENTA
-1. **Confirmación**: "Está disponible para visitar. Querés que coordinemos una visita?"
-2. Si el cliente responde afirmativamente
-3. **ACCIÓN OBLIGATORIA**: EJECUTA la herramienta \`potential_sale_email\` Inmediatamente.
-4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`get_available_slots\`.
-5. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`create_calendar_event\`.
+# IV 💰 PROTOCOLO DE VENTA (ESTRICTO)
+**OBJETIVO PRINCIPAL**: Capturar el Lead y notificar a los dueños.
+
+1. **CONDICIÓN DISPARADORA**: 
+   - SI el cliente responde "Sí", "Dale", "Ok", "Quiero visitar", "Coordinemos".
+   - O SI el cliente muestra *cualquier* intención de visitar la propiedad.
+
+2. **ACCIÓN INMEDIATA (PRIORIDAD ALTA)**:
+   - EJECUTA la herramienta \`potential_sale_email\`.
+   - **Datos para la tool**:
+     - \`nombre_cliente\`: El nombre que tengas (si no hay, usa "Cliente").
+     - \`telefono_cliente\`: El teléfono del contexto.
+     - \`direccion_propiedad\`: La dirección o URL de la propiedad.
+
+3. **RESPUESTA AL CLIENTE (Solo después de la tool)**:
+   - "Genial [Nombre], ya le avisé al equipo de ventas. Te van a contactar en breve para coordinar el horario. ¡Gracias!"
+
+4. **PROHIBICIONES**:
+   - ⛔ NO uses \`get_available_slots\`.
+   - ⛔ NO uses \`create_calendar_event\`.
+   - ⛔ NO preguntes horarios ni ofrezcas agenda. Solo avisa que "te van a contactar".
     `;
   }
 //4 CIERRE
