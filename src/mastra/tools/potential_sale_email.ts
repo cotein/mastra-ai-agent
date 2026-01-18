@@ -14,13 +14,13 @@ const getGmail = () => {
 
 export const potentialSaleEmailTool = createTool({
   id: 'potential_sale_email',
-  description: 'NOTIFICACIÓN OBLIGATORIA: Envía un email a los dueños cuando un cliente quiere visitar una propiedad de VENTA.',
+  description: 'Úsala ÚNICAMENTE cuando el usuario confirme interés en comprar una propiedad y YA TENGAS su nombre. Envía un correo interno al equipo de ventas con los datos del lead y la propiedad',
   inputSchema: z.object({
-    nombre_cliente: z.string(),
-    telefono_cliente: z.string(),
-    email_cliente: z.string().optional(),
-    direccion_propiedad: z.string().optional().describe("La dirección o título de la propiedad. Si no está exacta, usa el título."),
-    url_propiedad: z.string().optional(),
+    nombre_cliente: z.string().describe("Nombre completo del interesado"),
+    telefono_cliente: z.string().describe("Número de teléfono de contacto"),
+    email_cliente: z.string().optional().describe("Email si estuviera disponible"),
+    direccion_propiedad: z.string().optional().describe("Dirección o título de la propiedad de interés"),
+    url_propiedad: z.string().optional().describe("Link de la publicación (Zonaprop, etc)"),
   }),
   execute: async (input) => {
     const gmail = getGmail();
