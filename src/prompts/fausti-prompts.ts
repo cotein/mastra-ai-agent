@@ -60,7 +60,7 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 7. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event**.
 8. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
-  } else if (opType === 'VENTA') {
+  } else if (opType === 'VENDER') {
     operationalProtocol = `
 # IV 💰 PROTOCOLO DE VENTA
 1. **Confirmación**: "Está disponible para visitar. Querés que coordinemos una visita?"
@@ -78,7 +78,7 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 - Si se despide: "Que tengas muy buen día ${datos.nombre} 👋"
 
     `;
-  } else if (opType === 'VENTA') {
+  } else if (opType === 'VENDER') {
     cierre = `
 - 4. **Respuesta**: "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
     `;
