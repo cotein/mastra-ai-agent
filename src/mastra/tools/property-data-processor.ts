@@ -48,17 +48,28 @@ export const propertyDataProcessorTool = createTool({
     }
 
 
+    // Helper para detectar tipo
+    const detectOperation = (content: string = ""): OperacionTipo | "" => {
+      const upper = content.toUpperCase();
+      if (upper.includes("ALQUILAR") || upper.includes("ALQUILER") || upper.includes("ALQUILA")) return "ALQUILAR";
+      if (upper.includes("VENDER") || upper.includes("VENTA") || upper.includes("VENDE")) return "VENDER";
+      return "";
+    };
+
+    // 1. Intentar con Keywords (Metadata)
     if (keywords) {
-      const upperKeywords = keywords.toUpperCase();
-      if (upperKeywords.includes("ALQUILAR") || upperKeywords.includes("ALQUILER") || upperKeywords.includes("ALQUILA")) {
-        operacionTipo = "ALQUILAR";
-      } else if (upperKeywords.includes("VENDER") || upperKeywords.includes("VENTA") || upperKeywords.includes("COMPRA")) {
-        operacionTipo = "VENDER";
-      } else {
-        operacionTipo = "";
-      }
-    } else {
-      operacionTipo = "";
+        operacionTipo = detectOperation(keywords);
+    }
+
+    // 2. Fallback: Intentar con Título (Metadata)
+    if (!operacionTipo && metadata.title) {
+        operacionTipo = detectOperation(metadata.title);
+    }
+
+    // 3. Fallback: Intentar con Texto completo (Primeros 500 chars para no falsos positivos por 'otros anuncios')
+    if (!operacionTipo && text) {
+        // Limitamos a los primeros caracteres porque a veces abajo recomiendan "Otras propiedades en Venta"
+        operacionTipo = detectOperation(text.substring(0, 500));
     }
 
     return {
