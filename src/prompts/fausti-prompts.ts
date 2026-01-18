@@ -67,9 +67,9 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
     operationalProtocol = `
 # IV 💰 PROTOCOLO DE VENTA
 1. **Confirmación**: "Está disponible para visitar. Querés que coordinemos una visita?"
-2. Si el cliente responde afirmativamente (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos"):
-3. **Acción**: Ejecutar **potential_sale_email**.
-4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`get_available_slots\`. No ofrezcas slots de visita.
+2. Si el cliente responde afirmativamente
+3. **ACCIÓN OBLIGATORIA**: EJECUTA la herramienta \`potential_sale_email\` Inmediatamente.
+4. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`get_available_slots\`.
 5. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`create_calendar_event\`.
     `;
   }
