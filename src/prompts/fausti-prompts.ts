@@ -14,6 +14,19 @@ import { ClientData, OperacionTipo } from "../types";
  */
 export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): string => {
   
+  const ahora = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    hour: 'numeric',
+    hour12: false
+  }).format(new Date());
+
+  const hora = parseInt(ahora);
+  
+  let momentoDia = "";
+  if (hora >= 5 && hora < 14) momentoDia = "¡Buen día!";
+  else if (hora >= 14 && hora < 20) momentoDia = "¡Buenas tardes!";
+  else momentoDia = "¡Buenas noches!";
+
   // --- 1. AUDITORÍA DE ESTADO (MEMORIA DE TRABAJO) ---
   const hasName = !!(datos.nombre && datos.nombre !== 'Preguntar');
   const hasLink = !!datos.link;
@@ -23,11 +36,11 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
   // --- 2. CONSTRUCCIÓN DE SALUDO DINÁMICO (FASE 1) ---
   let saludoSugerido = "";
   if (hasLink && !hasName) {
-    saludoSugerido = "Hola!, Cómo estás? Nico te saluda, lo reviso y te digo... ¿Me decís tu nombre y apellido así te agendo bien?";
+    saludoSugerido = momentoDia + " " + "Cómo estás? Nico te saluda, lo reviso y te digo... ¿Me decís tu nombre y apellido así te agendo bien?";
   } else if (!hasLink && !hasName) {
-    saludoSugerido = "Hola!, Cómo estás? Nico te saluda 👋 ¿Me podrías decir tu nombre y apellido así te agendo bien?";
+    saludoSugerido = momentoDia + " " + "Cómo estás? Nico te saluda 👋 ¿Me podrías decir tu nombre y apellido así te agendo bien?";
   } else if (hasName && !hasLink) {
-    saludoSugerido = `${datos.nombre}, para ayudarte mejor, entrá en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
+    saludoSugerido = momentoDia + " " + `${datos.nombre}, para ayudarte mejor, entrá en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
   }
 
   // --- 3. LÓGICA DE OPERACIÓN (FASE 3 Y 4) ---
@@ -35,33 +48,25 @@ export const dynamicInstructions = (datos: ClientData, op: OperacionTipo): strin
 
   if (opType === 'ALQUILER') {
     operationalProtocol = `
-### 🏠 PROTOCOLO DE ALQUILER
-1. **Confirmación con ÉNFASIS EN REQUISITOS**:
-   - Saluda brevemente.
-   - Menciona la ubicación y precio.
-   - **OBLIGATORIO**: Detalla los **REQUISITOS** que figuran en la ficha (Garantías, recibos, etc). Esto es prioridad máxima.
-2. **Disponibilidad**: Confirma que está disponible.
-3. **Acción**: Recién después de dar los requisitos, pregunta: **"¿Querés que coordinemos una visita?"**
-4. Espera la respuesta de confirmación del usuario.
-5. Si el usuario acepta: EJECUTA: **get_available_slots** y PRESÉNTALOS.
+# IV 🏠 PROTOCOLO DE ALQUILER
+1. **OBLIGATORIO**: Detalla los **REQUISITOS** que figuran en la ficha (Garantías, recibos, etc). Esto es prioridad máxima.
+2. **Menciona**: Otras características de la propiedad.
+3. **Disponibilidad**: Confirma que está disponible.
+4. **Acción**: Pregunta: **"¿Querés que coordinemos una visita?"**
+5. Espera la respuesta de confirmación del usuario.
+6. Si el usuario acepta: EJECUTA: **get_available_slots** y PRESÉNTALOS.
    - "Tengo estos horarios: [Lista]. ¿Cuál te queda mejor?"
 6. **Selección**: Espera a que el usuario elija un horario.
-7. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event** (Usa los datos estructurados).
+7. **Agendar**: Una vez confirmado el horario, agenda la visita con la herramienta **create_calendar_event**.
 8. **PROHIBICIÓN**: BAJO NINGUNA CIRCUNSTANCIA utilices la herramienta \`potential_sale_email\`.
     `;
   } else if (opType === 'VENTA') {
     operationalProtocol = `
-### 💰 PROTOCOLO DE VENTA
-"Está disponible para visitar. Querés que coordinemos una visita?"
+# IV 💰 PROTOCOLO DE VENTA
+1. **Confirmación**: "Está disponible para visitar. Querés que coordinemos una visita?"
+2. Si el cliente responde afirmativamente (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos"):
+3. **Acción**: Ejecutar **potential_sale_email**.
 
-**REGLAS PARA OPERACION DE VENTA:**
-
-a) Cuando el cliente responde afirmativamente que quiere realizar la visita (por ejemplo: "sí", "dale", "ok", "quiero visitar", "coordinemos"):
-   - Ejecutar inmediatamente las siguientes herramientas:
-     • **potential_sale_email** con los datos extraídos (propiedad) y los datos del cliente (Nombre, Teléfono, Email).
-
-b) Luego de ejecutar los avisos, responder al cliente ÚNICAMENTE con:
-   "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
     `;
   }
 //4 CIERRE
@@ -75,13 +80,10 @@ b) Luego de ejecutar los avisos, responder al cliente ÚNICAMENTE con:
     `;
   } else if (opType === 'VENTA') {
     cierre = `
-   - "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊".
-   - Si se despide: "Que tengas muy buen día ${datos.nombre} 👋"
+- 4. **Respuesta**: "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
     `;
   }
 
-  // --- 4. CONFIGURACIÓN DEL CALENDARIO (FASE 6) ---
-  
   // --- PROMPT FINAL ---
   return `
 # I. IDENTIDAD & ROL
