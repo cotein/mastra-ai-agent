@@ -2,14 +2,14 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
 
+const CALENDAR_ID = 'c.vogzan@gmail.com';
+
+
 /**
  * CONFIGURACIÓN DE AUTH
  * Se mantiene tu lógica de autenticación con Google
  */
-/**
- * CONFIGURACIÓN DE AUTH
- * Se mantiene tu lógica de autenticación con Google
- */
+
 const getGoogleCalendar = () => {
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
@@ -55,9 +55,8 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
    */
   export const createCalendarEvent = createTool({
     id: 'create_calendar_event',
-    description: 'Registra citas de visitas inmobiliarias. SE DEBEN PROVEER LOS DATOS ESTRUCTURADOS DEL CLIENTE.',
+    description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario. Requiere datos del cliente y propiedad.',
     inputSchema: z.object({
-      calendarId: z.string().optional().describe('ID del calendario donde agendar. c.vogzan@gmail.com'),
       title: z.string().optional().describe('Título descriptivo del evento'),
       start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${new Date().toLocaleDateString()} y agendás para un mes anterior, usá el año ${new Date().getFullYear()}.`),
       end: z.string().optional().describe("Fecha fin ISO8601"),
@@ -68,11 +67,11 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
       propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
     execute: async (input) => {
-      console.log("🛠️ Tool Invoked: create_calendar_event");
-      console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+      console.log("🛠️ [TOOL START] create_calendar_event iniciado");
+      console.log("📊 [PARAMS] Parámetros recibidos del agente:", JSON.stringify(input, null, 2));
       
       const calendar = getGoogleCalendar();
-      const calendarId = input.calendarId || 'c.vogzan@gmail.com';
+      const calendarId = CALENDAR_ID;
       const { start, end } = getSanitizedDates(input.start, input.end);
 
       const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
@@ -118,16 +117,16 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
     id: 'list_calendar_events',
     description: 'Lista los próximos eventos del calendario para verificar disponibilidad.',
     inputSchema: z.object({
-      calendarId: z.string().optional().describe('ID del calendario a consultar. (Default: "primary")'),
+
       daysAhead: z.number().default(15).describe('Número de días a futuro para consultar'),
     }),
     execute: async (input) => {
       console.log("🛠️ Tool Invoked: list_calendar_events");
       console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
       
-      const { daysAhead, calendarId: inputCalendarId } = input;
+      const { daysAhead } = input;
       const calendar = getGoogleCalendar();
-      const calendarId = inputCalendarId || 'primary';
+      const calendarId = CALENDAR_ID;
       
       // timeMin es SIEMPRE el momento exacto de la ejecución
       const timeMin = new Date().toISOString();
@@ -158,15 +157,15 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
     description: 'Obtiene los detalles de un evento específico de Google Calendar usando su ID.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a obtener'),
-      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
+
     }),
     execute: async (input) => {
       console.log("🛠️ Tool Invoked: get_calendar_event");
       console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
 
-      const { eventId, calendarId: inputCalendarId } = input;
+      const { eventId } = input;
       const calendar = getGoogleCalendar();
-      const calendarId = inputCalendarId || 'primary';
+      const calendarId = CALENDAR_ID;
       try {
         const response = await calendar.events.get({
           calendarId,
@@ -188,7 +187,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
     description: 'Actualiza un evento existente en Google Calendar. Puede cambiar horario, título, descripción o ubicación. ADMITE DATOS ESTRUCTURADOS.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a modificar'),
-      calendarId: z.string().optional().describe('ID del calendario "c.vogzan@gmail.com"'),
+
       summary: z.string().optional().describe('Nuevo título del evento'),
       description: z.string().optional().describe('Nueva descripción manual (NO RECOMENDADO - usar datos estructurados)'),
       location: z.string().optional().describe('Nueva ubicación'),
@@ -207,9 +206,9 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
       console.log("🛠️ Tool Invoked: update_calendar_event");
       console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
 
-      const { eventId, summary, description, location, start, end, userEmail, calendarId: inputCalendarId, clientName, clientPhone, clientEmail, propertyAddress, propertyLink } = input;
+      const { eventId, summary, description, location, start, end, userEmail, clientName, clientPhone, clientEmail, propertyAddress, propertyLink } = input;
       const calendar = getGoogleCalendar();
-      const calendarId = inputCalendarId || 'c.vogzan@gmail.com';
+      const calendarId = CALENDAR_ID;
 
       // Recuperar evento actual
       let currentEvent;
@@ -293,16 +292,16 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
     description: 'Elimina (cancela) un evento de Google Calendar permanentemente.',
     inputSchema: z.object({
       eventId: z.string().describe('ID del evento a eliminar'),
-      calendarId: z.string().optional().describe('ID del calendario (Default: "primary")'),
+
       notifyStart: z.boolean().optional().describe('No utilizado, pero mantenido por compatibilidad'),
     }),
     execute: async (input) => {
       console.log("🛠️ Tool Invoked: delete_calendar_event");
       console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
 
-      const { eventId, calendarId: inputCalendarId } = input;
+      const { eventId } = input;
       const calendar = getGoogleCalendar();
-      const calendarId = inputCalendarId || 'primary';
+      const calendarId = CALENDAR_ID;
       try {
         await calendar.events.delete({
           calendarId,
@@ -361,7 +360,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         try {
           // Obtener eventos de este día
           const response = await calendar.events.list({
-            calendarId: 'primary',
+            calendarId: CALENDAR_ID,
             timeMin: dayStart.toISOString(),
             timeMax: dayEnd.toISOString(),
             singleEvents: true,
@@ -484,7 +483,7 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
 
         try {
             const response = await calendar.events.list({
-                calendarId: 'primary',
+                calendarId: CALENDAR_ID,
                 timeMin,
                 timeMax,
                 singleEvents: true,

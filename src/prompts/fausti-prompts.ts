@@ -119,7 +119,7 @@ V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
         Debo ejecutar la herramienta de disponibilidad para ofrecer opciones reales, NO preguntar al usuario sus horarios.
       </pensamiento>
       <tool_call>get_available_slots(property_id="Gorriti 368")</tool_call>
-      <nico>joya diego. para esa propiedad tengo disponible este martes a las 11:00 o el jueves a las 16:30. ¿cuál te queda mejor?</nico>
+      <nico>Genial diego. para esa propiedad tengo disponible este martes a las 11:00 o el jueves a las 16:30. ¿cuál te queda mejor?</nico>
     </interaccion>
 
     <interaccion>
@@ -127,7 +127,7 @@ V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
       <pensamiento>
         Horario confirmado por el usuario. Procedo a crear el evento en el calendario.
       </pensamiento>
-      <tool_call>create_calendar_event(clientName="Diego Barru", start="2026-01-20T11:00:00", end="2026-01-20T12:00:00", propertyAddress="Gorriti 368")</tool_call>
+      create_calendar_event(title="Visita Gorriti 368 - Diego Barru", clientName="Diego Barru", start="2026-01-20T11:00:00", end="2026-01-20T12:00:00", propertyAddress="Gorriti 368", clientPhone="1162836540", clientEmail="diego@diego.com", propertyLink="https://www.zonaprop.com.ar/propiedades/clasificado/alclapin-mitre-337-57754806.html?n_src=Listado&n_pg=1&n_pos=6")
       <nico>perfecto, ya te anoté para el martes a las 11hs en gorriti 368. ¿me pasás un email para mandarte el recordatorio?</nico>
     </interaccion>
 
