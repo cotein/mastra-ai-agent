@@ -129,8 +129,8 @@ const parseDateInput = async (input: string): Promise<string> => {
     description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario. Requiere datos del cliente y propiedad.',
     inputSchema: z.object({
       title: z.string().optional().describe('Título descriptivo del evento'),
-      start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${new Date().toLocaleDateString()} y agendás para un mes anterior, usá el año ${new Date().getFullYear()}.`),
-      end: z.string().optional().describe("Fecha fin ISO8601"),
+      start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Mañana 15:00"). La herramienta entenderá la fecha.'),
+      end: z.string().optional().describe('Fecha y hora de fin. Puede ser formato ISO8601 O texto natural.'),
       clientName: z.string().describe("Nombre y Apellido del cliente"),
       clientPhone: z.string().optional().describe("Teléfono del cliente"),
       clientEmail: z.string().optional().describe("Email del cliente"),
@@ -268,8 +268,8 @@ const parseDateInput = async (input: string): Promise<string> => {
       summary: z.string().optional().describe('Nuevo título del evento'),
       description: z.string().optional().describe('Nueva descripción manual (NO RECOMENDADO - usar datos estructurados)'),
       location: z.string().optional().describe('Nueva ubicación'),
-      start: z.string().optional().describe('Nueva fecha de inicio (ISO)'),
-      end: z.string().optional().describe('Nueva fecha de fin (ISO)'),
+      start: z.string().optional().describe('Nueva fecha de inicio (ISO o Natural)'),
+      end: z.string().optional().describe('Nueva fecha de fin (ISO o Natural)'),
       userEmail: z.string().optional().describe('Email del usuario para enviar notificaciones de actualización (opcional)'),
 
       // Datos Estructurados para reconstrucción de formato
