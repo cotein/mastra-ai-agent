@@ -199,13 +199,14 @@ function trySpecificPatterns(
   }> = [
     // Formato: "jueves 22 a las 10" (Día + Número + Hora)
     {
-      pattern: /^(el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(\d{1,2})\s+(?:de\s+[^0-9]+\s+)?(a\s+las?|alas|a\s+la)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/,
+      // Quitamos ^ para permitir texto previo ("dale jueves...")
+      pattern: /(?:^|\s)(?:el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(\d{1,2})\s+(?:de\s+[^0-9]+\s+)?(a\s+las?|alas|a\s+la)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
       handler: (match, today) => {
-        // match[2] = dia semana (ignorado, confiamos en el numero)
-        const dayNumber = parseInt(match[3]);
-        const hour = parseInt(match[5]);
-        const minute = match[6] ? parseInt(match[6]) : 0;
-        const ampm = match[7] || '';
+        // match[1] = dia semana
+        const dayNumber = parseInt(match[2]); // Was match[3]
+        const hour = parseInt(match[4]);     // Was match[5]
+        const minute = match[5] ? parseInt(match[5]) : 0; // Was match[6]
+        const ampm = match[6] || '';         // Was match[7]
         
         // Calcular fecha basada en el número de día (mes actual o próximo)
         let date = new Date(config.referenceDate);
@@ -226,12 +227,15 @@ function trySpecificPatterns(
 
     // Formato: "martes a las 10"
     {
-      pattern: /^(el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/,
+      pattern: /(?:^|\s)(?:el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
       handler: (match, today) => {
-        const dayName = match[2];
-        const hour = parseInt(match[4]);
-        const minute = match[5] ? parseInt(match[5]) : 0;
-        const ampm = match[6] || '';
+        const dayName = match[1]; // Was match[1] (Wait, check logic below)
+        // Regex: (?:^|\s)(?:el\s+)?(lunes|...) <=> Group 1.
+        // So match[1] is correct for DayName.
+        
+        const hour = parseInt(match[3]); // Was match[4]. Group 2 is (alas). Group 3 is Hour.
+        const minute = match[4] ? parseInt(match[4]) : 0; // Was match[5]
+        const ampm = match[5] || '';     // Was match[6]
         const dayNumber = weekDaysMap[dayName];
         
         let date = getNextWeekday(today, dayNumber, config.futureDate);
@@ -241,7 +245,7 @@ function trySpecificPatterns(
     
     // Formato: "mañana a las 15:30"
     {
-      pattern: /^(hoy|manana|mañana|pasado manana|pasado mañana|ayer|anteayer|ante ayer)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/,
+      pattern: /(?:^|\s)(hoy|manana|mañana|pasado manana|pasado mañana|ayer|anteayer|ante ayer)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
       handler: (match, today) => {
         const dayRef = match[1];
         const hour = parseInt(match[3]);
@@ -256,7 +260,7 @@ function trySpecificPatterns(
     
     // Formato: "a las 10" o "a las 10:30"
     {
-      pattern: /^(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/,
+      pattern: /(?:^|\s)(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
       handler: (match, today) => {
         const hour = parseInt(match[2]);
         const minute = match[3] ? parseInt(match[3]) : 0;
