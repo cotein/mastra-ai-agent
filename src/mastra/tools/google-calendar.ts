@@ -323,9 +323,11 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
     description: 'Obtiene slots de horarios disponibles de 10:00 a 16:00 para los próximos 5 días, excluyendo fines de semana.',
     inputSchema: z.object({}),
     execute: async () => {
-      console.log("🛠️ Tool Invoked: get_available_slots");
-      const calendar = getGoogleCalendar();
-      const now = new Date();
+      console.log("🛠️ [TOOL START] get_available_slots iniciado");
+      
+      try {
+        const calendar = getGoogleCalendar();
+        const now = new Date();
       const daysToCheck = 5;
       const workStartHour = 10;
       const workEndHour = 16;
@@ -407,11 +409,20 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
           }
 
         } catch (error) {
-            console.error(`Error fetching events for ${currentDate.toISOString()}:`, error);
+            console.error(`⚠️ Error fetching events for ${currentDate.toISOString()}:`, error);
         }
       }
 
+      console.log(`✅ [TOOL END] get_available_slots finalizado. Slots encontrados: ${availableSlots.length}`);
       return availableSlots.slice(0, 5); // Retornar top 5
+    } catch (criticalError: any) {
+        console.error("❌ [CRITICAL ERROR] get_available_slots falló fatalmente:", criticalError);
+        return { 
+            success: false, 
+            error: criticalError.message, 
+            details: "Hubo un error interno consultando disponibilidad. Por favor intenta más tarde." 
+        };
+    }
     },
   });
 

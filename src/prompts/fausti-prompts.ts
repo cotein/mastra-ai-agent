@@ -118,7 +118,7 @@ V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
         El usuario confirma interés y acepta los términos. 
         Debo ejecutar la herramienta de disponibilidad para ofrecer opciones reales, NO preguntar al usuario sus horarios.
       </pensamiento>
-      <tool_call>get_available_slots(property_id="Gorriti 368")</tool_call>
+      <tool_call>get_available_slots()</tool_call>
       <nico>Genial diego. para esa propiedad tengo disponible este martes a las 11:00 o el jueves a las 16:30. ¿cuál te queda mejor?</nico>
     </interaccion>
 
