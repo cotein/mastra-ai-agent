@@ -16,17 +16,20 @@ export const potentialSaleEmailTool = createTool({
   id: 'potential_sale_email',
   description: 'Úsala ÚNICAMENTE cuando el usuario confirme interés en comprar una propiedad y YA TENGAS su nombre. Envía un correo interno al equipo de ventas con los datos del lead y la propiedad',
   inputSchema: z.object({
-    nombre_cliente: z.string().describe("Nombre completo del interesado"),
-    telefono_cliente: z.string().describe("Número de teléfono de contacto"),
+    nombre_cliente: z.string().optional().describe("Nombre completo del interesado"),
+    telefono_cliente: z.string().optional().describe("Número de teléfono de contacto"),
     email_cliente: z.string().optional().describe("Email si estuviera disponible"),
     direccion_propiedad: z.string().optional().describe("Dirección o título de la propiedad de interés"),
     url_propiedad: z.string().optional().describe("Link de la publicación (Zonaprop, etc)"),
   }),
   execute: async (input) => {
+    console.log("🛠️ Tool Invoked: potential_sale_email");
+    console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+
     const gmail = getGmail();
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     
-    const telLimpio = input.telefono_cliente.replace(/[^0-9]/g, '');
+    const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, '');
 
     const htmlBody = `
       <!DOCTYPE html> <html> <head> <style> 

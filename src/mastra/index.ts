@@ -203,6 +203,18 @@ export const mastra = new Mastra({
                     const response = await agent.generate(message, {
                         threadId: currentThreadId,
                         resourceId: userId,
+                        onStepFinish: (step) => {
+                          // Check for tool execution errors (including Zod validation failures)
+                          if (step.toolResults && step.toolResults.length > 0) {
+                            step.toolResults.forEach((toolRes: any) => { // Type 'any' used for flexibility
+                              if (toolRes.status === 'error' || toolRes.error) {
+                                console.error(`❌ [ERROR CRÍTICO] Tool '${toolRes.toolName}' falló:`);
+                                console.error(`   Motivo:`, JSON.stringify(toolRes.error || toolRes.result, null, 2));
+                                console.error(`   Args intentados:`, JSON.stringify(toolRes.args, null, 2));
+                              }
+                            });
+                          }
+                        }
                     });
 
                     console.log("✅ Respuesta final generada:", response.text);
