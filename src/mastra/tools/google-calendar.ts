@@ -1,7 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
-import { es } from 'chrono-node';
+import { naturalDateToISO8601 } from '../../helpers/date-converter';
 
 const CALENDAR_ID = 'c.vogzan@gmail.com';
 
@@ -94,30 +94,17 @@ const parseDateInput = async (input: string): Promise<string> => {
       return input; // It's already a valid ISO string with time
   }
 
-  // 2. If not ISO, try Natural Language Parsing
-  console.log(`⚠️ Input date '${input}' is not strict ISO. Attempting Natural Language Parse...`);
+  // 2. If not ISO, try Natural Language Parsing (Delegated to Helper)
+  console.log(`⚠️ Input date '${input}' is not strict ISO. Attempting Natural Language Parse via Helper...`);
   
-  // Clean input logic similar to findEventByNaturalDate
-  let normalized = input.toLowerCase()
-      .replace(/mediod[ií]a/g, "12:00")
-      .replace(/del d[ií]a/g, "")
-      .replace(/de la ma[ñn]ana/g, "am")
-      .replace(/de la tarde/g, "pm")
-      .replace(/de la noche/g, "pm");
+  const result = naturalDateToISO8601(input);
 
-  const parsedResults = es.parse(normalized, new Date());
-
-  if (parsedResults.length === 0) {
-      throw new Error(`No pude entender la fecha indicada: "${input}". Por favor usa un formato más claro (ej: 'Martes 20 a las 10:00').`);
+  if (!result.success || !result.isoDate) {
+      throw new Error(`No pude entender la fecha indicada: "${input}". Error: ${result.error || 'Desconocido'}. Por favor usa un formato más claro.`);
   }
 
-  const date = parsedResults[0].start.date();
-  
-  // Force current year if implicit (Chrono defaults to current, but logic is safe)
-  // Note: getSanitizedDates will handle "past date" logic later.
-  
-  // Return pseudo-ISO for getSanitizedDates to consume
-  return date.toISOString();
+  console.log(`✅ Smart Parse Success: '${input}' -> ${result.isoDate}`);
+  return result.isoDate;
 };
 
 // export const calendarManagerTools = {
@@ -522,24 +509,19 @@ const parseDateInput = async (input: string): Promise<string> => {
         // Using static import 'es' from top of file
         const calendar = getGoogleCalendar();
 
-        // 1. Preprocesamiento para términos comunes en español que chrono podría no capturar perfectamente o para normalizar
-        let normalizedQuery = query.toLowerCase()
-            .replace(/mediod[ií]a/g, "12:00")
-            .replace(/del d[ií]a/g, "")
-            .replace(/de la ma[ñn]ana/g, "am")
-            .replace(/de la tarde/g, "pm")
-            .replace(/de la noche/g, "pm");
+        // 1 & 2. Parsear fecha usando el helper robusto
+        const result = naturalDateToISO8601(query, { futureDate: false }); // futureDate: false porque quizas busquen algo pasado o "hoy"
 
-        // 2. Parsear la fecha con chrono (locale ES)
-        const results = es.parse(normalizedQuery, new Date());
-
-        if (results.length === 0) {
-            return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser más específico (ej. 'Lunes 12 de enero a las 15:00')." };
+        if (!result.success) {
+            return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser más específico." };
         }
-
-        const result = results[0];
-        const date = result.start.date();
-        const hasTime = result.start.isCertain('hour'); // Verifica si se especificó hora
+        
+        const date = result.date;
+        // Asumimos que si el helper devolvió éxito, tenemos una fecha válida con hora (por default includeTime=true)
+        // Pero para 'hasTime', el helper no expone ese detalle interno de chrono.
+        // Asumiremos true si no es 00:00:00 O si date-converter lo infirió.
+        // Como el helper pone una hora default si falta, tomemos eso como valido.
+        const hasTime = true; 
 
         // 3. Definir ventana de búsqueda
         let timeMin: string;
