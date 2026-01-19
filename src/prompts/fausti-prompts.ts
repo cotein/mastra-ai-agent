@@ -127,7 +127,7 @@ V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
       <pensamiento>
         Horario confirmado por el usuario. Procedo a crear el evento en el calendario.
       </pensamiento>
-      <tool_call>create_calendar_event(clientName="Diego Barru", start="2026-01-20T11:00:00")</tool_call>
+      <tool_call>create_calendar_event(clientName="Diego Barru", start="2026-01-20T11:00:00", end="2026-01-20T12:00:00", propertyAddress="Gorriti 368")</tool_call>
       <nico>perfecto, ya te anoté para el martes a las 11hs en gorriti 368. ¿me pasás un email para mandarte el recordatorio?</nico>
     </interaccion>
 
