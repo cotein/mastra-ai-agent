@@ -106,14 +106,14 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
       
-      // Sanitización y conversión a hora local
-      const { start, end } = getSanitizedDates(input.start, input.end || input.start); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
-
-      const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
-      
-      const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - email: ${input.clientEmail || 'Sin email'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
-
       try {
+        // Sanitización y conversión a hora local
+        const { start, end } = getSanitizedDates(input.start, input.end || input.start); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
+
+        const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
+        
+        const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - email: ${input.clientEmail || 'Sin email'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
+
         const response = await calendar.events.insert({
           calendarId: calendarId,
           requestBody: {
@@ -254,64 +254,64 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
         return { success: false, error: "Evento no encontrado: " + e.message };
       }
 
-      // Preparar fechas
-      let startBody = currentEvent.start;
-      let endBody = currentEvent.end;
-      
-      if (start && end) {
-         const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
-         startBody = { dateTime: sanitizedStart.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
-         endBody = { dateTime: sanitizedEnd.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
-      }
-
-      // LOGICA DE DESCRIPCIÓN:
-      // 1. Si se pasa 'description' manual, se usa esa.
-      // 2. Si NO se pasa manual, pero SÍ se pasan datos estructurados (aunque sea uno), se intenta reconstruir.
-      //    Para reconstruir, necesitamos los valores faltantes. Intentamos sacarlos del evento actual o usar defaults.
-      //    IMPORTANTE: Si el agente quiere actualizar solo el teléfono, DEBERÍA pasar el resto de datos para asegurar integridad.
-      //    Sin embargo, podemos intentar parsear el 'currentEvent.description' si tiene el formato estándar, pero es frágil.
-      //    Asumiremos que si usa datos estructurados, provee la información relevante.
-      
-      let finalDescription = description || currentEvent.description;
-
-      if (!description && (clientName || clientPhone || clientEmail || propertyAddress || propertyLink)) {
-          // Intentamos reconstruir usando los nuevos valores O defaults "a mantener" (que en realidad no tenemos).
-          // Por seguridad, si el agente usa structured update, pedimos que pase lo que tenga.
-          // Fallback a "Sin X" si no se provee, lo cual podría borrar info vieja si no se pasa.
-          // Dado que el agente tiene contexto completo, lo correcto es que pase todo.
-          const cName = clientName || "Cliente Actualizado";
-          const cPhone = clientPhone || "Sin tel";
-          const cEmail = clientEmail || "Sin email";
-          const pAddress = propertyAddress || location || currentEvent.location || "Ver link";
-          const pLink = propertyLink || "Sin link";
-
-          finalDescription = `visita propiedad - cliente: ${cName} - tel: ${cPhone} - email: ${cEmail} - Domicilio: ${pAddress} - Link: ${pLink}`;
-      }
-
-      const requestBody: any = {
-        ...currentEvent,
-        summary: summary || currentEvent.summary,
-        description: finalDescription,
-        location: location || propertyAddress || currentEvent.location, // propertyAddress también actualiza location si se provee
-        start: startBody,
-        end: endBody,
-      };
-
       try {
-        const response = await calendar.events.update({
-          calendarId,
-          eventId: eventId,
-          requestBody: requestBody,
-          sendUpdates: userEmail ? 'all' : 'none', // Enviar correo si se provee email
-        });
+          // Preparar fechas
+          let startBody = currentEvent.start;
+          let endBody = currentEvent.end;
+          
+          if (start && end) {
+             const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
+             startBody = { dateTime: sanitizedStart.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
+             endBody = { dateTime: sanitizedEnd.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
+          }
 
-        return {
-          success: true,
-          eventId: response.data.id,
-          link: response.data.htmlLink,
-          updatedFields: { summary, location, start, end },
-          message: "Evento actualizado correctamente."
-        };
+          // LOGICA DE DESCRIPCIÓN:
+          // 1. Si se pasa 'description' manual, se usa esa.
+          // 2. Si NO se pasa manual, pero SÍ se pasan datos estructurados (aunque sea uno), se intenta reconstruir.
+          //    Para reconstruir, necesitamos los valores faltantes. Intentamos sacarlos del evento actual o usar defaults.
+          //    IMPORTANTE: Si el agente quiere actualizar solo el teléfono, DEBERÍA pasar el resto de datos para asegurar integridad.
+          //    Sin embargo, podemos intentar parsear el 'currentEvent.description' si tiene el formato estándar, pero es frágil.
+          //    Asumiremos que si usa datos estructurados, provee la información relevante.
+          
+          let finalDescription = description || currentEvent.description;
+
+          if (!description && (clientName || clientPhone || clientEmail || propertyAddress || propertyLink)) {
+              // Intentamos reconstruir usando los nuevos valores O defaults "a mantener" (que en realidad no tenemos).
+              // Por seguridad, si el agente usa structured update, pedimos que pase lo que tenga.
+              // Fallback a "Sin X" si no se provee, lo cual podría borrar info vieja si no se pasa.
+              // Dado que el agente tiene contexto completo, lo correcto es que pase todo.
+              const cName = clientName || "Cliente Actualizado";
+              const cPhone = clientPhone || "Sin tel";
+              const cEmail = clientEmail || "Sin email";
+              const pAddress = propertyAddress || location || currentEvent.location || "Ver link";
+              const pLink = propertyLink || "Sin link";
+
+              finalDescription = `visita propiedad - cliente: ${cName} - tel: ${cPhone} - email: ${cEmail} - Domicilio: ${pAddress} - Link: ${pLink}`;
+          }
+
+          const requestBody: any = {
+            ...currentEvent,
+            summary: summary || currentEvent.summary,
+            description: finalDescription,
+            location: location || propertyAddress || currentEvent.location, // propertyAddress también actualiza location si se provee
+            start: startBody,
+            end: endBody,
+          };
+
+          const response = await calendar.events.update({
+            calendarId,
+            eventId: eventId,
+            requestBody: requestBody,
+            sendUpdates: userEmail ? 'all' : 'none', // Enviar correo si se provee email
+          });
+
+          return {
+            success: true,
+            eventId: response.data.id,
+            link: response.data.htmlLink,
+            updatedFields: { summary, location, start, end },
+            message: "Evento actualizado correctamente."
+          };
       } catch (error: any) {
         console.error('Error actualizando evento:', error);
         return { success: false, error: error.message };
