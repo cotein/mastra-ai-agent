@@ -61,10 +61,6 @@ export const mastra = new Mastra({
                 clientData.telefono = whatsappPhone;
             }
             console.log("\n🔥🔥🔥 INICIO DEL REQUEST 🔥🔥🔥");
-            console.log("📨 RAW BODY COMPLETO:", JSON.stringify(body, null, 2));
-            console.log("1. ThreadID recibido:", threadId);
-            console.log("📱 WhatsApp Phone recibido:", whatsappPhone);
-            console.log("💬 Mensaje recibido:", message?.substring(0, 50) + "...");
 
             if (!threadId && !userId) {
               return c.json({ error: "Either ThreadID or UserID is required" }, 400);
@@ -120,7 +116,6 @@ export const mastra = new Mastra({
                       // Leer la verdad absoluta de la DB
                       const dbContext = await ThreadContextService.getContext(threadId);
                       const mastraProfile = await ThreadContextService.getResourceProfile(userId);
-                      console.log("🧠 [PERFIL MASTRA DETECTADO]:", mastraProfile);
 
                       finalContextData = { 
                           ...mastraProfile, // 1. Base (Mastra)
@@ -131,7 +126,6 @@ export const mastra = new Mastra({
                       // FIX: Recuperar operacionTipo de DB si no está en RAM
                       if (!propertyOperationType && finalContextData.operacionTipo) {
                           propertyOperationType = finalContextData.operacionTipo;
-                          console.log(`💾 [DB] Tipo de operación recuperado: ${propertyOperationType}`);
                           sessionOperationMap.set(currentThreadId, propertyOperationType);
                       }
 
@@ -147,17 +141,14 @@ export const mastra = new Mastra({
                     } else if (finalContextData.link && !sessionLinkMap.has(currentThreadId)) {
                         // Sync DB -> RAM
                         sessionLinkMap.set(currentThreadId, finalContextData.link);
-                        console.log(`💾 [DB] Link recuperado y sincronizado a RAM`);
                     }
 
                     // Recuperar PropiedadInfo de la sesión (RAM) si existe
                     if (!finalContextData.propiedadInfo && sessionPropiedadInfoMap.has(currentThreadId)) {
                          finalContextData.propiedadInfo = sessionPropiedadInfoMap.get(currentThreadId);
-                         console.log(`💾 [RAM] Recuperando propiedadInfo de sesión para ${currentThreadId}`);
                     } else if (finalContextData.propiedadInfo && !sessionPropiedadInfoMap.has(currentThreadId)) {
                          // Sync DB -> RAM
                          sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
-                         console.log(`💾 [DB] PropiedadInfo recuperado y sincronizado a RAM`);
                     }
 
                     // B. WORKFLOW / LOGICA DE NEGOCIO
@@ -175,7 +166,6 @@ export const mastra = new Mastra({
                       try {
                         const workflow = mastra.getWorkflow('propertyWorkflow');
                         const run = await workflow.createRun();
-                        console.log(`🚀 Iniciando Workflow para: ${url}`);
                         const result = await run.start({ inputData: { url } });
 
                         if (result.status !== 'success') {
@@ -185,14 +175,11 @@ export const mastra = new Mastra({
                             console.log("📦 Output Workflow recibido",   outputLogica);
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
-                                console.log("🚀 Tipo de operación detectado:", propertyOperationType);
                                 finalContextData.operacionTipo = outputLogica.operacionTipo;
                                 finalContextData.propertyAddress = outputLogica.address;
-                                // FIX: Capturamos la descripción scrappeada
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
 
-                                // ACTUALIZAR SESIÓN EN MEMORIA Y DB
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
                                 sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
                                 
@@ -202,9 +189,6 @@ export const mastra = new Mastra({
                                     propiedadInfo: finalContextData.propiedadInfo,
                                     link: url
                                 });
-
-                                console.log(`💾 [RAM+DB] Operación guardada: ${propertyOperationType}`);
-                                console.log(`💾 [RAM] PropiedadInfo guardado para ${currentThreadId}`);
                             }
                         }
                       } catch (workflowErr) {
@@ -221,7 +205,6 @@ export const mastra = new Mastra({
                     
                     // @ts-ignore
                     console.log("🛠️ Tools disponibles para el agente:", Object.keys((agent as any).tools || {}));
-                    console.log("🤖 Generando respuesta final (Background)...");
 
                     const response = await agent.generate(message, {
                         threadId: currentThreadId,
@@ -240,26 +223,20 @@ export const mastra = new Mastra({
                         }
                     });
 
-                    console.log("✅ Respuesta final generada:", response.text);
-
                     // E. ENVIAR A MANYCHAT (PUSH)
                     if (userId && body.custom_fields) {
-                        console.log("👉 Intentando llamar a sendToManychat...");
                         
                         // SPLIT Y ENVIO SECUENCIAL
                         const parts = response.text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
-                        console.log(`📦 Se detectaron ${parts.length} bloques de mensaje.`);
 
                         for (const part of parts) {
                             await sendToManychat(userId, part);
                             // Pequeño delay aleatorio entre bloques (2-10s)
                             if (parts.length > 1) {
                                 const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
-                                console.log(`⏳ Esperando ${randomDelay}s antes del siguiente mensaje...`);
                                 await sleep(randomDelay); 
                             }
                         }
-                        console.log("📤 Todos los mensajes han sido enviados a Manychat.");
                     } else {
                         console.log("ℹ️ Respuesta generada (modo background), pero cliente no es Manychat/Async.");
                     }

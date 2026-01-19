@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
+import { es } from 'chrono-node';
 
 const CALENDAR_ID = 'c.vogzan@gmail.com';
 
@@ -95,7 +96,6 @@ const parseDateInput = async (input: string): Promise<string> => {
 
   // 2. If not ISO, try Natural Language Parsing
   console.log(`⚠️ Input date '${input}' is not strict ISO. Attempting Natural Language Parse...`);
-  const chrono = await import('chrono-node');
   
   // Clean input logic similar to findEventByNaturalDate
   let normalized = input.toLowerCase()
@@ -105,7 +105,7 @@ const parseDateInput = async (input: string): Promise<string> => {
       .replace(/de la tarde/g, "pm")
       .replace(/de la noche/g, "pm");
 
-  const parsedResults = chrono.es.parse(normalized, new Date());
+  const parsedResults = es.parse(normalized, new Date());
 
   if (parsedResults.length === 0) {
       throw new Error(`No pude entender la fecha indicada: "${input}". Por favor usa un formato más claro (ej: 'Martes 20 a las 10:00').`);
@@ -519,7 +519,7 @@ const parseDateInput = async (input: string): Promise<string> => {
     execute: async ({ query }) => {
       console.log("🛠️ Tool Invoked: find_event_by_natural_date");
       console.log("📥 Query recibido:", query);
-        const chrono = await import('chrono-node');
+        // Using static import 'es' from top of file
         const calendar = getGoogleCalendar();
 
         // 1. Preprocesamiento para términos comunes en español que chrono podría no capturar perfectamente o para normalizar
@@ -531,7 +531,7 @@ const parseDateInput = async (input: string): Promise<string> => {
             .replace(/de la noche/g, "pm");
 
         // 2. Parsear la fecha con chrono (locale ES)
-        const results = chrono.es.parse(normalizedQuery, new Date());
+        const results = es.parse(normalizedQuery, new Date());
 
         if (results.length === 0) {
             return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser más específico (ej. 'Lunes 12 de enero a las 15:00')." };
