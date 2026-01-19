@@ -2,38 +2,21 @@ import { Agent } from "@mastra/core/agent";
 import { Memory } from "@mastra/memory";
 import { openai } from "@ai-sdk/openai"; 
 import { storage, vectorStore } from './../storage'; 
-import { TokenLimiter, ToolCallFilter, PromptInjectionDetector, ModerationProcessor, SystemPromptScrubber } from "@mastra/core/processors";
+import { TokenLimiter, PromptInjectionDetector, ModerationProcessor, SystemPromptScrubber } from "@mastra/core/processors";
 import { WhatsAppStyleProcessor } from "../processors/whatsapp-style-processor";
 import { OperacionTipo } from "./../../types";
 // Herramientas
 import { 
   createCalendarEvent, 
-  listCalendarEvents, 
-  getCalendarEvent, 
   updateCalendarEvent, 
   deleteCalendarEvent, 
   getAvailableSlots,
   findEventByNaturalDate
 } from '../tools/google-calendar';
-import { sendEmail, listEmails } from '../tools/google-gmail';
 import { potentialSaleEmailTool } from '../tools/index';
 
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
-
-const commonTools = {
-    createCalendarEvent,
-    listCalendarEvents,
-    getCalendarEvent,
-    updateCalendarEvent,
-    deleteCalendarEvent,
-    findEventByNaturalDate,
-    sendEmail,
-    listEmails,
-};
-const salesTools = {
-    potential_sale_email: potentialSaleEmailTool, // Solo para ventas
-};
 
 export const getRealEstateAgent = async (userId: string, instructionsInjected?: string, operacionTipo?: OperacionTipo) => {
   
@@ -69,8 +52,8 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
 
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
 
-  const selectedTools = operacionTipo === 'ALQUILAR' 
-    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent }
+  const selectedTools: any = operacionTipo === 'ALQUILAR' 
+    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent }
     : operacionTipo === 'VENDER'
     ? { potential_sale_email: potentialSaleEmailTool }
     : { };
@@ -78,6 +61,11 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
   console.log('#'.repeat(50) + ' REAL ESTATE AGENT ' + '#'.repeat(50));
   console.log(finalInstructions);
   console.log('#'.repeat(50));
+  console.log('');
+  console.log('='.repeat(50));
+  
+  console.log('🛠️ TOOLS ACTIVAS:', Object.keys(selectedTools));
+  console.log('='.repeat(50));
 
   return new Agent({
     // ID obligatorio para Mastra

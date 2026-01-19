@@ -1,5 +1,14 @@
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/evals/scoreTraces';
-import { m as mastra } from './mastra.mjs';
+import { Mastra } from '@mastra/core';
+import { Agent, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList } from '@mastra/core/agent';
+import { Memory as Memory$1 } from '@mastra/memory';
+import { openai as openai$1 } from '@ai-sdk/openai';
+import { PgVector, PostgresStore } from '@mastra/pg';
+import { Pool } from 'pg';
+import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
+import { generateText } from 'ai';
+import { createCalendarEvent, getAvailableSlots } from './tools/7502800f-064d-468c-ab15-2e9b5305aa9c.mjs';
+import { potentialSaleEmailTool } from './tools/36f923ca-b834-4f16-a873-2611aaaa61d5.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
@@ -7,9 +16,7 @@ import { createServer } from 'http';
 import { Http2ServerRequest } from 'http2';
 import { Readable, Writable } from 'stream';
 import crypto$1 from 'crypto';
-import { getMimeType } from 'hono/utils/mime';
 import { readFileSync, existsSync, createReadStream, lstatSync } from 'fs';
-import { html } from 'hono/html';
 import { isVercelTool, createTool, Tool } from '@mastra/core/tools';
 import z, { z as z$1, ZodOptional, ZodNullable, ZodArray, ZodRecord, ZodObject, ZodFirstPartyTypeKind } from 'zod';
 import { zodToJsonSchema as zodToJsonSchema$1 } from '@mastra/core/utils/zod-to-json';
@@ -19,7 +26,6 @@ import { listScoresResponseSchema } from '@mastra/core/evals';
 import { listTracesResponseSchema, tracesFilterSchema, paginationArgsSchema, tracesOrderBySchema, getTraceResponseSchema, getTraceArgsSchema, scoreTracesResponseSchema, scoreTracesRequestSchema, spanIdsSchema, dateRangeSchema } from '@mastra/core/storage';
 import { MastraA2AError } from '@mastra/core/a2a';
 import { TransformStream as TransformStream$1, ReadableStream as ReadableStream$1 } from 'stream/web';
-import { Agent, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList } from '@mastra/core/agent';
 import * as z42 from 'zod/v4';
 import { z as z$2 } from 'zod/v4';
 import { ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod/v3';
@@ -33,22 +39,177 @@ import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { RequestContext } from '@mastra/core/request-context';
 import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
-import { timeout } from 'hono/timeout';
-import { HTTPException as HTTPException$2 } from 'hono/http-exception';
 import { tools } from './tools.mjs';
 import 'googleapis';
-import '@mastra/core';
-import 'axios';
-import '@mastra/memory';
-import '@ai-sdk/openai';
-import '@mastra/pg';
-import 'pg';
-import '@mastra/core/processors';
-import 'ai';
-import 'openai';
+
+const connectionString = process.env.SUPABASE_POSTGRES_URL;
+if (!connectionString) {
+  throw new Error("\u274C SUPABASE_POSTGRES_URL missing");
+}
+new Pool({
+  connectionString,
+  max: 10,
+  // Límite conservador para dejar espacio a las instancias de Mastra
+  idleTimeoutMillis: 3e4
+});
+const storage = new PostgresStore({
+  id: "pg-store",
+  connectionString
+});
+const vectorStore = new PgVector({
+  id: "pg-vector",
+  connectionString,
+  tableName: "memory_messages",
+  columnName: "embedding",
+  dims: 1536
+});
+
+class WhatsAppStyleProcessor {
+  id = "whatsapp-style-processor";
+  name = "whatsapp-style-processor";
+  // Mastra parece requerir esto para Output Processors
+  async processOutputStep(args) {
+    return args;
+  }
+  // Este método se usa cuando se llama a agent.generate()
+  async processOutputResult(args) {
+    const lastMessage = args.messages[args.messages.length - 1];
+    let textToHumanize = "";
+    if (typeof lastMessage.content === "string") {
+      textToHumanize = lastMessage.content;
+    } else if (Array.isArray(lastMessage.content)) {
+      textToHumanize = lastMessage.content.map((c) => c.text || "").join("");
+    }
+    if (!textToHumanize) return args.messages;
+    try {
+      const { text } = await generateText({
+        model: openai$1("gpt-4o-mini"),
+        system: `Eres un experto en comunicaci\xF3n por WhatsApp. 
+                     Tu trabajo es reescribir el siguiente mensaje para que suene como un humano escribiendo r\xE1pido en WhatsApp.
+                     Reglas:
+                     - Usa min\xFAsculas mayormente, pero no fuerces errores ortogr\xE1ficos graves.
+                     - IMPORTANTE: Tu objetivo principal es que parezca una conversaci\xF3n natural fluida.
+                     - REGLA DE ORO DE SEPARACI\xD3N: Separa CADA idea distinta (saludo, pregunta, informaci\xF3n) con DOBLE SALTO DE L\xCDNEA (
+
+). Esto es CRITICO para que salgan como mensajes separados.
+                     
+                     Ejemplos:
+                     Input: "Hola, soy Nico. Necesito que me pases tus datos."
+                     Output: 
+                     "hola soy nico \u{1F44B}
+                     
+                     necesito que me pases tus datos porfa"
+
+                     Input: "\xA1Buen d\xEDa! \xBFEn qu\xE9 puedo ayudarte? Necesito tu nombre."
+                     Output:
+                     "buen d\xEDa! \u{1F60A}
+                     
+                     en qu\xE9 puedo ayudarte??
+                     
+                     necesito tu nombre completo"`,
+        prompt: textToHumanize
+      });
+      lastMessage.content = text;
+      return args.messages;
+    } catch (error) {
+      console.error("Error en WhatsAppStyleProcessor:", error);
+      return args.messages;
+    }
+  }
+  // Implementación vacía/passthrough para streaming por si acaso se llama,
+  // pero este processor está diseñado para funcionar mejor con generate() (no-streaming)
+  // o habría que implementar buffering complejo.
+  async processOutputStream(args) {
+    return args.part;
+  }
+  async processInput(args) {
+    return args.messages;
+  }
+}
+
+const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
+const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
+  const memory = new Memory$1({
+    storage,
+    vector: vectorStore,
+    embedder: openai$1.embedding("text-embedding-3-small"),
+    options: {
+      lastMessages: 22,
+      semanticRecall: {
+        topK: 3,
+        messageRange: 3
+      },
+      workingMemory: {
+        enabled: true,
+        scope: "resource",
+        template: `# User Profile
+          - **First Name**:
+          - **Last Name**:
+          - **Email**:
+          - **Phone**:
+          - **Location**:
+          - **Budget Max**:
+          - **Preferred Zone**:
+          - **Property Type Interest**: (Casa/Depto/PH)
+          - **Consulted Properties History**: (List of URLs or addresses recently discussed or scraped)
+          `
+      },
+      generateTitle: true
+    }
+  });
+  const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
+  const selectedTools = operacionTipo === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent } : operacionTipo === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
+  console.log(finalInstructions);
+  console.log("#".repeat(50));
+  console.log("");
+  console.log("=".repeat(50));
+  console.log("\u{1F6E0}\uFE0F TOOLS ACTIVAS:", Object.keys(selectedTools));
+  console.log("=".repeat(50));
+  return new Agent({
+    // ID obligatorio para Mastra
+    id: "real-estate-agent",
+    name: "Real Estate Agent",
+    instructions: finalInstructions,
+    model: openai$1("gpt-4o"),
+    memory,
+    tools: selectedTools,
+    inputProcessors: [
+      new PromptInjectionDetector({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.8,
+        strategy: "block"
+      }),
+      new ModerationProcessor({
+        model: openai$1("gpt-4o-mini"),
+        threshold: 0.7,
+        strategy: "block"
+      }),
+      new TokenLimiter(3e3)
+    ],
+    outputProcessors: [
+      new SystemPromptScrubber({
+        model: openai$1("gpt-4o-mini"),
+        strategy: "redact",
+        redactionMethod: "placeholder"
+      }),
+      new WhatsAppStyleProcessor()
+    ]
+  });
+};
+
+await storage.init();
+await getRealEstateAgent();
+const venta = await getRealEstateAgent("test-user", "", "VENDER");
+const mastra = new Mastra({
+  storage,
+  vectors: {
+    vectorStore
+  },
+  agents: {
+    venta
+  }
+});
 
 function normalizeStudioBase(studioBase) {
   if (studioBase.includes("..") || studioBase.includes("?") || studioBase.includes("#")) {
@@ -67,8 +228,228 @@ function normalizeStudioBase(studioBase) {
   return studioBase;
 }
 
+// src/utils/mime.ts
+var getMimeType = (filename, mimes = baseMimes) => {
+  const regexp = /\.([a-zA-Z0-9]+?)$/;
+  const match = filename.match(regexp);
+  if (!match) {
+    return;
+  }
+  let mimeType = mimes[match[1]];
+  if (mimeType && mimeType.startsWith("text")) {
+    mimeType += "; charset=utf-8";
+  }
+  return mimeType;
+};
+var _baseMimes = {
+  aac: "audio/aac",
+  avi: "video/x-msvideo",
+  avif: "image/avif",
+  av1: "video/av1",
+  bin: "application/octet-stream",
+  bmp: "image/bmp",
+  css: "text/css",
+  csv: "text/csv",
+  eot: "application/vnd.ms-fontobject",
+  epub: "application/epub+zip",
+  gif: "image/gif",
+  gz: "application/gzip",
+  htm: "text/html",
+  html: "text/html",
+  ico: "image/x-icon",
+  ics: "text/calendar",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  js: "text/javascript",
+  json: "application/json",
+  jsonld: "application/ld+json",
+  map: "application/json",
+  mid: "audio/x-midi",
+  midi: "audio/x-midi",
+  mjs: "text/javascript",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  mpeg: "video/mpeg",
+  oga: "audio/ogg",
+  ogv: "video/ogg",
+  ogx: "application/ogg",
+  opus: "audio/opus",
+  otf: "font/otf",
+  pdf: "application/pdf",
+  png: "image/png",
+  rtf: "application/rtf",
+  svg: "image/svg+xml",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  ts: "video/mp2t",
+  ttf: "font/ttf",
+  txt: "text/plain",
+  wasm: "application/wasm",
+  webm: "video/webm",
+  weba: "audio/webm",
+  webmanifest: "application/manifest+json",
+  webp: "image/webp",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  xhtml: "application/xhtml+xml",
+  xml: "application/xml",
+  zip: "application/zip",
+  "3gp": "video/3gpp",
+  "3g2": "video/3gpp2",
+  gltf: "model/gltf+json",
+  glb: "model/gltf-binary"
+};
+var baseMimes = _baseMimes;
+
+// src/utils/html.ts
+var HtmlEscapedCallbackPhase = {
+  Stringify: 1};
+var raw = (value, callbacks) => {
+  const escapedString = new String(value);
+  escapedString.isEscaped = true;
+  escapedString.callbacks = callbacks;
+  return escapedString;
+};
+var escapeRe = /[&<>'"]/;
+var stringBufferToString = async (buffer, callbacks) => {
+  let str = "";
+  callbacks ||= [];
+  const resolvedBuffer = await Promise.all(buffer);
+  for (let i = resolvedBuffer.length - 1; ; i--) {
+    str += resolvedBuffer[i];
+    i--;
+    if (i < 0) {
+      break;
+    }
+    let r = resolvedBuffer[i];
+    if (typeof r === "object") {
+      callbacks.push(...r.callbacks || []);
+    }
+    const isEscaped = r.isEscaped;
+    r = await (typeof r === "object" ? r.toString() : r);
+    if (typeof r === "object") {
+      callbacks.push(...r.callbacks || []);
+    }
+    if (r.isEscaped ?? isEscaped) {
+      str += r;
+    } else {
+      const buf = [str];
+      escapeToBuffer(r, buf);
+      str = buf[0];
+    }
+  }
+  return raw(str, callbacks);
+};
+var escapeToBuffer = (str, buffer) => {
+  const match = str.search(escapeRe);
+  if (match === -1) {
+    buffer[0] += str;
+    return;
+  }
+  let escape;
+  let index;
+  let lastIndex = 0;
+  for (index = match; index < str.length; index++) {
+    switch (str.charCodeAt(index)) {
+      case 34:
+        escape = "&quot;";
+        break;
+      case 39:
+        escape = "&#39;";
+        break;
+      case 38:
+        escape = "&amp;";
+        break;
+      case 60:
+        escape = "&lt;";
+        break;
+      case 62:
+        escape = "&gt;";
+        break;
+      default:
+        continue;
+    }
+    buffer[0] += str.substring(lastIndex, index) + escape;
+    lastIndex = index + 1;
+  }
+  buffer[0] += str.substring(lastIndex, index);
+};
+var resolveCallbackSync = (str) => {
+  const callbacks = str.callbacks;
+  if (!callbacks?.length) {
+    return str;
+  }
+  const buffer = [str];
+  const context = {};
+  callbacks.forEach((c) => c({ phase: HtmlEscapedCallbackPhase.Stringify, buffer, context }));
+  return buffer[0];
+};
+var resolveCallback = async (str, phase, preserveCallbacks, context, buffer) => {
+  if (typeof str === "object" && !(str instanceof String)) {
+    if (!(str instanceof Promise)) {
+      str = str.toString();
+    }
+    if (str instanceof Promise) {
+      str = await str;
+    }
+  }
+  const callbacks = str.callbacks;
+  if (!callbacks?.length) {
+    return Promise.resolve(str);
+  }
+  if (buffer) {
+    buffer[0] += str;
+  } else {
+    buffer = [str];
+  }
+  const resStr = Promise.all(callbacks.map((c) => c({ phase, buffer, context }))).then(
+    (res) => Promise.all(
+      res.filter(Boolean).map((str2) => resolveCallback(str2, phase, false, context, buffer))
+    ).then(() => buffer[0])
+  );
+  {
+    return resStr;
+  }
+};
+
+// src/helper/html/index.ts
+var html = (strings, ...values) => {
+  const buffer = [""];
+  for (let i = 0, len = strings.length - 1; i < len; i++) {
+    buffer[0] += strings[i];
+    const children = Array.isArray(values[i]) ? values[i].flat(Infinity) : [values[i]];
+    for (let i2 = 0, len2 = children.length; i2 < len2; i2++) {
+      const child = children[i2];
+      if (typeof child === "string") {
+        escapeToBuffer(child, buffer);
+      } else if (typeof child === "number") {
+        buffer[0] += child;
+      } else if (typeof child === "boolean" || child === null || child === void 0) {
+        continue;
+      } else if (typeof child === "object" && child.isEscaped) {
+        if (child.callbacks) {
+          buffer.unshift("", child);
+        } else {
+          const tmp = child.toString();
+          if (tmp instanceof Promise) {
+            buffer.unshift("", tmp);
+          } else {
+            buffer[0] += tmp;
+          }
+        }
+      } else if (child instanceof Promise) {
+        buffer.unshift("", child);
+      } else {
+        escapeToBuffer(child.toString(), buffer);
+      }
+    }
+  }
+  buffer[0] += strings.at(-1);
+  return buffer.length === 1 ? "callbacks" in buffer ? raw(resolveCallbackSync(raw(buffer[0], buffer.callbacks))) : raw(buffer[0]) : stringBufferToString(buffer, buffer.callbacks);
+};
+
 // src/server/http-exception.ts
-var HTTPException$1 = class HTTPException extends Error {
+var HTTPException$2 = class HTTPException extends Error {
   res;
   status;
   /**
@@ -115,7 +496,7 @@ function formatZodError(error, context) {
 function handleError$1(error, defaultMessage) {
   const apiError = error;
   const apiErrorStatus = apiError.status || apiError.details?.status || 500;
-  throw new HTTPException$1(apiErrorStatus, {
+  throw new HTTPException$2(apiErrorStatus, {
     message: apiError.message || defaultMessage,
     stack: apiError.stack,
     cause: apiError.cause
@@ -471,11 +852,11 @@ var LIST_STORED_AGENTS_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$1(500, { message: "Storage is not configured" });
+        throw new HTTPException$2(500, { message: "Storage is not configured" });
       }
       const agentsStore = await storage.getStore("agents");
       if (!agentsStore) {
-        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
+        throw new HTTPException$2(500, { message: "Agents storage domain is not available" });
       }
       const result = await agentsStore.listAgents({
         page,
@@ -501,15 +882,15 @@ var GET_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$1(500, { message: "Storage is not configured" });
+        throw new HTTPException$2(500, { message: "Storage is not configured" });
       }
       const agentsStore = await storage.getStore("agents");
       if (!agentsStore) {
-        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
+        throw new HTTPException$2(500, { message: "Agents storage domain is not available" });
       }
       const agent = await agentsStore.getAgentById({ id: storedAgentId });
       if (!agent) {
-        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
       return agent;
     } catch (error) {
@@ -546,15 +927,15 @@ var CREATE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$1(500, { message: "Storage is not configured" });
+        throw new HTTPException$2(500, { message: "Storage is not configured" });
       }
       const agentsStore = await storage.getStore("agents");
       if (!agentsStore) {
-        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
+        throw new HTTPException$2(500, { message: "Agents storage domain is not available" });
       }
       const existing = await agentsStore.getAgentById({ id });
       if (existing) {
-        throw new HTTPException$1(409, { message: `Agent with id ${id} already exists` });
+        throw new HTTPException$2(409, { message: `Agent with id ${id} already exists` });
       }
       const toolsFromBody = Array.isArray(tools) ? tools : void 0;
       const agent = await agentsStore.createAgent({
@@ -611,15 +992,15 @@ var UPDATE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$1(500, { message: "Storage is not configured" });
+        throw new HTTPException$2(500, { message: "Storage is not configured" });
       }
       const agentsStore = await storage.getStore("agents");
       if (!agentsStore) {
-        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
+        throw new HTTPException$2(500, { message: "Agents storage domain is not available" });
       }
       const existing = await agentsStore.getAgentById({ id: storedAgentId });
       if (!existing) {
-        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
       const toolsFromBody = Array.isArray(tools) ? tools : void 0;
       const agent = await agentsStore.updateAgent({
@@ -657,15 +1038,15 @@ var DELETE_STORED_AGENT_ROUTE = createRoute({
     try {
       const storage = mastra.getStorage();
       if (!storage) {
-        throw new HTTPException$1(500, { message: "Storage is not configured" });
+        throw new HTTPException$2(500, { message: "Storage is not configured" });
       }
       const agentsStore = await storage.getStore("agents");
       if (!agentsStore) {
-        throw new HTTPException$1(500, { message: "Agents storage domain is not available" });
+        throw new HTTPException$2(500, { message: "Agents storage domain is not available" });
       }
       const existing = await agentsStore.getAgentById({ id: storedAgentId });
       if (!existing) {
-        throw new HTTPException$1(404, { message: `Stored agent with id ${storedAgentId} not found` });
+        throw new HTTPException$2(404, { message: `Stored agent with id ${storedAgentId} not found` });
       }
       await agentsStore.deleteAgent({ id: storedAgentId });
       return { success: true, message: `Agent ${storedAgentId} deleted successfully` };
@@ -720,7 +1101,7 @@ function validateBody(body) {
     return acc;
   }, {});
   if (Object.keys(errorResponse).length > 0) {
-    throw new HTTPException$1(400, { message: Object.values(errorResponse)[0] });
+    throw new HTTPException$2(400, { message: Object.values(errorResponse)[0] });
   }
 }
 function sanitizeBody(body, disallowedKeys) {
@@ -1733,16 +2114,20 @@ SuperJSON.registerCustom = SuperJSON.defaultInstance.registerCustom.bind(SuperJS
 SuperJSON.allowErrorProps = SuperJSON.defaultInstance.allowErrorProps.bind(SuperJSON.defaultInstance);
 var stringify = SuperJSON.stringify;
 
+function commonjsRequire(path) {
+	throw new Error('Could not dynamically require "' + path + '". Please configure the dynamicRequireTargets or/and ignoreDynamicRequires option of @rollup/plugin-commonjs appropriately for this require call to work.');
+}
+
 var __create$4 = Object.create;
 var __defProp$4 = Object.defineProperty;
 var __getOwnPropDesc$4 = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames$4 = Object.getOwnPropertyNames;
 var __getProtoOf$4 = Object.getPrototypeOf;
 var __hasOwnProp$4 = Object.prototype.hasOwnProperty;
-var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
-  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+var __require = /* @__PURE__ */ ((x) => typeof commonjsRequire !== "undefined" ? commonjsRequire : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof commonjsRequire !== "undefined" ? commonjsRequire : a)[b]
 }) : x)(function(x) {
-  if (typeof require !== "undefined") return require.apply(this, arguments);
+  if (typeof commonjsRequire !== "undefined") return commonjsRequire.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
 var __commonJS$3 = (cb, mod) => function __require2() {
@@ -1825,7 +2210,7 @@ var GET_TOOL_BY_ID_ROUTE = createRoute({
         tool = mastra.getToolById(toolId);
       }
       if (!tool) {
-        throw new HTTPException$1(404, { message: "Tool not found" });
+        throw new HTTPException$2(404, { message: "Tool not found" });
       }
       const serializedTool = {
         ...tool,
@@ -1852,7 +2237,7 @@ var EXECUTE_TOOL_ROUTE = createRoute({
   handler: async ({ mastra, runId, toolId, tools, requestContext, ...bodyParams }) => {
     try {
       if (!toolId) {
-        throw new HTTPException$1(400, { message: "Tool ID is required" });
+        throw new HTTPException$2(400, { message: "Tool ID is required" });
       }
       let tool;
       if (tools && Object.keys(tools).length > 0) {
@@ -1861,10 +2246,10 @@ var EXECUTE_TOOL_ROUTE = createRoute({
         tool = mastra.getToolById(toolId);
       }
       if (!tool) {
-        throw new HTTPException$1(404, { message: "Tool not found" });
+        throw new HTTPException$2(404, { message: "Tool not found" });
       }
       if (!tool?.execute) {
-        throw new HTTPException$1(400, { message: "Tool is not executable" });
+        throw new HTTPException$2(400, { message: "Tool is not executable" });
       }
       const { data } = bodyParams;
       validateBody({ data });
@@ -1904,12 +2289,12 @@ var GET_AGENT_TOOL_ROUTE = createRoute({
     try {
       const agent = agentId ? mastra.getAgentById(agentId) : null;
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Agent not found" });
+        throw new HTTPException$2(404, { message: "Agent not found" });
       }
       const agentTools = await agent.listTools({ requestContext });
       const tool = Object.values(agentTools || {}).find((tool2) => tool2.id === toolId);
       if (!tool) {
-        throw new HTTPException$1(404, { message: "Tool not found" });
+        throw new HTTPException$2(404, { message: "Tool not found" });
       }
       const serializedTool = {
         ...tool,
@@ -1936,15 +2321,15 @@ var EXECUTE_AGENT_TOOL_ROUTE = createRoute({
     try {
       const agent = agentId ? mastra.getAgentById(agentId) : null;
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Tool not found" });
+        throw new HTTPException$2(404, { message: "Tool not found" });
       }
       const agentTools = await agent.listTools({ requestContext });
       const tool = Object.values(agentTools || {}).find((tool2) => tool2.id === toolId);
       if (!tool) {
-        throw new HTTPException$1(404, { message: "Tool not found" });
+        throw new HTTPException$2(404, { message: "Tool not found" });
       }
       if (!tool?.execute) {
-        throw new HTTPException$1(400, { message: "Tool is not executable" });
+        throw new HTTPException$2(400, { message: "Tool is not executable" });
       }
       const result = await tool.execute(data, {
         mastra,
@@ -2015,11 +2400,11 @@ var deleteIndexResponseSchema = successResponseSchema;
 // src/server/handlers/vector.ts
 function getVector(mastra, vectorName) {
   if (!vectorName) {
-    throw new HTTPException$1(400, { message: "Vector name is required" });
+    throw new HTTPException$2(400, { message: "Vector name is required" });
   }
   const vector = mastra.getVector(vectorName);
   if (!vector) {
-    throw new HTTPException$1(404, { message: `Vector store ${vectorName} not found` });
+    throw new HTTPException$2(404, { message: `Vector store ${vectorName} not found` });
   }
   return vector;
 }
@@ -2033,7 +2418,7 @@ async function upsertVectors({
 }) {
   try {
     if (!indexName || !vectors || !Array.isArray(vectors)) {
-      throw new HTTPException$1(400, { message: "Invalid request index. indexName and vectors array are required." });
+      throw new HTTPException$2(400, { message: "Invalid request index. indexName and vectors array are required." });
     }
     const vector = getVector(mastra, vectorName);
     const result = await vector.upsert({ indexName, vectors, metadata, ids });
@@ -2051,12 +2436,12 @@ async function createIndex({
 }) {
   try {
     if (!indexName || typeof dimension !== "number" || dimension <= 0) {
-      throw new HTTPException$1(400, {
+      throw new HTTPException$2(400, {
         message: "Invalid request index, indexName and positive dimension number are required."
       });
     }
     if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
-      throw new HTTPException$1(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
+      throw new HTTPException$2(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
     }
     const vector = getVector(mastra, vectorName);
     await vector.createIndex({ indexName, dimension, metric });
@@ -2076,7 +2461,7 @@ async function queryVectors({
 }) {
   try {
     if (!indexName || !queryVector || !Array.isArray(queryVector)) {
-      throw new HTTPException$1(400, { message: "Invalid request query. indexName and queryVector array are required." });
+      throw new HTTPException$2(400, { message: "Invalid request query. indexName and queryVector array are required." });
     }
     const vector = getVector(mastra, vectorName);
     const results = await vector.query({ indexName, queryVector, topK, filter, includeVector });
@@ -2101,7 +2486,7 @@ async function describeIndex({
 }) {
   try {
     if (!indexName) {
-      throw new HTTPException$1(400, { message: "Index name is required" });
+      throw new HTTPException$2(400, { message: "Index name is required" });
     }
     const vector = getVector(mastra, vectorName);
     const stats = await vector.describeIndex({ indexName });
@@ -2121,7 +2506,7 @@ async function deleteIndex({
 }) {
   try {
     if (!indexName) {
-      throw new HTTPException$1(400, { message: "Index name is required" });
+      throw new HTTPException$2(400, { message: "Index name is required" });
     }
     const vector = getVector(mastra, vectorName);
     await vector.deleteIndex({ indexName });
@@ -2144,7 +2529,7 @@ var UPSERT_VECTORS_ROUTE = createRoute({
     try {
       const { indexName, vectors, metadata, ids } = params;
       if (!indexName || !vectors || !Array.isArray(vectors)) {
-        throw new HTTPException$1(400, { message: "Invalid request index. indexName and vectors array are required." });
+        throw new HTTPException$2(400, { message: "Invalid request index. indexName and vectors array are required." });
       }
       const vector = getVector(mastra, vectorName);
       const result = await vector.upsert({ indexName, vectors, metadata, ids });
@@ -2168,12 +2553,12 @@ var CREATE_INDEX_ROUTE = createRoute({
     try {
       const { indexName, dimension, metric } = params;
       if (!indexName || typeof dimension !== "number" || dimension <= 0) {
-        throw new HTTPException$1(400, {
+        throw new HTTPException$2(400, {
           message: "Invalid request index, indexName and positive dimension number are required."
         });
       }
       if (metric && !["cosine", "euclidean", "dotproduct"].includes(metric)) {
-        throw new HTTPException$1(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
+        throw new HTTPException$2(400, { message: "Invalid metric. Must be one of: cosine, euclidean, dotproduct" });
       }
       const vector = getVector(mastra, vectorName);
       await vector.createIndex({ indexName, dimension, metric });
@@ -2197,7 +2582,7 @@ var QUERY_VECTORS_ROUTE = createRoute({
     try {
       const { indexName, queryVector, topK, filter, includeVector } = params;
       if (!indexName || !queryVector || !Array.isArray(queryVector)) {
-        throw new HTTPException$1(400, {
+        throw new HTTPException$2(400, {
           message: "Invalid request query. indexName and queryVector array are required."
         });
       }
@@ -2240,7 +2625,7 @@ var DESCRIBE_INDEX_ROUTE = createRoute({
   handler: async ({ mastra, vectorName, indexName }) => {
     try {
       if (!indexName) {
-        throw new HTTPException$1(400, { message: "Index name is required" });
+        throw new HTTPException$2(400, { message: "Index name is required" });
       }
       const vector = getVector(mastra, vectorName);
       const stats = await vector.describeIndex({ indexName });
@@ -2266,7 +2651,7 @@ var DELETE_INDEX_ROUTE = createRoute({
   handler: async ({ mastra, vectorName, indexName }) => {
     try {
       if (!indexName) {
-        throw new HTTPException$1(400, { message: "Index name is required" });
+        throw new HTTPException$2(400, { message: "Index name is required" });
       }
       const vector = getVector(mastra, vectorName);
       await vector.deleteIndex({ indexName });
@@ -2300,11 +2685,11 @@ var GET_SPEAKERS_ROUTE = createRoute({
   handler: async ({ mastra, agentId, requestContext }) => {
     try {
       if (!agentId) {
-        throw new HTTPException$1(400, { message: "Agent ID is required" });
+        throw new HTTPException$2(400, { message: "Agent ID is required" });
       }
       const agent = mastra.getAgentById(agentId);
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Agent not found" });
+        throw new HTTPException$2(404, { message: "Agent not found" });
       }
       const voice = await agent.getVoice({ requestContext });
       const speakers = await Promise.resolve().then(() => voice.getSpeakers()).catch((err) => {
@@ -2343,25 +2728,25 @@ var GENERATE_SPEECH_ROUTE = createRoute({
   handler: async ({ mastra, agentId, text, speakerId, requestContext }) => {
     try {
       if (!agentId) {
-        throw new HTTPException$1(400, { message: "Agent ID is required" });
+        throw new HTTPException$2(400, { message: "Agent ID is required" });
       }
       validateBody({ text });
       const agent = mastra.getAgentById(agentId);
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Agent not found" });
+        throw new HTTPException$2(404, { message: "Agent not found" });
       }
       const voice = await agent.getVoice({ requestContext });
       if (!voice) {
-        throw new HTTPException$1(400, { message: "Agent does not have voice capabilities" });
+        throw new HTTPException$2(400, { message: "Agent does not have voice capabilities" });
       }
       const audioStream = await Promise.resolve().then(() => voice.speak(text, { speaker: speakerId })).catch((err) => {
         if (err instanceof MastraError) {
-          throw new HTTPException$1(400, { message: err.message });
+          throw new HTTPException$2(400, { message: err.message });
         }
         throw err;
       });
       if (!audioStream) {
-        throw new HTTPException$1(500, { message: "Failed to generate speech" });
+        throw new HTTPException$2(500, { message: "Failed to generate speech" });
       }
       return audioStream;
     } catch (error) {
@@ -2394,18 +2779,18 @@ var TRANSCRIBE_SPEECH_ROUTE = createRoute({
   handler: async ({ mastra, agentId, audio, options, requestContext }) => {
     try {
       if (!agentId) {
-        throw new HTTPException$1(400, { message: "Agent ID is required" });
+        throw new HTTPException$2(400, { message: "Agent ID is required" });
       }
       if (!audio) {
-        throw new HTTPException$1(400, { message: "Audio data is required" });
+        throw new HTTPException$2(400, { message: "Audio data is required" });
       }
       const agent = mastra.getAgentById(agentId);
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Agent not found" });
+        throw new HTTPException$2(404, { message: "Agent not found" });
       }
       const voice = await agent.getVoice({ requestContext });
       if (!voice) {
-        throw new HTTPException$1(400, { message: "Agent does not have voice capabilities" });
+        throw new HTTPException$2(400, { message: "Agent does not have voice capabilities" });
       }
       const audioStream = new Readable();
       audioStream.push(audio);
@@ -2441,11 +2826,11 @@ var GET_LISTENER_ROUTE = createRoute({
   handler: async ({ mastra, agentId, requestContext }) => {
     try {
       if (!agentId) {
-        throw new HTTPException$1(400, { message: "Agent ID is required" });
+        throw new HTTPException$2(400, { message: "Agent ID is required" });
       }
       const agent = mastra.getAgentById(agentId);
       if (!agent) {
-        throw new HTTPException$1(404, { message: "Agent not found" });
+        throw new HTTPException$2(404, { message: "Agent not found" });
       }
       const voice = await agent.getVoice({ requestContext });
       const listeners = await Promise.resolve().then(() => voice.getListener()).catch((err) => {
@@ -2660,7 +3045,7 @@ var LIST_MCP_SERVERS_ROUTE = createRoute({
     offset
   }) => {
     if (!mastra || typeof mastra.listMCPServers !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or listMCPServers method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or listMCPServers method not available" });
     }
     const servers = mastra.listMCPServers();
     if (!servers) {
@@ -2709,15 +3094,15 @@ var GET_MCP_SERVER_DETAIL_ROUTE = createRoute({
   tags: ["MCP"],
   handler: async ({ mastra, id, version }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(id);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server with ID '${id}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server with ID '${id}' not found` });
     }
     const serverDetail = server.getServerDetail();
     if (version && serverDetail.version_detail.version !== version) {
-      throw new HTTPException$1(404, {
+      throw new HTTPException$2(404, {
         message: `MCP server with ID '${id}' found, but not version '${version}'. Available version: ${serverDetail.version_detail.version}`
       });
     }
@@ -2735,14 +3120,14 @@ var LIST_MCP_SERVER_TOOLS_ROUTE = createRoute({
   tags: ["MCP"],
   handler: async ({ mastra, serverId }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(serverId);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
     }
     if (typeof server.getToolListInfo !== "function") {
-      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot list tools in this way.` });
+      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot list tools in this way.` });
     }
     return server.getToolListInfo();
   }
@@ -2758,18 +3143,18 @@ var GET_MCP_SERVER_TOOL_DETAIL_ROUTE = createRoute({
   tags: ["MCP"],
   handler: async ({ mastra, serverId, toolId }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(serverId);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
     }
     if (typeof server.getToolInfo !== "function") {
-      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot provide tool details in this way.` });
+      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot provide tool details in this way.` });
     }
     const toolInfo = server.getToolInfo(toolId);
     if (!toolInfo) {
-      throw new HTTPException$1(404, { message: `Tool with ID '${toolId}' not found on MCP server '${serverId}'` });
+      throw new HTTPException$2(404, { message: `Tool with ID '${toolId}' not found on MCP server '${serverId}'` });
     }
     return toolInfo;
   }
@@ -2791,14 +3176,14 @@ var EXECUTE_MCP_SERVER_TOOL_ROUTE = createRoute({
     data
   }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(serverId);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server with ID '${serverId}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server with ID '${serverId}' not found` });
     }
     if (typeof server.executeTool !== "function") {
-      throw new HTTPException$1(501, { message: `Server '${serverId}' cannot execute tools in this way.` });
+      throw new HTTPException$2(501, { message: `Server '${serverId}' cannot execute tools in this way.` });
     }
     const result = await server.executeTool(toolId, data);
     return { result };
@@ -2814,11 +3199,11 @@ var MCP_HTTP_TRANSPORT_ROUTE = createRoute({
   tags: ["MCP"],
   handler: async ({ mastra, serverId }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(serverId);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server '${serverId}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server '${serverId}' not found` });
     }
     return {
       server,
@@ -2836,11 +3221,11 @@ var MCP_SSE_TRANSPORT_ROUTE = createRoute({
   tags: ["MCP"],
   handler: async ({ mastra, serverId }) => {
     if (!mastra || typeof mastra.getMCPServerById !== "function") {
-      throw new HTTPException$1(500, { message: "Mastra instance or getMCPServerById method not available" });
+      throw new HTTPException$2(500, { message: "Mastra instance or getMCPServerById method not available" });
     }
     const server = mastra.getMCPServerById(serverId);
     if (!server) {
-      throw new HTTPException$1(404, { message: `MCP server '${serverId}' not found` });
+      throw new HTTPException$2(404, { message: `MCP server '${serverId}' not found` });
     }
     return {
       server,
@@ -3119,7 +3504,7 @@ async function getMemoryFromContext({
       }
     }
     if (!agent) {
-      throw new HTTPException$1(404, { message: "Agent not found" });
+      throw new HTTPException$2(404, { message: "Agent not found" });
     }
   }
   if (agent) {
@@ -3162,7 +3547,7 @@ var GET_MEMORY_CONFIG_ROUTE = createRoute({
     try {
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const config = memory.getMergedThreadConfig({});
       return { config };
@@ -3184,7 +3569,7 @@ var LIST_THREADS_ROUTE = createRoute({
     try {
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       validateBody({ resourceId });
       const result = await memory.listThreadsByResourceId({
@@ -3214,11 +3599,11 @@ var GET_THREAD_BY_ID_ROUTE = createRoute({
       validateBody({ threadId });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const thread = await memory.getThreadById({ threadId });
       if (!thread) {
-        throw new HTTPException$1(404, { message: "Thread not found" });
+        throw new HTTPException$2(404, { message: "Thread not found" });
       }
       return thread;
     } catch (error) {
@@ -3252,14 +3637,14 @@ var LIST_MESSAGES_ROUTE = createRoute({
       validateBody({ threadId });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       if (!threadId) {
-        throw new HTTPException$1(400, { message: "No threadId found" });
+        throw new HTTPException$2(400, { message: "No threadId found" });
       }
       const thread = await memory.getThreadById({ threadId });
       if (!thread) {
-        throw new HTTPException$1(404, { message: "Thread not found" });
+        throw new HTTPException$2(404, { message: "Thread not found" });
       }
       const result = await memory.recall({
         threadId,
@@ -3291,7 +3676,7 @@ var GET_WORKING_MEMORY_ROUTE = createRoute({
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       validateBody({ threadId });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const thread = await memory.getThreadById({ threadId });
       const threadExists = !!thread;
@@ -3320,17 +3705,17 @@ var SAVE_MESSAGES_ROUTE = createRoute({
     try {
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       if (!messages) {
-        throw new HTTPException$1(400, { message: "Messages are required" });
+        throw new HTTPException$2(400, { message: "Messages are required" });
       }
       if (!Array.isArray(messages)) {
-        throw new HTTPException$1(400, { message: "Messages should be an array" });
+        throw new HTTPException$2(400, { message: "Messages should be an array" });
       }
       const invalidMessages = messages.filter((message) => !message.threadId || !message.resourceId);
       if (invalidMessages.length > 0) {
-        throw new HTTPException$1(400, {
+        throw new HTTPException$2(400, {
           message: `All messages must have threadId and resourceId fields. Found ${invalidMessages.length} invalid message(s).`
         });
       }
@@ -3360,7 +3745,7 @@ var CREATE_THREAD_ROUTE = createRoute({
     try {
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       validateBody({ resourceId });
       const result = await memory.createThread({
@@ -3392,11 +3777,11 @@ var UPDATE_THREAD_ROUTE = createRoute({
       const updatedAt = /* @__PURE__ */ new Date();
       validateBody({ threadId });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const thread = await memory.getThreadById({ threadId });
       if (!thread) {
-        throw new HTTPException$1(404, { message: "Thread not found" });
+        throw new HTTPException$2(404, { message: "Thread not found" });
       }
       const updatedThread = {
         ...thread,
@@ -3431,11 +3816,11 @@ var DELETE_THREAD_ROUTE = createRoute({
       validateBody({ threadId });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const thread = await memory.getThreadById({ threadId });
       if (!thread) {
-        throw new HTTPException$1(404, { message: "Thread not found" });
+        throw new HTTPException$2(404, { message: "Thread not found" });
       }
       await memory.deleteThread(threadId);
       return { result: "Thread deleted" };
@@ -3460,11 +3845,11 @@ var UPDATE_WORKING_MEMORY_ROUTE = createRoute({
       validateBody({ threadId, workingMemory });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const thread = await memory.getThreadById({ threadId });
       if (!thread) {
-        throw new HTTPException$1(404, { message: "Thread not found" });
+        throw new HTTPException$2(404, { message: "Thread not found" });
       }
       await memory.updateWorkingMemory({ threadId, resourceId, workingMemory, memoryConfig });
       return { success: true };
@@ -3486,11 +3871,11 @@ var DELETE_MESSAGES_ROUTE = createRoute({
   handler: async ({ mastra, agentId, messageIds, requestContext }) => {
     try {
       if (messageIds === void 0 || messageIds === null) {
-        throw new HTTPException$1(400, { message: "messageIds is required" });
+        throw new HTTPException$2(400, { message: "messageIds is required" });
       }
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       let normalizedIds;
       if (Array.isArray(messageIds)) {
@@ -3522,7 +3907,7 @@ var SEARCH_MEMORY_ROUTE = createRoute({
       validateBody({ searchQuery, resourceId });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
       if (!memory) {
-        throw new HTTPException$1(400, { message: "Memory is not initialized" });
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
       }
       const config = memory.getMergedThreadConfig(memoryConfig || {});
       const hasSemanticRecall = !!config?.semanticRecall;
@@ -3540,7 +3925,7 @@ var SEARCH_MEMORY_ROUTE = createRoute({
           };
         }
         if (thread.resourceId !== resourceId) {
-          throw new HTTPException$1(403, { message: "Thread does not belong to the specified resource" });
+          throw new HTTPException$2(403, { message: "Thread does not belong to the specified resource" });
         }
       }
       if (!threadId) {
@@ -3781,7 +4166,7 @@ function transformLegacyParams(params) {
 function getStorage(mastra) {
   const storage = mastra.getStorage();
   if (!storage) {
-    throw new HTTPException$1(500, { message: "Storage is not available" });
+    throw new HTTPException$2(500, { message: "Storage is not available" });
   }
   return storage;
 }
@@ -3789,7 +4174,7 @@ async function getObservabilityStore(mastra) {
   const storage = getStorage(mastra);
   const observability = await storage.getStore("observability");
   if (!observability) {
-    throw new HTTPException$1(500, { message: "Observability storage domain is not available" });
+    throw new HTTPException$2(500, { message: "Observability storage domain is not available" });
   }
   return observability;
 }
@@ -3797,7 +4182,7 @@ async function getScoresStore(mastra) {
   const storage = getStorage(mastra);
   const scores = await storage.getStore("scores");
   if (!scores) {
-    throw new HTTPException$1(500, { message: "Scores storage domain is not available" });
+    throw new HTTPException$2(500, { message: "Scores storage domain is not available" });
   }
   return scores;
 }
@@ -3839,7 +4224,7 @@ var GET_TRACE_ROUTE = createRoute({
       const observabilityStore = await getObservabilityStore(mastra);
       const trace = await observabilityStore.getTrace({ traceId });
       if (!trace) {
-        throw new HTTPException$1(404, { message: `Trace with ID '${traceId}' not found` });
+        throw new HTTPException$2(404, { message: `Trace with ID '${traceId}' not found` });
       }
       return trace;
     } catch (error) {
@@ -3862,7 +4247,7 @@ var SCORE_TRACES_ROUTE = createRoute({
       const { scorerName, targets } = params;
       const scorer = mastra.getScorerById(scorerName);
       if (!scorer) {
-        throw new HTTPException$1(404, { message: `Scorer '${scorerName}' not found` });
+        throw new HTTPException$2(404, { message: `Scorer '${scorerName}' not found` });
       }
       scoreTraces({
         scorerId: scorer.config.id || scorer.config.name,
@@ -4202,7 +4587,7 @@ var SAVE_SCORE_ROUTE = createRoute({
       const scoresStore = await mastra.getStorage()?.getStore("scores");
       const result = await scoresStore?.saveScore?.(score);
       if (!result) {
-        throw new HTTPException$1(500, { message: "Storage not configured" });
+        throw new HTTPException$2(500, { message: "Storage not configured" });
       }
       return result;
     } catch (error) {
@@ -9080,7 +9465,7 @@ var createWorkflowRunBodySchema = z.object({
 async function listWorkflowsFromSystem({ mastra, workflowId }) {
   const logger = mastra.getLogger();
   if (!workflowId) {
-    throw new HTTPException$1(400, { message: "Workflow ID is required" });
+    throw new HTTPException$2(400, { message: "Workflow ID is required" });
   }
   let workflow;
   workflow = WorkflowRegistry.getWorkflow(workflowId);
@@ -9110,7 +9495,7 @@ async function listWorkflowsFromSystem({ mastra, workflowId }) {
     }
   }
   if (!workflow) {
-    throw new HTTPException$1(404, { message: "Workflow not found" });
+    throw new HTTPException$2(404, { message: "Workflow not found" });
   }
   return { workflow };
 }
@@ -9151,7 +9536,7 @@ var GET_WORKFLOW_BY_ID_ROUTE = createRoute({
   handler: async ({ mastra, workflowId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       return getWorkflowInfo(workflow);
@@ -9173,7 +9558,7 @@ var LIST_WORKFLOW_RUNS_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, fromDate, toDate, page, perPage, limit, offset, resourceId, status }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       let finalPage = page;
       let finalPerPage = perPage;
@@ -9184,14 +9569,14 @@ var LIST_WORKFLOW_RUNS_ROUTE = createRoute({
         finalPage = Math.floor(offset / finalPerPage);
       }
       if (finalPerPage !== void 0 && (typeof finalPerPage !== "number" || !Number.isInteger(finalPerPage) || finalPerPage <= 0)) {
-        throw new HTTPException$1(400, { message: "perPage must be a positive integer" });
+        throw new HTTPException$2(400, { message: "perPage must be a positive integer" });
       }
       if (finalPage !== void 0 && (!Number.isInteger(finalPage) || finalPage < 0)) {
-        throw new HTTPException$1(400, { message: "page must be a non-negative integer" });
+        throw new HTTPException$2(400, { message: "page must be a non-negative integer" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const workflowRuns = await workflow.listWorkflowRuns({
         fromDate: fromDate ? typeof fromDate === "string" ? new Date(fromDate) : fromDate : void 0,
@@ -9222,18 +9607,18 @@ var GET_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "Run ID is required" });
+        throw new HTTPException$2(400, { message: "Run ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       return run;
     } catch (error) {
@@ -9253,14 +9638,14 @@ var DELETE_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "Run ID is required" });
+        throw new HTTPException$2(400, { message: "Run ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       await workflow.deleteWorkflowRunById(runId);
       return { message: "Workflow run deleted" };
@@ -9283,11 +9668,11 @@ var CREATE_WORKFLOW_RUN_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, resourceId, disableScorers }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.createRun({ runId, resourceId, disableScorers });
       return { runId: run.runId };
@@ -9309,14 +9694,14 @@ var STREAM_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, resourceId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to stream workflow" });
+        throw new HTTPException$2(400, { message: "runId required to stream workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const serverCache = mastra.getServerCache();
       const run = await workflow.createRun({ runId, resourceId });
@@ -9364,18 +9749,18 @@ var RESUME_STREAM_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const serverCache = mastra.getServerCache();
@@ -9410,14 +9795,14 @@ var GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, fields, withNestedWorkflows }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "Run ID is required" });
+        throw new HTTPException$2(400, { message: "Run ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const fieldList = fields ? fields.split(",").map((f) => f.trim()) : void 0;
       const executionResult = await workflow.getWorkflowRunExecutionResult(runId, {
@@ -9426,7 +9811,7 @@ var GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE = createRoute({
         fields: fieldList
       });
       if (!executionResult) {
-        throw new HTTPException$1(404, { message: "Workflow run execution result not found" });
+        throw new HTTPException$2(404, { message: "Workflow run execution result not found" });
       }
       return executionResult;
     } catch (error) {
@@ -9448,11 +9833,11 @@ var START_ASYNC_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const _run = await workflow.createRun({ runId });
       const result = await _run.start(params);
@@ -9476,18 +9861,18 @@ var START_WORKFLOW_RUN_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to start run" });
+        throw new HTTPException$2(400, { message: "runId required to start run" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       void _run.start({
@@ -9512,23 +9897,23 @@ var OBSERVE_STREAM_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to observe workflow stream" });
+        throw new HTTPException$2(400, { message: "runId required to observe workflow stream" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const serverCache = mastra.getServerCache();
       if (!serverCache) {
-        throw new HTTPException$1(500, { message: "Server cache not found" });
+        throw new HTTPException$2(500, { message: "Server cache not found" });
       }
       const cachedRunChunks = await serverCache.listFromTo(runId, 0);
       const combinedStream = new ReadableStream$1({
@@ -9595,18 +9980,18 @@ var RESUME_ASYNC_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const result = await _run.resume(params);
@@ -9630,18 +10015,18 @@ var RESUME_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       void _run.resume(params);
@@ -9665,18 +10050,18 @@ var RESTART_ASYNC_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to restart workflow" });
+        throw new HTTPException$2(400, { message: "runId required to restart workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const result = await _run.restart(params);
@@ -9700,18 +10085,18 @@ var RESTART_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to restart workflow" });
+        throw new HTTPException$2(400, { message: "runId required to restart workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       void _run.restart(params);
@@ -9733,11 +10118,11 @@ var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE = createRoute({
   handler: async ({ mastra, workflowId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       await workflow.restartAllActiveWorkflowRuns();
       return { message: "All active workflow runs restarted" };
@@ -9758,11 +10143,11 @@ var RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE = createRoute({
   handler: async ({ mastra, workflowId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       void workflow.restartAllActiveWorkflowRuns();
       return { message: "All active workflow runs restarted" };
@@ -9785,18 +10170,18 @@ var TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to time travel workflow" });
+        throw new HTTPException$2(400, { message: "runId required to time travel workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const result = await _run.timeTravel(params);
@@ -9820,18 +10205,18 @@ var TIME_TRAVEL_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to time travel workflow" });
+        throw new HTTPException$2(400, { message: "runId required to time travel workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       void _run.timeTravel(params);
@@ -9854,14 +10239,14 @@ var TIME_TRAVEL_STREAM_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to time travel workflow stream" });
+        throw new HTTPException$2(400, { message: "runId required to time travel workflow stream" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const serverCache = mastra.getServerCache();
       const run = await workflow.createRun({ runId });
@@ -9895,18 +10280,18 @@ var CANCEL_WORKFLOW_RUN_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to cancel workflow run" });
+        throw new HTTPException$2(400, { message: "runId required to cancel workflow run" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       await _run.cancel();
@@ -9930,14 +10315,14 @@ var STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId, ...params }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to resume workflow" });
+        throw new HTTPException$2(400, { message: "runId required to resume workflow" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const serverCache = mastra.getServerCache();
       const run = await workflow.createRun({ runId });
@@ -9969,23 +10354,23 @@ var OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE = createRoute({
   handler: async ({ mastra, workflowId, runId }) => {
     try {
       if (!workflowId) {
-        throw new HTTPException$1(400, { message: "Workflow ID is required" });
+        throw new HTTPException$2(400, { message: "Workflow ID is required" });
       }
       if (!runId) {
-        throw new HTTPException$1(400, { message: "runId required to observe workflow stream" });
+        throw new HTTPException$2(400, { message: "runId required to observe workflow stream" });
       }
       const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
       if (!workflow) {
-        throw new HTTPException$1(404, { message: "Workflow not found" });
+        throw new HTTPException$2(404, { message: "Workflow not found" });
       }
       const run = await workflow.getWorkflowRunById(runId);
       if (!run) {
-        throw new HTTPException$1(404, { message: "Workflow run not found" });
+        throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
       const _run = await workflow.createRun({ runId, resourceId: run.resourceId });
       const serverCache = mastra.getServerCache();
       if (!serverCache) {
-        throw new HTTPException$1(500, { message: "Server cache not found" });
+        throw new HTTPException$2(500, { message: "Server cache not found" });
       }
       const transformStream = new TransformStream$1();
       const writer = transformStream.writable.getWriter();
@@ -42366,7 +42751,7 @@ var GET_AGENT_BUILDER_ACTION_BY_ID_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, {
+        throw new HTTPException$2(400, {
           message: `Invalid agent-builder action: ${actionId}. Valid actions are: ${Object.keys(agentBuilderWorkflows).join(", ")}`
         });
       }
@@ -42396,7 +42781,7 @@ var LIST_AGENT_BUILDER_ACTION_RUNS_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Listing agent builder action runs", { actionId });
       return await LIST_WORKFLOW_RUNS_ROUTE.handler({
@@ -42426,7 +42811,7 @@ var GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Getting agent builder action run by ID", { actionId, runId });
       return await GET_WORKFLOW_RUN_BY_ID_ROUTE.handler({
@@ -42456,7 +42841,7 @@ var GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Getting agent builder action run execution result", { actionId, runId });
       return await GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE.handler({
@@ -42487,7 +42872,7 @@ var CREATE_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Creating agent builder action run", { actionId, runId });
       return await CREATE_WORKFLOW_RUN_ROUTE.handler({
@@ -42519,7 +42904,7 @@ var STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action", { actionId, runId });
       return await STREAM_WORKFLOW_ROUTE.handler({
@@ -42552,7 +42937,7 @@ var STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action (v2)", { actionId, runId });
       return await STREAM_VNEXT_WORKFLOW_ROUTE.handler({
@@ -42585,7 +42970,7 @@ var START_ASYNC_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Starting agent builder action asynchronously", { actionId, runId });
       return await START_ASYNC_WORKFLOW_ROUTE.handler({
@@ -42618,7 +43003,7 @@ var START_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Starting specific agent builder action run", { actionId, runId });
       return await START_WORKFLOW_RUN_ROUTE.handler({
@@ -42650,7 +43035,7 @@ var OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream", { actionId, runId });
       return await OBSERVE_STREAM_WORKFLOW_ROUTE.handler({
@@ -42681,7 +43066,7 @@ var OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream (v2)", { actionId, runId });
       return await OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE.handler({
@@ -42713,7 +43098,7 @@ var RESUME_ASYNC_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action asynchronously", { actionId, runId, step });
       return await RESUME_ASYNC_WORKFLOW_ROUTE.handler({
@@ -42746,7 +43131,7 @@ var RESUME_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action", { actionId, runId, step });
       return await RESUME_WORKFLOW_ROUTE.handler({
@@ -42779,7 +43164,7 @@ var RESUME_STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Resuming agent builder action stream", { actionId, runId, step });
       return await RESUME_STREAM_WORKFLOW_ROUTE.handler({
@@ -42810,7 +43195,7 @@ var CANCEL_AGENT_BUILDER_ACTION_RUN_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Cancelling agent builder action run", { actionId, runId });
       return await CANCEL_WORKFLOW_RUN_ROUTE.handler({
@@ -42842,7 +43227,7 @@ var STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Streaming agent builder action (legacy)", { actionId, runId });
       return await STREAM_LEGACY_WORKFLOW_ROUTE.handler({
@@ -42874,7 +43259,7 @@ var OBSERVE_STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE = createRoute({
     try {
       WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
       if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$1(400, { message: `Invalid agent-builder action: ${actionId}` });
+        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
       }
       logger.info("Observing agent builder action stream (legacy)", { actionId, runId });
       return await OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE.handler({
@@ -43071,7 +43456,7 @@ async function formatAgentList({
 async function getAgentFromSystem({ mastra, agentId }) {
   const logger = mastra.getLogger();
   if (!agentId) {
-    throw new HTTPException$1(400, { message: "Agent ID is required" });
+    throw new HTTPException$2(400, { message: "Agent ID is required" });
   }
   let agent;
   try {
@@ -43097,7 +43482,7 @@ async function getAgentFromSystem({ mastra, agentId }) {
     }
   }
   if (!agent) {
-    throw new HTTPException$1(404, { message: `Agent with id ${agentId} not found` });
+    throw new HTTPException$2(404, { message: `Agent with id ${agentId} not found` });
   }
   return agent;
 }
@@ -43282,7 +43667,7 @@ var GENERATE_LEGACY_ROUTE = createRoute({
       const finalResourceId = resourceId ?? resourceid;
       validateBody({ messages });
       if (threadId && !finalResourceId || !threadId && finalResourceId) {
-        throw new HTTPException$1(400, { message: "Both threadId or resourceId must be provided" });
+        throw new HTTPException$2(400, { message: "Both threadId or resourceId must be provided" });
       }
       const result = await agent.generateLegacy(messages, {
         ...rest,
@@ -43314,7 +43699,7 @@ var STREAM_GENERATE_LEGACY_ROUTE = createRoute({
       const finalResourceId = resourceId ?? resourceid;
       validateBody({ messages });
       if (threadId && !finalResourceId || !threadId && finalResourceId) {
-        throw new HTTPException$1(400, { message: "Both threadId or resourceId must be provided" });
+        throw new HTTPException$2(400, { message: "Both threadId or resourceId must be provided" });
       }
       const streamResult = await agent.streamLegacy(messages, {
         ...rest,
@@ -43438,10 +43823,10 @@ var APPROVE_TOOL_CALL_ROUTE = createRoute({
     try {
       const agent = await getAgentFromSystem({ mastra, agentId });
       if (!params.runId) {
-        throw new HTTPException$1(400, { message: "Run id is required" });
+        throw new HTTPException$2(400, { message: "Run id is required" });
       }
       if (!params.toolCallId) {
-        throw new HTTPException$1(400, { message: "Tool call id is required" });
+        throw new HTTPException$2(400, { message: "Tool call id is required" });
       }
       sanitizeBody(params, ["tools"]);
       const streamResult = await agent.approveToolCall({
@@ -43469,10 +43854,10 @@ var DECLINE_TOOL_CALL_ROUTE = createRoute({
     try {
       const agent = await getAgentFromSystem({ mastra, agentId });
       if (!params.runId) {
-        throw new HTTPException$1(400, { message: "Run id is required" });
+        throw new HTTPException$2(400, { message: "Run id is required" });
       }
       if (!params.toolCallId) {
-        throw new HTTPException$1(400, { message: "Tool call id is required" });
+        throw new HTTPException$2(400, { message: "Tool call id is required" });
       }
       sanitizeBody(params, ["tools"]);
       const streamResult = await agent.declineToolCall({
@@ -43570,7 +43955,7 @@ var REORDER_AGENT_MODEL_LIST_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const modelList = await agent.getModelList();
       if (!modelList || modelList.length === 0) {
-        throw new HTTPException$1(400, { message: "Agent model list is not found or empty" });
+        throw new HTTPException$2(400, { message: "Agent model list is not found or empty" });
       }
       agent.reorderModels(reorderedModelIds);
       return { message: "Model list reordered" };
@@ -43594,11 +43979,11 @@ var UPDATE_AGENT_MODEL_IN_MODEL_LIST_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const modelList = await agent.getModelList();
       if (!modelList || modelList.length === 0) {
-        throw new HTTPException$1(400, { message: "Agent model list is not found or empty" });
+        throw new HTTPException$2(400, { message: "Agent model list is not found or empty" });
       }
       const modelConfig = modelList.find((config) => config.id === modelConfigId);
       if (!modelConfig) {
-        throw new HTTPException$1(404, { message: `Model config with id ${modelConfigId} not found` });
+        throw new HTTPException$2(404, { message: `Model config with id ${modelConfigId} not found` });
       }
       const newModel = bodyModel?.modelId && bodyModel?.provider ? `${bodyModel.provider}/${bodyModel.modelId}` : modelConfig.model;
       const updated = {
@@ -43698,7 +44083,7 @@ var ENHANCE_INSTRUCTIONS_ROUTE = createRoute({
       const agent = await getAgentFromSystem({ mastra, agentId });
       const model = await findConnectedModel(agent);
       if (!model) {
-        throw new HTTPException$1(400, {
+        throw new HTTPException$2(400, {
           message: "No model with a configured API key found. Please set the required environment variable for your model provider."
         });
       }
@@ -43736,7 +44121,7 @@ var STREAM_VNEXT_DEPRECATED_ROUTE = createRoute({
   tags: ["Agents"],
   deprecated: true,
   handler: async () => {
-    throw new HTTPException$1(410, { message: "This endpoint is deprecated. Please use /stream instead." });
+    throw new HTTPException$2(410, { message: "This endpoint is deprecated. Please use /stream instead." });
   }
 });
 var STREAM_UI_MESSAGE_VNEXT_DEPRECATED_ROUTE = createRoute({
@@ -44371,6 +44756,2194 @@ var InMemoryTaskStore = class {
     }
     this.store.set(key, { ...data });
   }
+};
+
+// src/compose.ts
+var compose = (middleware, onError, onNotFound) => {
+  return (context, next) => {
+    let index = -1;
+    return dispatch(0);
+    async function dispatch(i) {
+      if (i <= index) {
+        throw new Error("next() called multiple times");
+      }
+      index = i;
+      let res;
+      let isError = false;
+      let handler;
+      if (middleware[i]) {
+        handler = middleware[i][0][0];
+        context.req.routeIndex = i;
+      } else {
+        handler = i === middleware.length && next || void 0;
+      }
+      if (handler) {
+        try {
+          res = await handler(context, () => dispatch(i + 1));
+        } catch (err) {
+          if (err instanceof Error && onError) {
+            context.error = err;
+            res = await onError(err, context);
+            isError = true;
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        if (context.finalized === false && onNotFound) {
+          res = await onNotFound(context);
+        }
+      }
+      if (res && (context.finalized === false || isError)) {
+        context.res = res;
+      }
+      return context;
+    }
+  };
+};
+
+// src/http-exception.ts
+var HTTPException$1 = class HTTPException extends Error {
+  res;
+  status;
+  /**
+   * Creates an instance of `HTTPException`.
+   * @param status - HTTP status code for the exception. Defaults to 500.
+   * @param options - Additional options for the exception.
+   */
+  constructor(status = 500, options) {
+    super(options?.message, { cause: options?.cause });
+    this.res = options?.res;
+    this.status = status;
+  }
+  /**
+   * Returns the response object associated with the exception.
+   * If a response object is not provided, a new response is created with the error message and status code.
+   * @returns The response object.
+   */
+  getResponse() {
+    if (this.res) {
+      const newResponse = new Response(this.res.body, {
+        status: this.status,
+        headers: this.res.headers
+      });
+      return newResponse;
+    }
+    return new Response(this.message, {
+      status: this.status
+    });
+  }
+};
+
+// src/request/constants.ts
+var GET_MATCH_RESULT = /* @__PURE__ */ Symbol();
+
+// src/utils/body.ts
+var parseBody = async (request, options = /* @__PURE__ */ Object.create(null)) => {
+  const { all = false, dot = false } = options;
+  const headers = request instanceof HonoRequest ? request.raw.headers : request.headers;
+  const contentType = headers.get("Content-Type");
+  if (contentType?.startsWith("multipart/form-data") || contentType?.startsWith("application/x-www-form-urlencoded")) {
+    return parseFormData(request, { all, dot });
+  }
+  return {};
+};
+async function parseFormData(request, options) {
+  const formData = await request.formData();
+  if (formData) {
+    return convertFormDataToBodyData(formData, options);
+  }
+  return {};
+}
+function convertFormDataToBodyData(formData, options) {
+  const form = /* @__PURE__ */ Object.create(null);
+  formData.forEach((value, key) => {
+    const shouldParseAllValues = options.all || key.endsWith("[]");
+    if (!shouldParseAllValues) {
+      form[key] = value;
+    } else {
+      handleParsingAllValues(form, key, value);
+    }
+  });
+  if (options.dot) {
+    Object.entries(form).forEach(([key, value]) => {
+      const shouldParseDotValues = key.includes(".");
+      if (shouldParseDotValues) {
+        handleParsingNestedValues(form, key, value);
+        delete form[key];
+      }
+    });
+  }
+  return form;
+}
+var handleParsingAllValues = (form, key, value) => {
+  if (form[key] !== void 0) {
+    if (Array.isArray(form[key])) {
+      form[key].push(value);
+    } else {
+      form[key] = [form[key], value];
+    }
+  } else {
+    if (!key.endsWith("[]")) {
+      form[key] = value;
+    } else {
+      form[key] = [value];
+    }
+  }
+};
+var handleParsingNestedValues = (form, key, value) => {
+  let nestedForm = form;
+  const keys = key.split(".");
+  keys.forEach((key2, index) => {
+    if (index === keys.length - 1) {
+      nestedForm[key2] = value;
+    } else {
+      if (!nestedForm[key2] || typeof nestedForm[key2] !== "object" || Array.isArray(nestedForm[key2]) || nestedForm[key2] instanceof File) {
+        nestedForm[key2] = /* @__PURE__ */ Object.create(null);
+      }
+      nestedForm = nestedForm[key2];
+    }
+  });
+};
+
+// src/utils/url.ts
+var splitPath = (path) => {
+  const paths = path.split("/");
+  if (paths[0] === "") {
+    paths.shift();
+  }
+  return paths;
+};
+var splitRoutingPath = (routePath) => {
+  const { groups, path } = extractGroupsFromPath(routePath);
+  const paths = splitPath(path);
+  return replaceGroupMarks(paths, groups);
+};
+var extractGroupsFromPath = (path) => {
+  const groups = [];
+  path = path.replace(/\{[^}]+\}/g, (match, index) => {
+    const mark = `@${index}`;
+    groups.push([mark, match]);
+    return mark;
+  });
+  return { groups, path };
+};
+var replaceGroupMarks = (paths, groups) => {
+  for (let i = groups.length - 1; i >= 0; i--) {
+    const [mark] = groups[i];
+    for (let j = paths.length - 1; j >= 0; j--) {
+      if (paths[j].includes(mark)) {
+        paths[j] = paths[j].replace(mark, groups[i][1]);
+        break;
+      }
+    }
+  }
+  return paths;
+};
+var patternCache = {};
+var getPattern = (label, next) => {
+  if (label === "*") {
+    return "*";
+  }
+  const match = label.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
+  if (match) {
+    const cacheKey = `${label}#${next}`;
+    if (!patternCache[cacheKey]) {
+      if (match[2]) {
+        patternCache[cacheKey] = next && next[0] !== ":" && next[0] !== "*" ? [cacheKey, match[1], new RegExp(`^${match[2]}(?=/${next})`)] : [label, match[1], new RegExp(`^${match[2]}$`)];
+      } else {
+        patternCache[cacheKey] = [label, match[1], true];
+      }
+    }
+    return patternCache[cacheKey];
+  }
+  return null;
+};
+var tryDecode = (str, decoder) => {
+  try {
+    return decoder(str);
+  } catch {
+    return str.replace(/(?:%[0-9A-Fa-f]{2})+/g, (match) => {
+      try {
+        return decoder(match);
+      } catch {
+        return match;
+      }
+    });
+  }
+};
+var tryDecodeURI = (str) => tryDecode(str, decodeURI);
+var getPath = (request) => {
+  const url = request.url;
+  const start = url.indexOf("/", url.indexOf(":") + 4);
+  let i = start;
+  for (; i < url.length; i++) {
+    const charCode = url.charCodeAt(i);
+    if (charCode === 37) {
+      const queryIndex = url.indexOf("?", i);
+      const path = url.slice(start, queryIndex === -1 ? void 0 : queryIndex);
+      return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
+    } else if (charCode === 63) {
+      break;
+    }
+  }
+  return url.slice(start, i);
+};
+var getPathNoStrict = (request) => {
+  const result = getPath(request);
+  return result.length > 1 && result.at(-1) === "/" ? result.slice(0, -1) : result;
+};
+var mergePath = (base, sub, ...rest) => {
+  if (rest.length) {
+    sub = mergePath(sub, ...rest);
+  }
+  return `${base?.[0] === "/" ? "" : "/"}${base}${sub === "/" ? "" : `${base?.at(-1) === "/" ? "" : "/"}${sub?.[0] === "/" ? sub.slice(1) : sub}`}`;
+};
+var checkOptionalParameter = (path) => {
+  if (path.charCodeAt(path.length - 1) !== 63 || !path.includes(":")) {
+    return null;
+  }
+  const segments = path.split("/");
+  const results = [];
+  let basePath = "";
+  segments.forEach((segment) => {
+    if (segment !== "" && !/\:/.test(segment)) {
+      basePath += "/" + segment;
+    } else if (/\:/.test(segment)) {
+      if (/\?/.test(segment)) {
+        if (results.length === 0 && basePath === "") {
+          results.push("/");
+        } else {
+          results.push(basePath);
+        }
+        const optionalSegment = segment.replace("?", "");
+        basePath += "/" + optionalSegment;
+        results.push(basePath);
+      } else {
+        basePath += "/" + segment;
+      }
+    }
+  });
+  return results.filter((v, i, a) => a.indexOf(v) === i);
+};
+var _decodeURI = (value) => {
+  if (!/[%+]/.test(value)) {
+    return value;
+  }
+  if (value.indexOf("+") !== -1) {
+    value = value.replace(/\+/g, " ");
+  }
+  return value.indexOf("%") !== -1 ? tryDecode(value, decodeURIComponent_) : value;
+};
+var _getQueryParam = (url, key, multiple) => {
+  let encoded;
+  if (!multiple && key && !/[%+]/.test(key)) {
+    let keyIndex2 = url.indexOf("?", 8);
+    if (keyIndex2 === -1) {
+      return void 0;
+    }
+    if (!url.startsWith(key, keyIndex2 + 1)) {
+      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
+    }
+    while (keyIndex2 !== -1) {
+      const trailingKeyCode = url.charCodeAt(keyIndex2 + key.length + 1);
+      if (trailingKeyCode === 61) {
+        const valueIndex = keyIndex2 + key.length + 2;
+        const endIndex = url.indexOf("&", valueIndex);
+        return _decodeURI(url.slice(valueIndex, endIndex === -1 ? void 0 : endIndex));
+      } else if (trailingKeyCode == 38 || isNaN(trailingKeyCode)) {
+        return "";
+      }
+      keyIndex2 = url.indexOf(`&${key}`, keyIndex2 + 1);
+    }
+    encoded = /[%+]/.test(url);
+    if (!encoded) {
+      return void 0;
+    }
+  }
+  const results = {};
+  encoded ??= /[%+]/.test(url);
+  let keyIndex = url.indexOf("?", 8);
+  while (keyIndex !== -1) {
+    const nextKeyIndex = url.indexOf("&", keyIndex + 1);
+    let valueIndex = url.indexOf("=", keyIndex);
+    if (valueIndex > nextKeyIndex && nextKeyIndex !== -1) {
+      valueIndex = -1;
+    }
+    let name = url.slice(
+      keyIndex + 1,
+      valueIndex === -1 ? nextKeyIndex === -1 ? void 0 : nextKeyIndex : valueIndex
+    );
+    if (encoded) {
+      name = _decodeURI(name);
+    }
+    keyIndex = nextKeyIndex;
+    if (name === "") {
+      continue;
+    }
+    let value;
+    if (valueIndex === -1) {
+      value = "";
+    } else {
+      value = url.slice(valueIndex + 1, nextKeyIndex === -1 ? void 0 : nextKeyIndex);
+      if (encoded) {
+        value = _decodeURI(value);
+      }
+    }
+    if (multiple) {
+      if (!(results[name] && Array.isArray(results[name]))) {
+        results[name] = [];
+      }
+      results[name].push(value);
+    } else {
+      results[name] ??= value;
+    }
+  }
+  return key ? results[key] : results;
+};
+var getQueryParam = _getQueryParam;
+var getQueryParams = (url, key) => {
+  return _getQueryParam(url, key, true);
+};
+var decodeURIComponent_ = decodeURIComponent;
+
+// src/request.ts
+var tryDecodeURIComponent = (str) => tryDecode(str, decodeURIComponent_);
+var HonoRequest = class {
+  /**
+   * `.raw` can get the raw Request object.
+   *
+   * @see {@link https://hono.dev/docs/api/request#raw}
+   *
+   * @example
+   * ```ts
+   * // For Cloudflare Workers
+   * app.post('/', async (c) => {
+   *   const metadata = c.req.raw.cf?.hostMetadata?
+   *   ...
+   * })
+   * ```
+   */
+  raw;
+  #validatedData;
+  // Short name of validatedData
+  #matchResult;
+  routeIndex = 0;
+  /**
+   * `.path` can get the pathname of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#path}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const pathname = c.req.path // `/about/me`
+   * })
+   * ```
+   */
+  path;
+  bodyCache = {};
+  constructor(request, path = "/", matchResult = [[]]) {
+    this.raw = request;
+    this.path = path;
+    this.#matchResult = matchResult;
+    this.#validatedData = {};
+  }
+  param(key) {
+    return key ? this.#getDecodedParam(key) : this.#getAllDecodedParams();
+  }
+  #getDecodedParam(key) {
+    const paramKey = this.#matchResult[0][this.routeIndex][1][key];
+    const param = this.#getParamValue(paramKey);
+    return param && /\%/.test(param) ? tryDecodeURIComponent(param) : param;
+  }
+  #getAllDecodedParams() {
+    const decoded = {};
+    const keys = Object.keys(this.#matchResult[0][this.routeIndex][1]);
+    for (const key of keys) {
+      const value = this.#getParamValue(this.#matchResult[0][this.routeIndex][1][key]);
+      if (value !== void 0) {
+        decoded[key] = /\%/.test(value) ? tryDecodeURIComponent(value) : value;
+      }
+    }
+    return decoded;
+  }
+  #getParamValue(paramKey) {
+    return this.#matchResult[1] ? this.#matchResult[1][paramKey] : paramKey;
+  }
+  query(key) {
+    return getQueryParam(this.url, key);
+  }
+  queries(key) {
+    return getQueryParams(this.url, key);
+  }
+  header(name) {
+    if (name) {
+      return this.raw.headers.get(name) ?? void 0;
+    }
+    const headerData = {};
+    this.raw.headers.forEach((value, key) => {
+      headerData[key] = value;
+    });
+    return headerData;
+  }
+  async parseBody(options) {
+    return this.bodyCache.parsedBody ??= await parseBody(this, options);
+  }
+  #cachedBody = (key) => {
+    const { bodyCache, raw } = this;
+    const cachedBody = bodyCache[key];
+    if (cachedBody) {
+      return cachedBody;
+    }
+    const anyCachedKey = Object.keys(bodyCache)[0];
+    if (anyCachedKey) {
+      return bodyCache[anyCachedKey].then((body) => {
+        if (anyCachedKey === "json") {
+          body = JSON.stringify(body);
+        }
+        return new Response(body)[key]();
+      });
+    }
+    return bodyCache[key] = raw[key]();
+  };
+  /**
+   * `.json()` can parse Request body of type `application/json`
+   *
+   * @see {@link https://hono.dev/docs/api/request#json}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.json()
+   * })
+   * ```
+   */
+  json() {
+    return this.#cachedBody("text").then((text) => JSON.parse(text));
+  }
+  /**
+   * `.text()` can parse Request body of type `text/plain`
+   *
+   * @see {@link https://hono.dev/docs/api/request#text}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.text()
+   * })
+   * ```
+   */
+  text() {
+    return this.#cachedBody("text");
+  }
+  /**
+   * `.arrayBuffer()` parse Request body as an `ArrayBuffer`
+   *
+   * @see {@link https://hono.dev/docs/api/request#arraybuffer}
+   *
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.arrayBuffer()
+   * })
+   * ```
+   */
+  arrayBuffer() {
+    return this.#cachedBody("arrayBuffer");
+  }
+  /**
+   * Parses the request body as a `Blob`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.blob();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#blob
+   */
+  blob() {
+    return this.#cachedBody("blob");
+  }
+  /**
+   * Parses the request body as `FormData`.
+   * @example
+   * ```ts
+   * app.post('/entry', async (c) => {
+   *   const body = await c.req.formData();
+   * });
+   * ```
+   * @see https://hono.dev/docs/api/request#formdata
+   */
+  formData() {
+    return this.#cachedBody("formData");
+  }
+  /**
+   * Adds validated data to the request.
+   *
+   * @param target - The target of the validation.
+   * @param data - The validated data to add.
+   */
+  addValidatedData(target, data) {
+    this.#validatedData[target] = data;
+  }
+  valid(target) {
+    return this.#validatedData[target];
+  }
+  /**
+   * `.url()` can get the request url strings.
+   *
+   * @see {@link https://hono.dev/docs/api/request#url}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const url = c.req.url // `http://localhost:8787/about/me`
+   *   ...
+   * })
+   * ```
+   */
+  get url() {
+    return this.raw.url;
+  }
+  /**
+   * `.method()` can get the method name of the request.
+   *
+   * @see {@link https://hono.dev/docs/api/request#method}
+   *
+   * @example
+   * ```ts
+   * app.get('/about/me', (c) => {
+   *   const method = c.req.method // `GET`
+   * })
+   * ```
+   */
+  get method() {
+    return this.raw.method;
+  }
+  get [GET_MATCH_RESULT]() {
+    return this.#matchResult;
+  }
+  /**
+   * `.matchedRoutes()` can return a matched route in the handler
+   *
+   * @deprecated
+   *
+   * Use matchedRoutes helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#matchedroutes}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async function logger(c, next) {
+   *   await next()
+   *   c.req.matchedRoutes.forEach(({ handler, method, path }, i) => {
+   *     const name = handler.name || (handler.length < 2 ? '[handler]' : '[middleware]')
+   *     console.log(
+   *       method,
+   *       ' ',
+   *       path,
+   *       ' '.repeat(Math.max(10 - path.length, 0)),
+   *       name,
+   *       i === c.req.routeIndex ? '<- respond from here' : ''
+   *     )
+   *   })
+   * })
+   * ```
+   */
+  get matchedRoutes() {
+    return this.#matchResult[0].map(([[, route]]) => route);
+  }
+  /**
+   * `routePath()` can retrieve the path registered within the handler
+   *
+   * @deprecated
+   *
+   * Use routePath helper defined in "hono/route" instead.
+   *
+   * @see {@link https://hono.dev/docs/api/request#routepath}
+   *
+   * @example
+   * ```ts
+   * app.get('/posts/:id', (c) => {
+   *   return c.json({ path: c.req.routePath })
+   * })
+   * ```
+   */
+  get routePath() {
+    return this.#matchResult[0].map(([[, route]]) => route)[this.routeIndex].path;
+  }
+};
+
+// src/context.ts
+var TEXT_PLAIN = "text/plain; charset=UTF-8";
+var setDefaultContentType = (contentType, headers) => {
+  return {
+    "Content-Type": contentType,
+    ...headers
+  };
+};
+var Context = class {
+  #rawRequest;
+  #req;
+  /**
+   * `.env` can get bindings (environment variables, secrets, KV namespaces, D1 database, R2 bucket etc.) in Cloudflare Workers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#env}
+   *
+   * @example
+   * ```ts
+   * // Environment object for Cloudflare Workers
+   * app.get('*', async c => {
+   *   const counter = c.env.COUNTER
+   * })
+   * ```
+   */
+  env = {};
+  #var;
+  finalized = false;
+  /**
+   * `.error` can get the error object from the middleware if the Handler throws an error.
+   *
+   * @see {@link https://hono.dev/docs/api/context#error}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   await next()
+   *   if (c.error) {
+   *     // do something...
+   *   }
+   * })
+   * ```
+   */
+  error;
+  #status;
+  #executionCtx;
+  #res;
+  #layout;
+  #renderer;
+  #notFoundHandler;
+  #preparedHeaders;
+  #matchResult;
+  #path;
+  /**
+   * Creates an instance of the Context class.
+   *
+   * @param req - The Request object.
+   * @param options - Optional configuration options for the context.
+   */
+  constructor(req, options) {
+    this.#rawRequest = req;
+    if (options) {
+      this.#executionCtx = options.executionCtx;
+      this.env = options.env;
+      this.#notFoundHandler = options.notFoundHandler;
+      this.#path = options.path;
+      this.#matchResult = options.matchResult;
+    }
+  }
+  /**
+   * `.req` is the instance of {@link HonoRequest}.
+   */
+  get req() {
+    this.#req ??= new HonoRequest(this.#rawRequest, this.#path, this.#matchResult);
+    return this.#req;
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#event}
+   * The FetchEvent associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have a FetchEvent.
+   */
+  get event() {
+    if (this.#executionCtx && "respondWith" in this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no FetchEvent");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#executionctx}
+   * The ExecutionContext associated with the current request.
+   *
+   * @throws Will throw an error if the context does not have an ExecutionContext.
+   */
+  get executionCtx() {
+    if (this.#executionCtx) {
+      return this.#executionCtx;
+    } else {
+      throw Error("This context has no ExecutionContext");
+    }
+  }
+  /**
+   * @see {@link https://hono.dev/docs/api/context#res}
+   * The Response object for the current request.
+   */
+  get res() {
+    return this.#res ||= new Response(null, {
+      headers: this.#preparedHeaders ??= new Headers()
+    });
+  }
+  /**
+   * Sets the Response object for the current request.
+   *
+   * @param _res - The Response object to set.
+   */
+  set res(_res) {
+    if (this.#res && _res) {
+      _res = new Response(_res.body, _res);
+      for (const [k, v] of this.#res.headers.entries()) {
+        if (k === "content-type") {
+          continue;
+        }
+        if (k === "set-cookie") {
+          const cookies = this.#res.headers.getSetCookie();
+          _res.headers.delete("set-cookie");
+          for (const cookie of cookies) {
+            _res.headers.append("set-cookie", cookie);
+          }
+        } else {
+          _res.headers.set(k, v);
+        }
+      }
+    }
+    this.#res = _res;
+    this.finalized = true;
+  }
+  /**
+   * `.render()` can create a response within a layout.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   return c.render('Hello!')
+   * })
+   * ```
+   */
+  render = (...args) => {
+    this.#renderer ??= (content) => this.html(content);
+    return this.#renderer(...args);
+  };
+  /**
+   * Sets the layout for the response.
+   *
+   * @param layout - The layout to set.
+   * @returns The layout function.
+   */
+  setLayout = (layout) => this.#layout = layout;
+  /**
+   * Gets the current layout for the response.
+   *
+   * @returns The current layout function.
+   */
+  getLayout = () => this.#layout;
+  /**
+   * `.setRenderer()` can set the layout in the custom middleware.
+   *
+   * @see {@link https://hono.dev/docs/api/context#render-setrenderer}
+   *
+   * @example
+   * ```tsx
+   * app.use('*', async (c, next) => {
+   *   c.setRenderer((content) => {
+   *     return c.html(
+   *       <html>
+   *         <body>
+   *           <p>{content}</p>
+   *         </body>
+   *       </html>
+   *     )
+   *   })
+   *   await next()
+   * })
+   * ```
+   */
+  setRenderer = (renderer) => {
+    this.#renderer = renderer;
+  };
+  /**
+   * `.header()` can set headers.
+   *
+   * @see {@link https://hono.dev/docs/api/context#header}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  header = (name, value, options) => {
+    if (this.finalized) {
+      this.#res = new Response(this.#res.body, this.#res);
+    }
+    const headers = this.#res ? this.#res.headers : this.#preparedHeaders ??= new Headers();
+    if (value === void 0) {
+      headers.delete(name);
+    } else if (options?.append) {
+      headers.append(name, value);
+    } else {
+      headers.set(name, value);
+    }
+  };
+  status = (status) => {
+    this.#status = status;
+  };
+  /**
+   * `.set()` can set the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.use('*', async (c, next) => {
+   *   c.set('message', 'Hono is hot!!')
+   *   await next()
+   * })
+   * ```
+   */
+  set = (key, value) => {
+    this.#var ??= /* @__PURE__ */ new Map();
+    this.#var.set(key, value);
+  };
+  /**
+   * `.get()` can use the value specified by the key.
+   *
+   * @see {@link https://hono.dev/docs/api/context#set-get}
+   *
+   * @example
+   * ```ts
+   * app.get('/', (c) => {
+   *   const message = c.get('message')
+   *   return c.text(`The message is "${message}"`)
+   * })
+   * ```
+   */
+  get = (key) => {
+    return this.#var ? this.#var.get(key) : void 0;
+  };
+  /**
+   * `.var` can access the value of a variable.
+   *
+   * @see {@link https://hono.dev/docs/api/context#var}
+   *
+   * @example
+   * ```ts
+   * const result = c.var.client.oneMethod()
+   * ```
+   */
+  // c.var.propName is a read-only
+  get var() {
+    if (!this.#var) {
+      return {};
+    }
+    return Object.fromEntries(this.#var);
+  }
+  #newResponse(data, arg, headers) {
+    const responseHeaders = this.#res ? new Headers(this.#res.headers) : this.#preparedHeaders ?? new Headers();
+    if (typeof arg === "object" && "headers" in arg) {
+      const argHeaders = arg.headers instanceof Headers ? arg.headers : new Headers(arg.headers);
+      for (const [key, value] of argHeaders) {
+        if (key.toLowerCase() === "set-cookie") {
+          responseHeaders.append(key, value);
+        } else {
+          responseHeaders.set(key, value);
+        }
+      }
+    }
+    if (headers) {
+      for (const [k, v] of Object.entries(headers)) {
+        if (typeof v === "string") {
+          responseHeaders.set(k, v);
+        } else {
+          responseHeaders.delete(k);
+          for (const v2 of v) {
+            responseHeaders.append(k, v2);
+          }
+        }
+      }
+    }
+    const status = typeof arg === "number" ? arg : arg?.status ?? this.#status;
+    return new Response(data, { status, headers: responseHeaders });
+  }
+  newResponse = (...args) => this.#newResponse(...args);
+  /**
+   * `.body()` can return the HTTP response.
+   * You can set headers with `.header()` and set HTTP status code with `.status`.
+   * This can also be set in `.text()`, `.json()` and so on.
+   *
+   * @see {@link https://hono.dev/docs/api/context#body}
+   *
+   * @example
+   * ```ts
+   * app.get('/welcome', (c) => {
+   *   // Set headers
+   *   c.header('X-Message', 'Hello!')
+   *   c.header('Content-Type', 'text/plain')
+   *   // Set HTTP status code
+   *   c.status(201)
+   *
+   *   // Return the response body
+   *   return c.body('Thank you for coming')
+   * })
+   * ```
+   */
+  body = (data, arg, headers) => this.#newResponse(data, arg, headers);
+  /**
+   * `.text()` can render text as `Content-Type:text/plain`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#text}
+   *
+   * @example
+   * ```ts
+   * app.get('/say', (c) => {
+   *   return c.text('Hello!')
+   * })
+   * ```
+   */
+  text = (text, arg, headers) => {
+    return !this.#preparedHeaders && !this.#status && !arg && !headers && !this.finalized ? new Response(text) : this.#newResponse(
+      text,
+      arg,
+      setDefaultContentType(TEXT_PLAIN, headers)
+    );
+  };
+  /**
+   * `.json()` can render JSON as `Content-Type:application/json`.
+   *
+   * @see {@link https://hono.dev/docs/api/context#json}
+   *
+   * @example
+   * ```ts
+   * app.get('/api', (c) => {
+   *   return c.json({ message: 'Hello!' })
+   * })
+   * ```
+   */
+  json = (object, arg, headers) => {
+    return this.#newResponse(
+      JSON.stringify(object),
+      arg,
+      setDefaultContentType("application/json", headers)
+    );
+  };
+  html = (html, arg, headers) => {
+    const res = (html2) => this.#newResponse(html2, arg, setDefaultContentType("text/html; charset=UTF-8", headers));
+    return typeof html === "object" ? resolveCallback(html, HtmlEscapedCallbackPhase.Stringify, false, {}).then(res) : res(html);
+  };
+  /**
+   * `.redirect()` can Redirect, default status code is 302.
+   *
+   * @see {@link https://hono.dev/docs/api/context#redirect}
+   *
+   * @example
+   * ```ts
+   * app.get('/redirect', (c) => {
+   *   return c.redirect('/')
+   * })
+   * app.get('/redirect-permanently', (c) => {
+   *   return c.redirect('/', 301)
+   * })
+   * ```
+   */
+  redirect = (location, status) => {
+    const locationString = String(location);
+    this.header(
+      "Location",
+      // Multibyes should be encoded
+      // eslint-disable-next-line no-control-regex
+      !/[^\x00-\xFF]/.test(locationString) ? locationString : encodeURI(locationString)
+    );
+    return this.newResponse(null, status ?? 302);
+  };
+  /**
+   * `.notFound()` can return the Not Found Response.
+   *
+   * @see {@link https://hono.dev/docs/api/context#notfound}
+   *
+   * @example
+   * ```ts
+   * app.get('/notfound', (c) => {
+   *   return c.notFound()
+   * })
+   * ```
+   */
+  notFound = () => {
+    this.#notFoundHandler ??= () => new Response();
+    return this.#notFoundHandler(this);
+  };
+};
+
+// src/router.ts
+var METHOD_NAME_ALL = "ALL";
+var METHOD_NAME_ALL_LOWERCASE = "all";
+var METHODS = ["get", "post", "put", "delete", "options", "patch"];
+var MESSAGE_MATCHER_IS_ALREADY_BUILT = "Can not add a route since the matcher is already built.";
+var UnsupportedPathError = class extends Error {
+};
+
+// src/utils/constants.ts
+var COMPOSED_HANDLER = "__COMPOSED_HANDLER";
+
+// src/hono-base.ts
+var notFoundHandler = (c) => {
+  return c.text("404 Not Found", 404);
+};
+var errorHandler$1 = (err, c) => {
+  if ("getResponse" in err) {
+    const res = err.getResponse();
+    return c.newResponse(res.body, res);
+  }
+  console.error(err);
+  return c.text("Internal Server Error", 500);
+};
+var Hono$1 = class _Hono {
+  get;
+  post;
+  put;
+  delete;
+  options;
+  patch;
+  all;
+  on;
+  use;
+  /*
+    This class is like an abstract class and does not have a router.
+    To use it, inherit the class and implement router in the constructor.
+  */
+  router;
+  getPath;
+  // Cannot use `#` because it requires visibility at JavaScript runtime.
+  _basePath = "/";
+  #path = "/";
+  routes = [];
+  constructor(options = {}) {
+    const allMethods = [...METHODS, METHOD_NAME_ALL_LOWERCASE];
+    allMethods.forEach((method) => {
+      this[method] = (args1, ...args) => {
+        if (typeof args1 === "string") {
+          this.#path = args1;
+        } else {
+          this.#addRoute(method, this.#path, args1);
+        }
+        args.forEach((handler) => {
+          this.#addRoute(method, this.#path, handler);
+        });
+        return this;
+      };
+    });
+    this.on = (method, path, ...handlers) => {
+      for (const p of [path].flat()) {
+        this.#path = p;
+        for (const m of [method].flat()) {
+          handlers.map((handler) => {
+            this.#addRoute(m.toUpperCase(), this.#path, handler);
+          });
+        }
+      }
+      return this;
+    };
+    this.use = (arg1, ...handlers) => {
+      if (typeof arg1 === "string") {
+        this.#path = arg1;
+      } else {
+        this.#path = "*";
+        handlers.unshift(arg1);
+      }
+      handlers.forEach((handler) => {
+        this.#addRoute(METHOD_NAME_ALL, this.#path, handler);
+      });
+      return this;
+    };
+    const { strict, ...optionsWithoutStrict } = options;
+    Object.assign(this, optionsWithoutStrict);
+    this.getPath = strict ?? true ? options.getPath ?? getPath : getPathNoStrict;
+  }
+  #clone() {
+    const clone = new _Hono({
+      router: this.router,
+      getPath: this.getPath
+    });
+    clone.errorHandler = this.errorHandler;
+    clone.#notFoundHandler = this.#notFoundHandler;
+    clone.routes = this.routes;
+    return clone;
+  }
+  #notFoundHandler = notFoundHandler;
+  // Cannot use `#` because it requires visibility at JavaScript runtime.
+  errorHandler = errorHandler$1;
+  /**
+   * `.route()` allows grouping other Hono instance in routes.
+   *
+   * @see {@link https://hono.dev/docs/api/routing#grouping}
+   *
+   * @param {string} path - base Path
+   * @param {Hono} app - other Hono instance
+   * @returns {Hono} routed Hono instance
+   *
+   * @example
+   * ```ts
+   * const app = new Hono()
+   * const app2 = new Hono()
+   *
+   * app2.get("/user", (c) => c.text("user"))
+   * app.route("/api", app2) // GET /api/user
+   * ```
+   */
+  route(path, app) {
+    const subApp = this.basePath(path);
+    app.routes.map((r) => {
+      let handler;
+      if (app.errorHandler === errorHandler$1) {
+        handler = r.handler;
+      } else {
+        handler = async (c, next) => (await compose([], app.errorHandler)(c, () => r.handler(c, next))).res;
+        handler[COMPOSED_HANDLER] = r.handler;
+      }
+      subApp.#addRoute(r.method, r.path, handler);
+    });
+    return this;
+  }
+  /**
+   * `.basePath()` allows base paths to be specified.
+   *
+   * @see {@link https://hono.dev/docs/api/routing#base-path}
+   *
+   * @param {string} path - base Path
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * const api = new Hono().basePath('/api')
+   * ```
+   */
+  basePath(path) {
+    const subApp = this.#clone();
+    subApp._basePath = mergePath(this._basePath, path);
+    return subApp;
+  }
+  /**
+   * `.onError()` handles an error and returns a customized Response.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#error-handling}
+   *
+   * @param {ErrorHandler} handler - request Handler for error
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * app.onError((err, c) => {
+   *   console.error(`${err}`)
+   *   return c.text('Custom Error Message', 500)
+   * })
+   * ```
+   */
+  onError = (handler) => {
+    this.errorHandler = handler;
+    return this;
+  };
+  /**
+   * `.notFound()` allows you to customize a Not Found Response.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#not-found}
+   *
+   * @param {NotFoundHandler} handler - request handler for not-found
+   * @returns {Hono} changed Hono instance
+   *
+   * @example
+   * ```ts
+   * app.notFound((c) => {
+   *   return c.text('Custom 404 Message', 404)
+   * })
+   * ```
+   */
+  notFound = (handler) => {
+    this.#notFoundHandler = handler;
+    return this;
+  };
+  /**
+   * `.mount()` allows you to mount applications built with other frameworks into your Hono application.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#mount}
+   *
+   * @param {string} path - base Path
+   * @param {Function} applicationHandler - other Request Handler
+   * @param {MountOptions} [options] - options of `.mount()`
+   * @returns {Hono} mounted Hono instance
+   *
+   * @example
+   * ```ts
+   * import { Router as IttyRouter } from 'itty-router'
+   * import { Hono } from 'hono'
+   * // Create itty-router application
+   * const ittyRouter = IttyRouter()
+   * // GET /itty-router/hello
+   * ittyRouter.get('/hello', () => new Response('Hello from itty-router'))
+   *
+   * const app = new Hono()
+   * app.mount('/itty-router', ittyRouter.handle)
+   * ```
+   *
+   * @example
+   * ```ts
+   * const app = new Hono()
+   * // Send the request to another application without modification.
+   * app.mount('/app', anotherApp, {
+   *   replaceRequest: (req) => req,
+   * })
+   * ```
+   */
+  mount(path, applicationHandler, options) {
+    let replaceRequest;
+    let optionHandler;
+    if (options) {
+      if (typeof options === "function") {
+        optionHandler = options;
+      } else {
+        optionHandler = options.optionHandler;
+        if (options.replaceRequest === false) {
+          replaceRequest = (request) => request;
+        } else {
+          replaceRequest = options.replaceRequest;
+        }
+      }
+    }
+    const getOptions = optionHandler ? (c) => {
+      const options2 = optionHandler(c);
+      return Array.isArray(options2) ? options2 : [options2];
+    } : (c) => {
+      let executionContext = void 0;
+      try {
+        executionContext = c.executionCtx;
+      } catch {
+      }
+      return [c.env, executionContext];
+    };
+    replaceRequest ||= (() => {
+      const mergedPath = mergePath(this._basePath, path);
+      const pathPrefixLength = mergedPath === "/" ? 0 : mergedPath.length;
+      return (request) => {
+        const url = new URL(request.url);
+        url.pathname = url.pathname.slice(pathPrefixLength) || "/";
+        return new Request(url, request);
+      };
+    })();
+    const handler = async (c, next) => {
+      const res = await applicationHandler(replaceRequest(c.req.raw), ...getOptions(c));
+      if (res) {
+        return res;
+      }
+      await next();
+    };
+    this.#addRoute(METHOD_NAME_ALL, mergePath(path, "*"), handler);
+    return this;
+  }
+  #addRoute(method, path, handler) {
+    method = method.toUpperCase();
+    path = mergePath(this._basePath, path);
+    const r = { basePath: this._basePath, path, method, handler };
+    this.router.add(method, path, [handler, r]);
+    this.routes.push(r);
+  }
+  #handleError(err, c) {
+    if (err instanceof Error) {
+      return this.errorHandler(err, c);
+    }
+    throw err;
+  }
+  #dispatch(request, executionCtx, env, method) {
+    if (method === "HEAD") {
+      return (async () => new Response(null, await this.#dispatch(request, executionCtx, env, "GET")))();
+    }
+    const path = this.getPath(request, { env });
+    const matchResult = this.router.match(method, path);
+    const c = new Context(request, {
+      path,
+      matchResult,
+      env,
+      executionCtx,
+      notFoundHandler: this.#notFoundHandler
+    });
+    if (matchResult[0].length === 1) {
+      let res;
+      try {
+        res = matchResult[0][0][0][0](c, async () => {
+          c.res = await this.#notFoundHandler(c);
+        });
+      } catch (err) {
+        return this.#handleError(err, c);
+      }
+      return res instanceof Promise ? res.then(
+        (resolved) => resolved || (c.finalized ? c.res : this.#notFoundHandler(c))
+      ).catch((err) => this.#handleError(err, c)) : res ?? this.#notFoundHandler(c);
+    }
+    const composed = compose(matchResult[0], this.errorHandler, this.#notFoundHandler);
+    return (async () => {
+      try {
+        const context = await composed(c);
+        if (!context.finalized) {
+          throw new Error(
+            "Context is not finalized. Did you forget to return a Response object or `await next()`?"
+          );
+        }
+        return context.res;
+      } catch (err) {
+        return this.#handleError(err, c);
+      }
+    })();
+  }
+  /**
+   * `.fetch()` will be entry point of your app.
+   *
+   * @see {@link https://hono.dev/docs/api/hono#fetch}
+   *
+   * @param {Request} request - request Object of request
+   * @param {Env} Env - env Object
+   * @param {ExecutionContext} - context of execution
+   * @returns {Response | Promise<Response>} response of request
+   *
+   */
+  fetch = (request, ...rest) => {
+    return this.#dispatch(request, rest[1], rest[0], request.method);
+  };
+  /**
+   * `.request()` is a useful method for testing.
+   * You can pass a URL or pathname to send a GET request.
+   * app will return a Response object.
+   * ```ts
+   * test('GET /hello is ok', async () => {
+   *   const res = await app.request('/hello')
+   *   expect(res.status).toBe(200)
+   * })
+   * ```
+   * @see https://hono.dev/docs/api/hono#request
+   */
+  request = (input, requestInit, Env, executionCtx) => {
+    if (input instanceof Request) {
+      return this.fetch(requestInit ? new Request(input, requestInit) : input, Env, executionCtx);
+    }
+    input = input.toString();
+    return this.fetch(
+      new Request(
+        /^https?:\/\//.test(input) ? input : `http://localhost${mergePath("/", input)}`,
+        requestInit
+      ),
+      Env,
+      executionCtx
+    );
+  };
+  /**
+   * `.fire()` automatically adds a global fetch event listener.
+   * This can be useful for environments that adhere to the Service Worker API, such as non-ES module Cloudflare Workers.
+   * @deprecated
+   * Use `fire` from `hono/service-worker` instead.
+   * ```ts
+   * import { Hono } from 'hono'
+   * import { fire } from 'hono/service-worker'
+   *
+   * const app = new Hono()
+   * // ...
+   * fire(app)
+   * ```
+   * @see https://hono.dev/docs/api/hono#fire
+   * @see https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API
+   * @see https://developers.cloudflare.com/workers/reference/migrate-to-module-workers/
+   */
+  fire = () => {
+    addEventListener("fetch", (event) => {
+      event.respondWith(this.#dispatch(event.request, event, void 0, event.request.method));
+    });
+  };
+};
+
+// src/router/reg-exp-router/matcher.ts
+var emptyParam = [];
+function match(method, path) {
+  const matchers = this.buildAllMatchers();
+  const match2 = ((method2, path2) => {
+    const matcher = matchers[method2] || matchers[METHOD_NAME_ALL];
+    const staticMatch = matcher[2][path2];
+    if (staticMatch) {
+      return staticMatch;
+    }
+    const match3 = path2.match(matcher[0]);
+    if (!match3) {
+      return [[], emptyParam];
+    }
+    const index = match3.indexOf("", 1);
+    return [matcher[1][index], match3];
+  });
+  this.match = match2;
+  return match2(method, path);
+}
+
+// src/router/reg-exp-router/node.ts
+var LABEL_REG_EXP_STR = "[^/]+";
+var ONLY_WILDCARD_REG_EXP_STR = ".*";
+var TAIL_WILDCARD_REG_EXP_STR = "(?:|/.*)";
+var PATH_ERROR = /* @__PURE__ */ Symbol();
+var regExpMetaChars = new Set(".\\+*[^]$()");
+function compareKey(a, b) {
+  if (a.length === 1) {
+    return b.length === 1 ? a < b ? -1 : 1 : -1;
+  }
+  if (b.length === 1) {
+    return 1;
+  }
+  if (a === ONLY_WILDCARD_REG_EXP_STR || a === TAIL_WILDCARD_REG_EXP_STR) {
+    return 1;
+  } else if (b === ONLY_WILDCARD_REG_EXP_STR || b === TAIL_WILDCARD_REG_EXP_STR) {
+    return -1;
+  }
+  if (a === LABEL_REG_EXP_STR) {
+    return 1;
+  } else if (b === LABEL_REG_EXP_STR) {
+    return -1;
+  }
+  return a.length === b.length ? a < b ? -1 : 1 : b.length - a.length;
+}
+var Node$1 = class _Node {
+  #index;
+  #varIndex;
+  #children = /* @__PURE__ */ Object.create(null);
+  insert(tokens, index, paramMap, context, pathErrorCheckOnly) {
+    if (tokens.length === 0) {
+      if (this.#index !== void 0) {
+        throw PATH_ERROR;
+      }
+      if (pathErrorCheckOnly) {
+        return;
+      }
+      this.#index = index;
+      return;
+    }
+    const [token, ...restTokens] = tokens;
+    const pattern = token === "*" ? restTokens.length === 0 ? ["", "", ONLY_WILDCARD_REG_EXP_STR] : ["", "", LABEL_REG_EXP_STR] : token === "/*" ? ["", "", TAIL_WILDCARD_REG_EXP_STR] : token.match(/^\:([^\{\}]+)(?:\{(.+)\})?$/);
+    let node;
+    if (pattern) {
+      const name = pattern[1];
+      let regexpStr = pattern[2] || LABEL_REG_EXP_STR;
+      if (name && pattern[2]) {
+        if (regexpStr === ".*") {
+          throw PATH_ERROR;
+        }
+        regexpStr = regexpStr.replace(/^\((?!\?:)(?=[^)]+\)$)/, "(?:");
+        if (/\((?!\?:)/.test(regexpStr)) {
+          throw PATH_ERROR;
+        }
+      }
+      node = this.#children[regexpStr];
+      if (!node) {
+        if (Object.keys(this.#children).some(
+          (k) => k !== ONLY_WILDCARD_REG_EXP_STR && k !== TAIL_WILDCARD_REG_EXP_STR
+        )) {
+          throw PATH_ERROR;
+        }
+        if (pathErrorCheckOnly) {
+          return;
+        }
+        node = this.#children[regexpStr] = new _Node();
+        if (name !== "") {
+          node.#varIndex = context.varIndex++;
+        }
+      }
+      if (!pathErrorCheckOnly && name !== "") {
+        paramMap.push([name, node.#varIndex]);
+      }
+    } else {
+      node = this.#children[token];
+      if (!node) {
+        if (Object.keys(this.#children).some(
+          (k) => k.length > 1 && k !== ONLY_WILDCARD_REG_EXP_STR && k !== TAIL_WILDCARD_REG_EXP_STR
+        )) {
+          throw PATH_ERROR;
+        }
+        if (pathErrorCheckOnly) {
+          return;
+        }
+        node = this.#children[token] = new _Node();
+      }
+    }
+    node.insert(restTokens, index, paramMap, context, pathErrorCheckOnly);
+  }
+  buildRegExpStr() {
+    const childKeys = Object.keys(this.#children).sort(compareKey);
+    const strList = childKeys.map((k) => {
+      const c = this.#children[k];
+      return (typeof c.#varIndex === "number" ? `(${k})@${c.#varIndex}` : regExpMetaChars.has(k) ? `\\${k}` : k) + c.buildRegExpStr();
+    });
+    if (typeof this.#index === "number") {
+      strList.unshift(`#${this.#index}`);
+    }
+    if (strList.length === 0) {
+      return "";
+    }
+    if (strList.length === 1) {
+      return strList[0];
+    }
+    return "(?:" + strList.join("|") + ")";
+  }
+};
+
+// src/router/reg-exp-router/trie.ts
+var Trie = class {
+  #context = { varIndex: 0 };
+  #root = new Node$1();
+  insert(path, index, pathErrorCheckOnly) {
+    const paramAssoc = [];
+    const groups = [];
+    for (let i = 0; ; ) {
+      let replaced = false;
+      path = path.replace(/\{[^}]+\}/g, (m) => {
+        const mark = `@\\${i}`;
+        groups[i] = [mark, m];
+        i++;
+        replaced = true;
+        return mark;
+      });
+      if (!replaced) {
+        break;
+      }
+    }
+    const tokens = path.match(/(?::[^\/]+)|(?:\/\*$)|./g) || [];
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const [mark] = groups[i];
+      for (let j = tokens.length - 1; j >= 0; j--) {
+        if (tokens[j].indexOf(mark) !== -1) {
+          tokens[j] = tokens[j].replace(mark, groups[i][1]);
+          break;
+        }
+      }
+    }
+    this.#root.insert(tokens, index, paramAssoc, this.#context, pathErrorCheckOnly);
+    return paramAssoc;
+  }
+  buildRegExp() {
+    let regexp = this.#root.buildRegExpStr();
+    if (regexp === "") {
+      return [/^$/, [], []];
+    }
+    let captureIndex = 0;
+    const indexReplacementMap = [];
+    const paramReplacementMap = [];
+    regexp = regexp.replace(/#(\d+)|@(\d+)|\.\*\$/g, (_, handlerIndex, paramIndex) => {
+      if (handlerIndex !== void 0) {
+        indexReplacementMap[++captureIndex] = Number(handlerIndex);
+        return "$()";
+      }
+      if (paramIndex !== void 0) {
+        paramReplacementMap[Number(paramIndex)] = ++captureIndex;
+        return "";
+      }
+      return "";
+    });
+    return [new RegExp(`^${regexp}`), indexReplacementMap, paramReplacementMap];
+  }
+};
+
+// src/router/reg-exp-router/router.ts
+var nullMatcher = [/^$/, [], /* @__PURE__ */ Object.create(null)];
+var wildcardRegExpCache = /* @__PURE__ */ Object.create(null);
+function buildWildcardRegExp(path) {
+  return wildcardRegExpCache[path] ??= new RegExp(
+    path === "*" ? "" : `^${path.replace(
+      /\/\*$|([.\\+*[^\]$()])/g,
+      (_, metaChar) => metaChar ? `\\${metaChar}` : "(?:|/.*)"
+    )}$`
+  );
+}
+function clearWildcardRegExpCache() {
+  wildcardRegExpCache = /* @__PURE__ */ Object.create(null);
+}
+function buildMatcherFromPreprocessedRoutes(routes) {
+  const trie = new Trie();
+  const handlerData = [];
+  if (routes.length === 0) {
+    return nullMatcher;
+  }
+  const routesWithStaticPathFlag = routes.map(
+    (route) => [!/\*|\/:/.test(route[0]), ...route]
+  ).sort(
+    ([isStaticA, pathA], [isStaticB, pathB]) => isStaticA ? 1 : isStaticB ? -1 : pathA.length - pathB.length
+  );
+  const staticMap = /* @__PURE__ */ Object.create(null);
+  for (let i = 0, j = -1, len = routesWithStaticPathFlag.length; i < len; i++) {
+    const [pathErrorCheckOnly, path, handlers] = routesWithStaticPathFlag[i];
+    if (pathErrorCheckOnly) {
+      staticMap[path] = [handlers.map(([h]) => [h, /* @__PURE__ */ Object.create(null)]), emptyParam];
+    } else {
+      j++;
+    }
+    let paramAssoc;
+    try {
+      paramAssoc = trie.insert(path, j, pathErrorCheckOnly);
+    } catch (e) {
+      throw e === PATH_ERROR ? new UnsupportedPathError(path) : e;
+    }
+    if (pathErrorCheckOnly) {
+      continue;
+    }
+    handlerData[j] = handlers.map(([h, paramCount]) => {
+      const paramIndexMap = /* @__PURE__ */ Object.create(null);
+      paramCount -= 1;
+      for (; paramCount >= 0; paramCount--) {
+        const [key, value] = paramAssoc[paramCount];
+        paramIndexMap[key] = value;
+      }
+      return [h, paramIndexMap];
+    });
+  }
+  const [regexp, indexReplacementMap, paramReplacementMap] = trie.buildRegExp();
+  for (let i = 0, len = handlerData.length; i < len; i++) {
+    for (let j = 0, len2 = handlerData[i].length; j < len2; j++) {
+      const map = handlerData[i][j]?.[1];
+      if (!map) {
+        continue;
+      }
+      const keys = Object.keys(map);
+      for (let k = 0, len3 = keys.length; k < len3; k++) {
+        map[keys[k]] = paramReplacementMap[map[keys[k]]];
+      }
+    }
+  }
+  const handlerMap = [];
+  for (const i in indexReplacementMap) {
+    handlerMap[i] = handlerData[indexReplacementMap[i]];
+  }
+  return [regexp, handlerMap, staticMap];
+}
+function findMiddleware(middleware, path) {
+  if (!middleware) {
+    return void 0;
+  }
+  for (const k of Object.keys(middleware).sort((a, b) => b.length - a.length)) {
+    if (buildWildcardRegExp(k).test(path)) {
+      return [...middleware[k]];
+    }
+  }
+  return void 0;
+}
+var RegExpRouter = class {
+  name = "RegExpRouter";
+  #middleware;
+  #routes;
+  constructor() {
+    this.#middleware = { [METHOD_NAME_ALL]: /* @__PURE__ */ Object.create(null) };
+    this.#routes = { [METHOD_NAME_ALL]: /* @__PURE__ */ Object.create(null) };
+  }
+  add(method, path, handler) {
+    const middleware = this.#middleware;
+    const routes = this.#routes;
+    if (!middleware || !routes) {
+      throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
+    }
+    if (!middleware[method]) {
+      [middleware, routes].forEach((handlerMap) => {
+        handlerMap[method] = /* @__PURE__ */ Object.create(null);
+        Object.keys(handlerMap[METHOD_NAME_ALL]).forEach((p) => {
+          handlerMap[method][p] = [...handlerMap[METHOD_NAME_ALL][p]];
+        });
+      });
+    }
+    if (path === "/*") {
+      path = "*";
+    }
+    const paramCount = (path.match(/\/:/g) || []).length;
+    if (/\*$/.test(path)) {
+      const re = buildWildcardRegExp(path);
+      if (method === METHOD_NAME_ALL) {
+        Object.keys(middleware).forEach((m) => {
+          middleware[m][path] ||= findMiddleware(middleware[m], path) || findMiddleware(middleware[METHOD_NAME_ALL], path) || [];
+        });
+      } else {
+        middleware[method][path] ||= findMiddleware(middleware[method], path) || findMiddleware(middleware[METHOD_NAME_ALL], path) || [];
+      }
+      Object.keys(middleware).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          Object.keys(middleware[m]).forEach((p) => {
+            re.test(p) && middleware[m][p].push([handler, paramCount]);
+          });
+        }
+      });
+      Object.keys(routes).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          Object.keys(routes[m]).forEach(
+            (p) => re.test(p) && routes[m][p].push([handler, paramCount])
+          );
+        }
+      });
+      return;
+    }
+    const paths = checkOptionalParameter(path) || [path];
+    for (let i = 0, len = paths.length; i < len; i++) {
+      const path2 = paths[i];
+      Object.keys(routes).forEach((m) => {
+        if (method === METHOD_NAME_ALL || method === m) {
+          routes[m][path2] ||= [
+            ...findMiddleware(middleware[m], path2) || findMiddleware(middleware[METHOD_NAME_ALL], path2) || []
+          ];
+          routes[m][path2].push([handler, paramCount - len + i + 1]);
+        }
+      });
+    }
+  }
+  match = match;
+  buildAllMatchers() {
+    const matchers = /* @__PURE__ */ Object.create(null);
+    Object.keys(this.#routes).concat(Object.keys(this.#middleware)).forEach((method) => {
+      matchers[method] ||= this.#buildMatcher(method);
+    });
+    this.#middleware = this.#routes = void 0;
+    clearWildcardRegExpCache();
+    return matchers;
+  }
+  #buildMatcher(method) {
+    const routes = [];
+    let hasOwnRoute = method === METHOD_NAME_ALL;
+    [this.#middleware, this.#routes].forEach((r) => {
+      const ownRoute = r[method] ? Object.keys(r[method]).map((path) => [path, r[method][path]]) : [];
+      if (ownRoute.length !== 0) {
+        hasOwnRoute ||= true;
+        routes.push(...ownRoute);
+      } else if (method !== METHOD_NAME_ALL) {
+        routes.push(
+          ...Object.keys(r[METHOD_NAME_ALL]).map((path) => [path, r[METHOD_NAME_ALL][path]])
+        );
+      }
+    });
+    if (!hasOwnRoute) {
+      return null;
+    } else {
+      return buildMatcherFromPreprocessedRoutes(routes);
+    }
+  }
+};
+
+// src/router/smart-router/router.ts
+var SmartRouter = class {
+  name = "SmartRouter";
+  #routers = [];
+  #routes = [];
+  constructor(init) {
+    this.#routers = init.routers;
+  }
+  add(method, path, handler) {
+    if (!this.#routes) {
+      throw new Error(MESSAGE_MATCHER_IS_ALREADY_BUILT);
+    }
+    this.#routes.push([method, path, handler]);
+  }
+  match(method, path) {
+    if (!this.#routes) {
+      throw new Error("Fatal error");
+    }
+    const routers = this.#routers;
+    const routes = this.#routes;
+    const len = routers.length;
+    let i = 0;
+    let res;
+    for (; i < len; i++) {
+      const router = routers[i];
+      try {
+        for (let i2 = 0, len2 = routes.length; i2 < len2; i2++) {
+          router.add(...routes[i2]);
+        }
+        res = router.match(method, path);
+      } catch (e) {
+        if (e instanceof UnsupportedPathError) {
+          continue;
+        }
+        throw e;
+      }
+      this.match = router.match.bind(router);
+      this.#routers = [router];
+      this.#routes = void 0;
+      break;
+    }
+    if (i === len) {
+      throw new Error("Fatal error");
+    }
+    this.name = `SmartRouter + ${this.activeRouter.name}`;
+    return res;
+  }
+  get activeRouter() {
+    if (this.#routes || this.#routers.length !== 1) {
+      throw new Error("No active router has been determined yet.");
+    }
+    return this.#routers[0];
+  }
+};
+
+// src/router/trie-router/node.ts
+var emptyParams = /* @__PURE__ */ Object.create(null);
+var Node = class _Node {
+  #methods;
+  #children;
+  #patterns;
+  #order = 0;
+  #params = emptyParams;
+  constructor(method, handler, children) {
+    this.#children = children || /* @__PURE__ */ Object.create(null);
+    this.#methods = [];
+    if (method && handler) {
+      const m = /* @__PURE__ */ Object.create(null);
+      m[method] = { handler, possibleKeys: [], score: 0 };
+      this.#methods = [m];
+    }
+    this.#patterns = [];
+  }
+  insert(method, path, handler) {
+    this.#order = ++this.#order;
+    let curNode = this;
+    const parts = splitRoutingPath(path);
+    const possibleKeys = [];
+    for (let i = 0, len = parts.length; i < len; i++) {
+      const p = parts[i];
+      const nextP = parts[i + 1];
+      const pattern = getPattern(p, nextP);
+      const key = Array.isArray(pattern) ? pattern[0] : p;
+      if (key in curNode.#children) {
+        curNode = curNode.#children[key];
+        if (pattern) {
+          possibleKeys.push(pattern[1]);
+        }
+        continue;
+      }
+      curNode.#children[key] = new _Node();
+      if (pattern) {
+        curNode.#patterns.push(pattern);
+        possibleKeys.push(pattern[1]);
+      }
+      curNode = curNode.#children[key];
+    }
+    curNode.#methods.push({
+      [method]: {
+        handler,
+        possibleKeys: possibleKeys.filter((v, i, a) => a.indexOf(v) === i),
+        score: this.#order
+      }
+    });
+    return curNode;
+  }
+  #getHandlerSets(node, method, nodeParams, params) {
+    const handlerSets = [];
+    for (let i = 0, len = node.#methods.length; i < len; i++) {
+      const m = node.#methods[i];
+      const handlerSet = m[method] || m[METHOD_NAME_ALL];
+      const processedSet = {};
+      if (handlerSet !== void 0) {
+        handlerSet.params = /* @__PURE__ */ Object.create(null);
+        handlerSets.push(handlerSet);
+        if (nodeParams !== emptyParams || params && params !== emptyParams) {
+          for (let i2 = 0, len2 = handlerSet.possibleKeys.length; i2 < len2; i2++) {
+            const key = handlerSet.possibleKeys[i2];
+            const processed = processedSet[handlerSet.score];
+            handlerSet.params[key] = params?.[key] && !processed ? params[key] : nodeParams[key] ?? params?.[key];
+            processedSet[handlerSet.score] = true;
+          }
+        }
+      }
+    }
+    return handlerSets;
+  }
+  search(method, path) {
+    const handlerSets = [];
+    this.#params = emptyParams;
+    const curNode = this;
+    let curNodes = [curNode];
+    const parts = splitPath(path);
+    const curNodesQueue = [];
+    for (let i = 0, len = parts.length; i < len; i++) {
+      const part = parts[i];
+      const isLast = i === len - 1;
+      const tempNodes = [];
+      for (let j = 0, len2 = curNodes.length; j < len2; j++) {
+        const node = curNodes[j];
+        const nextNode = node.#children[part];
+        if (nextNode) {
+          nextNode.#params = node.#params;
+          if (isLast) {
+            if (nextNode.#children["*"]) {
+              handlerSets.push(
+                ...this.#getHandlerSets(nextNode.#children["*"], method, node.#params)
+              );
+            }
+            handlerSets.push(...this.#getHandlerSets(nextNode, method, node.#params));
+          } else {
+            tempNodes.push(nextNode);
+          }
+        }
+        for (let k = 0, len3 = node.#patterns.length; k < len3; k++) {
+          const pattern = node.#patterns[k];
+          const params = node.#params === emptyParams ? {} : { ...node.#params };
+          if (pattern === "*") {
+            const astNode = node.#children["*"];
+            if (astNode) {
+              handlerSets.push(...this.#getHandlerSets(astNode, method, node.#params));
+              astNode.#params = params;
+              tempNodes.push(astNode);
+            }
+            continue;
+          }
+          const [key, name, matcher] = pattern;
+          if (!part && !(matcher instanceof RegExp)) {
+            continue;
+          }
+          const child = node.#children[key];
+          const restPathString = parts.slice(i).join("/");
+          if (matcher instanceof RegExp) {
+            const m = matcher.exec(restPathString);
+            if (m) {
+              params[name] = m[0];
+              handlerSets.push(...this.#getHandlerSets(child, method, node.#params, params));
+              if (Object.keys(child.#children).length) {
+                child.#params = params;
+                const componentCount = m[0].match(/\//)?.length ?? 0;
+                const targetCurNodes = curNodesQueue[componentCount] ||= [];
+                targetCurNodes.push(child);
+              }
+              continue;
+            }
+          }
+          if (matcher === true || matcher.test(part)) {
+            params[name] = part;
+            if (isLast) {
+              handlerSets.push(...this.#getHandlerSets(child, method, params, node.#params));
+              if (child.#children["*"]) {
+                handlerSets.push(
+                  ...this.#getHandlerSets(child.#children["*"], method, params, node.#params)
+                );
+              }
+            } else {
+              child.#params = params;
+              tempNodes.push(child);
+            }
+          }
+        }
+      }
+      curNodes = tempNodes.concat(curNodesQueue.shift() ?? []);
+    }
+    if (handlerSets.length > 1) {
+      handlerSets.sort((a, b) => {
+        return a.score - b.score;
+      });
+    }
+    return [handlerSets.map(({ handler, params }) => [handler, params])];
+  }
+};
+
+// src/router/trie-router/router.ts
+var TrieRouter = class {
+  name = "TrieRouter";
+  #node;
+  constructor() {
+    this.#node = new Node();
+  }
+  add(method, path, handler) {
+    const results = checkOptionalParameter(path);
+    if (results) {
+      for (let i = 0, len = results.length; i < len; i++) {
+        this.#node.insert(method, results[i], handler);
+      }
+      return;
+    }
+    this.#node.insert(method, path, handler);
+  }
+  match(method, path) {
+    return this.#node.search(method, path);
+  }
+};
+
+// src/hono.ts
+var Hono = class extends Hono$1 {
+  /**
+   * Creates an instance of the Hono class.
+   *
+   * @param options - Optional configuration options for the Hono instance.
+   */
+  constructor(options = {}) {
+    super(options);
+    this.router = options.router ?? new SmartRouter({
+      routers: [new RegExpRouter(), new TrieRouter()]
+    });
+  }
+};
+
+// src/middleware/cors/index.ts
+var cors = (options) => {
+  const defaults = {
+    origin: "*",
+    allowMethods: ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"],
+    allowHeaders: [],
+    exposeHeaders: []
+  };
+  const opts = {
+    ...defaults,
+    ...options
+  };
+  const findAllowOrigin = ((optsOrigin) => {
+    if (typeof optsOrigin === "string") {
+      if (optsOrigin === "*") {
+        return () => optsOrigin;
+      } else {
+        return (origin) => optsOrigin === origin ? origin : null;
+      }
+    } else if (typeof optsOrigin === "function") {
+      return optsOrigin;
+    } else {
+      return (origin) => optsOrigin.includes(origin) ? origin : null;
+    }
+  })(opts.origin);
+  const findAllowMethods = ((optsAllowMethods) => {
+    if (typeof optsAllowMethods === "function") {
+      return optsAllowMethods;
+    } else if (Array.isArray(optsAllowMethods)) {
+      return () => optsAllowMethods;
+    } else {
+      return () => [];
+    }
+  })(opts.allowMethods);
+  return async function cors2(c, next) {
+    function set(key, value) {
+      c.res.headers.set(key, value);
+    }
+    const allowOrigin = await findAllowOrigin(c.req.header("origin") || "", c);
+    if (allowOrigin) {
+      set("Access-Control-Allow-Origin", allowOrigin);
+    }
+    if (opts.credentials) {
+      set("Access-Control-Allow-Credentials", "true");
+    }
+    if (opts.exposeHeaders?.length) {
+      set("Access-Control-Expose-Headers", opts.exposeHeaders.join(","));
+    }
+    if (c.req.method === "OPTIONS") {
+      if (opts.origin !== "*") {
+        set("Vary", "Origin");
+      }
+      if (opts.maxAge != null) {
+        set("Access-Control-Max-Age", opts.maxAge.toString());
+      }
+      const allowMethods = await findAllowMethods(c.req.header("origin") || "", c);
+      if (allowMethods.length) {
+        set("Access-Control-Allow-Methods", allowMethods.join(","));
+      }
+      let headers = opts.allowHeaders;
+      if (!headers?.length) {
+        const requestHeaders = c.req.header("Access-Control-Request-Headers");
+        if (requestHeaders) {
+          headers = requestHeaders.split(/\s*,\s*/);
+        }
+      }
+      if (headers?.length) {
+        set("Access-Control-Allow-Headers", headers.join(","));
+        c.res.headers.append("Vary", "Access-Control-Request-Headers");
+      }
+      c.res.headers.delete("Content-Length");
+      c.res.headers.delete("Content-Type");
+      return new Response(null, {
+        headers: c.res.headers,
+        status: 204,
+        statusText: "No Content"
+      });
+    }
+    await next();
+    if (opts.origin !== "*") {
+      c.header("Vary", "Origin", { append: true });
+    }
+  };
+};
+
+// src/utils/color.ts
+function getColorEnabled() {
+  const { process, Deno } = globalThis;
+  const isNoColor = typeof Deno?.noColor === "boolean" ? Deno.noColor : process !== void 0 ? (
+    // eslint-disable-next-line no-unsafe-optional-chaining
+    "NO_COLOR" in process?.env
+  ) : false;
+  return !isNoColor;
+}
+async function getColorEnabledAsync() {
+  const { navigator } = globalThis;
+  const cfWorkers = "cloudflare:workers";
+  const isNoColor = navigator !== void 0 && navigator.userAgent === "Cloudflare-Workers" ? await (async () => {
+    try {
+      return "NO_COLOR" in ((await import(cfWorkers)).env ?? {});
+    } catch {
+      return false;
+    }
+  })() : !getColorEnabled();
+  return !isNoColor;
+}
+
+// src/middleware/logger/index.ts
+var humanize = (times) => {
+  const [delimiter, separator] = [",", "."];
+  const orderTimes = times.map((v) => v.replace(/(\d)(?=(\d\d\d)+(?!\d))/g, "$1" + delimiter));
+  return orderTimes.join(separator);
+};
+var time = (start) => {
+  const delta = Date.now() - start;
+  return humanize([delta < 1e3 ? delta + "ms" : Math.round(delta / 1e3) + "s"]);
+};
+var colorStatus = async (status) => {
+  const colorEnabled = await getColorEnabledAsync();
+  if (colorEnabled) {
+    switch (status / 100 | 0) {
+      case 5:
+        return `\x1B[31m${status}\x1B[0m`;
+      case 4:
+        return `\x1B[33m${status}\x1B[0m`;
+      case 3:
+        return `\x1B[36m${status}\x1B[0m`;
+      case 2:
+        return `\x1B[32m${status}\x1B[0m`;
+    }
+  }
+  return `${status}`;
+};
+async function log(fn, prefix, method, path, status = 0, elapsed) {
+  const out = prefix === "<--" /* Incoming */ ? `${prefix} ${method} ${path}` : `${prefix} ${method} ${path} ${await colorStatus(status)} ${elapsed}`;
+  fn(out);
+}
+var logger = (fn = console.log) => {
+  return async function logger2(c, next) {
+    const { method, url } = c.req;
+    const path = url.slice(url.indexOf("/", 8));
+    await log(fn, "<--" /* Incoming */, method, path);
+    const start = Date.now();
+    await next();
+    await log(fn, "-->" /* Outgoing */, method, path, c.res.status, time(start));
+  };
+};
+
+// src/middleware/timeout/index.ts
+var defaultTimeoutException = new HTTPException$1(504, {
+  message: "Gateway Timeout"
+});
+var timeout = (duration, exception = defaultTimeoutException) => {
+  return async function timeout2(context, next) {
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(typeof exception === "function" ? exception(context) : exception);
+      }, duration);
+    });
+    try {
+      await Promise.race([next(), timeoutPromise]);
+    } finally {
+      if (timer !== void 0) {
+        clearTimeout(timer);
+      }
+    }
+  };
 };
 
 var RequestError = class extends Error {
@@ -47824,13 +50397,13 @@ function isHotReloadDisabled() {
 }
 function handleError(error, defaultMessage) {
   const apiError = error;
-  throw new HTTPException$2(apiError.status || 500, {
+  throw new HTTPException$1(apiError.status || 500, {
     message: apiError.message || defaultMessage,
     cause: apiError.cause
   });
 }
 function errorHandler(err, c, isDev) {
-  if (err instanceof HTTPException$2) {
+  if (err instanceof HTTPException$1) {
     if (isDev) {
       return c.json({ error: err.message, cause: err.cause, stack: err.stack }, err.status);
     }
@@ -48254,13 +50827,16 @@ async function createNodeServer(mastra, options = { tools: {} }) {
 }
 
 // @ts-ignore
-    await createNodeServer(mastra, { tools: getToolExports(tools) });
+// @ts-ignore
+await createNodeServer(mastra, {
+  playground: true,
+  isDev: true,
+  tools: getToolExports(tools),
+});
 
-    if (mastra.getStorage()) {
-      // start storage init in the background
-      mastra.getStorage().init();
-      mastra.__registerInternalWorkflow(scoreTracesWorkflow);
-    }
+if (mastra.getStorage()) {
+  mastra.__registerInternalWorkflow(scoreTracesWorkflow);
+}
 
 var distMEN73GGI = /*#__PURE__*/Object.freeze({
   __proto__: null,

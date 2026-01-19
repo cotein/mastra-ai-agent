@@ -30,22 +30,55 @@ const getGoogleCalendar = () => {
  * Esta función asegura que el agente no agende en el pasado (ej. 2023)
  * incluso si el LLM alucina con la fecha.
  */
+/**
+ * LÓGICA DE VALIDACIÓN TEMPORAL (SENIOR LAYER)
+ * Convierte cualquier input ISO (UTC o Local) a la hora "wall-clock" correcta
+ * en la zona horaria objetivo (Argentina), preservando el instante exacto.
+ */
 const getSanitizedDates = (startIso: string, endIso: string) => {
+  const timeZone = 'America/Argentina/Buenos_Aires';
   const now = new Date();
+  
+  // 1. Crear objetos Date (interpreta Z correctamente como UTC)
   let startDate = new Date(startIso);
   let endDate = new Date(endIso);
 
-  // SI LA FECHA GENERADA YA PASÓ (es anterior a 'now')
-  // Significa que el LLM alucinó con el año actual para un mes que ya pasó
+  // 2. Validar si es una fecha pasada (Alucinación de año)
   if (startDate < now) {
     console.log("Detectada fecha pasada, corrigiendo año...");
     startDate.setFullYear(startDate.getFullYear() + 1);
     endDate.setFullYear(endDate.getFullYear() + 1);
   }
 
+  /**
+   * Helper que formatea la fecha a la string ISO local "YYYY-MM-DDTHH:mm:ss"
+   * correspondiente a la zona horaria 'America/Argentina/Buenos_Aires'.
+   * 
+   * Ej: Si entra 13:00Z (UTC), en Argentina son las 10:00.
+   * Return esperado: "202X-MM-DDT10:00:00"
+   */
+  const toLocalIsoString = (date: Date) => {
+    // Usamos sv-SE (Suecia) porque su formato local es ISO 8601 (YYYY-MM-DD HH:mm:ss)
+    const options: Intl.DateTimeFormatOptions = { 
+        timeZone, 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    };
+    
+    // Format parts to ensure valid ISO construction
+    // Hack: Intl.DateTimeFormat con 'sv-SE' da "YYYY-MM-DD HH:mm:ss", solo cambiamos " " por "T"
+    const localString = new Intl.DateTimeFormat('sv-SE', options).format(date);
+    return localString.replace(' ', 'T');
+  };
+
   return {
-    start: startDate.toISOString(),
-    end: endDate.toISOString()
+    start: toLocalIsoString(startDate),
+    end: toLocalIsoString(endDate)
   };
 };
 
@@ -72,7 +105,9 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
       
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
-      const { start, end } = getSanitizedDates(input.start, input.end);
+      
+      // Sanitización y conversión a hora local
+      const { start, end } = getSanitizedDates(input.start, input.end || input.start); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
 
       const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
       
@@ -84,13 +119,13 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
           requestBody: {
             summary: eventSummary,
             location: input.propertyAddress,
-            description: description, // USAMOS EL FORMATO GENERADO
+            description: description,
             start: { 
-              dateTime: start.replace(/Z$/, ''), 
+              dateTime: start, // Ya viene formato "YYYY-MM-DDTHH:mm:ss" correcta para la TZ
               timeZone: 'America/Argentina/Buenos_Aires' 
             },
             end: { 
-              dateTime: end.replace(/Z$/, ''), 
+              dateTime: end, 
               timeZone: 'America/Argentina/Buenos_Aires' 
             },
           },
