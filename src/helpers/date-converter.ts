@@ -493,10 +493,5 @@ export function runExamples(): void {
   console.log(`Salida:  ${result.isoDate}`);
 }
 
-// Si se ejecuta directamente (no como módulo)
-if (require.main === module) {
-  runExamples();
-}
-
 // Exportar por defecto
 export default naturalDateToISO8601;
