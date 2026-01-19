@@ -82,6 +82,44 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
   };
 };
 
+/**
+ * HELPER: Parse Input Date (ISO or Natural Language)
+ * Wraps chrono-node logic to ensure we always get a valid Date object.
+ */
+const parseDateInput = async (input: string): Promise<string> => {
+  // 1. Try passing as standard Date (ISO)
+  const isoDate = new Date(input);
+  if (!isNaN(isoDate.getTime()) && input.includes('T')) {
+      return input; // It's already a valid ISO string with time
+  }
+
+  // 2. If not ISO, try Natural Language Parsing
+  console.log(`⚠️ Input date '${input}' is not strict ISO. Attempting Natural Language Parse...`);
+  const chrono = await import('chrono-node');
+  
+  // Clean input logic similar to findEventByNaturalDate
+  let normalized = input.toLowerCase()
+      .replace(/mediod[ií]a/g, "12:00")
+      .replace(/del d[ií]a/g, "")
+      .replace(/de la ma[ñn]ana/g, "am")
+      .replace(/de la tarde/g, "pm")
+      .replace(/de la noche/g, "pm");
+
+  const parsedResults = chrono.es.parse(normalized, new Date());
+
+  if (parsedResults.length === 0) {
+      throw new Error(`No pude entender la fecha indicada: "${input}". Por favor usa un formato más claro (ej: 'Martes 20 a las 10:00').`);
+  }
+
+  const date = parsedResults[0].start.date();
+  
+  // Force current year if implicit (Chrono defaults to current, but logic is safe)
+  // Note: getSanitizedDates will handle "past date" logic later.
+  
+  // Return pseudo-ISO for getSanitizedDates to consume
+  return date.toISOString();
+};
+
 // export const calendarManagerTools = {
   /**
    * Herramienta para crear eventos con validación de año automática
@@ -107,8 +145,12 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
       const calendarId = CALENDAR_ID;
       
       try {
+        // 0. Smart Parsing (Natural Language Support)
+        const smartStart = await parseDateInput(input.start);
+        const smartEnd = input.end ? await parseDateInput(input.end) : smartStart;
+
         // Sanitización y conversión a hora local
-        const { start, end } = getSanitizedDates(input.start, input.end || input.start); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
+        const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
 
         const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
         
@@ -260,7 +302,10 @@ const getSanitizedDates = (startIso: string, endIso: string) => {
           let endBody = currentEvent.end;
           
           if (start && end) {
-             const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
+             const smartStart = await parseDateInput(start);
+             const smartEnd = await parseDateInput(end);
+
+             const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(smartStart, smartEnd);
              startBody = { dateTime: sanitizedStart.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
              endBody = { dateTime: sanitizedEnd.replace(/Z$/, ''), timeZone: 'America/Argentina/Buenos_Aires' };
           }
