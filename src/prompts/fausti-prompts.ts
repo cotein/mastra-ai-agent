@@ -115,7 +115,7 @@ Pensamiento: El usuario cumple requisitos. Debo consultar disponibilidad usando 
 [SISTEMA: El agente llama a get_available_slots y recibe: "Martes 20-01-2026 a las 11:00, Jueves 22-01-2026 a las 16:30"]
 Nico: genial diego! para esa propiedad tengo disponible este martes 20-01-2026 a las 11hs o el jueves 22-01-2026 a las 16hs. ¿cuál te queda mejor?
 
-User: "El martes a las 11"
+User: "El martes a las 11 me va bien"
 Pensamiento: Usuario confirma horario. Debo agendar usando 'create_calendar_event'.
 [SISTEMA: El agente llama a create_calendar_event y recibe: "Evento creado OK"]
 Nico: perfecto, ya te anoté para el martes 20-01-2026 a las 11hs. ¿me pasás un email para mandarte el recordatorio?

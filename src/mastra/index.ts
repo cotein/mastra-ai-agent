@@ -203,9 +203,6 @@ export const mastra = new Mastra({
                     // D. CREACIÓN DINÁMICA DEL AGENTE
                     const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
                     
-                    // @ts-ignore
-                    console.log("🛠️ Tools disponibles para el agente:", Object.keys((agent as any).tools || {}));
-
                     const response = await agent.generate(message, {
                         threadId: currentThreadId,
                         resourceId: userId,

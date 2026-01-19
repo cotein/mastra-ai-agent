@@ -114,12 +114,12 @@ const parseDateInput = async (input: string): Promise<string> => {
    */
   export const createCalendarEvent = createTool({
     id: 'create_calendar_event',
-    description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario. Requiere datos del cliente y propiedad.',
+    description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario.',
     inputSchema: z.object({
       title: z.string().optional().describe('Título descriptivo del evento'),
-      start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Mañana 15:00"). La herramienta entenderá la fecha.'),
+      start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Mañana 15:00").'),
       end: z.string().optional().describe('Fecha y hora de fin. Puede ser formato ISO8601 O texto natural.'),
-      clientName: z.string().describe("Nombre y Apellido del cliente"),
+      clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
       clientPhone: z.string().optional().describe("Teléfono del cliente"),
       clientEmail: z.string().optional().describe("Email del cliente"),
       propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
@@ -133,21 +133,40 @@ const parseDateInput = async (input: string): Promise<string> => {
       const calendarId = CALENDAR_ID;
       
       try {
-        // 0. Smart Parsing con LLM (Mucho más inteligente)
-        // Combinamos start y end en una sola frase para que el LLM entienda el contexto completo
-        const dateDescription = input.end 
-            ? `Inicio: ${input.start}. Fin: ${input.end}` 
-            : input.start;
+        // 0. Smart Parsing con LLM (O bypass si es ISO válido)
+        let smartStart: string;
+        let smartEnd: string;
 
-        const parseResult = await llmDateParser.execute!({ dateDescription });
+        // Comprobamos si start ya es un ISO válido (Viene de get_available_slots)
+        const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes('T');
         
-        if (!parseResult.success || !parseResult.start) {
-             throw new Error(`No pude entender la fecha: ${parseResult.error || 'error desconocido'}`);
-        }
-        
-        const smartStart = parseResult.start;
-        // El LLM ya aplicó la regla de 1 hora por defecto si faltaba
-        const smartEnd = parseResult.end!; 
+        if (isIsoStart) {
+            console.log("⚡ [FAST PATH] Detectado formato ISO. Saltando LLM Parser.");
+            smartStart = input.start;
+            
+            // Si hay end y es ISO, lo usamos. Si no, default 1 hora.
+            if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes('T')) {
+                smartEnd = input.end;
+            } else {
+                 const startDate = new Date(smartStart);
+                 startDate.setHours(startDate.getHours() + 1);
+                 smartEnd = startDate.toISOString();
+            }
+        } else {
+            // Camino Lento: Texto Natural -> LLM
+            console.log("🐢 [SLOW PATH] Detectado lenguaje natural. Invocando LLM Parser...");
+            const dateDescription = input.end 
+                ? `Inicio: ${input.start}. Fin: ${input.end}` 
+                : input.start;
+
+            const parseResult = await llmDateParser.execute!({ dateDescription });
+            
+            if (!parseResult.success || !parseResult.start) {
+                throw new Error(`No pude entender la fecha: ${parseResult.error || 'error desconocido'}`);
+            }
+            smartStart = parseResult.start;
+            smartEnd = parseResult.end!; 
+        } 
 
         // Sanitización y conversión a hora local
         const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)

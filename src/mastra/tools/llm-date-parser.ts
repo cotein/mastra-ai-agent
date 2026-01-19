@@ -17,6 +17,7 @@ export const llmDateParser = createTool({
     const currentIso = now.toISOString();
     const currentDayName = now.toLocaleDateString('es-AR', { weekday: 'long' });
 
+   
     const prompt = `
       Eres un experto asistente de calendario para una inmobiliaria en Argentina. 
       Tu única función es convertir expresiones de fecha/hora en lenguaje natural a formato ISO 8601 estricto.
@@ -36,7 +37,7 @@ export const llmDateParser = createTool({
 
       TU TAREA:
       Analiza el texto "${dateDescription}" y genera un JSON con start y end en formato ISO 8601 con offset correcto (-03:00).
-    `;
+    `; 
 
     try {
       const { object } = await generateObject({
