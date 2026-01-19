@@ -2,6 +2,7 @@ import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
 import { naturalDateToISO8601 } from '../../helpers/date-converter';
+import { llmDateParser } from './llm-date-parser';
 
 const CALENDAR_ID = 'c.vogzan@gmail.com';
 
@@ -132,17 +133,21 @@ const parseDateInput = async (input: string): Promise<string> => {
       const calendarId = CALENDAR_ID;
       
       try {
-        // 0. Smart Parsing (Natural Language Support)
-        const smartStart = await parseDateInput(input.start);
-        let smartEnd: string;
-        if (input.end) {
-            smartEnd = await parseDateInput(input.end);
-        } else {
-            // Default: 1 hour duration
-            const startDate = new Date(smartStart);
-            startDate.setHours(startDate.getHours() + 1);
-            smartEnd = startDate.toISOString();
+        // 0. Smart Parsing con LLM (Mucho más inteligente)
+        // Combinamos start y end en una sola frase para que el LLM entienda el contexto completo
+        const dateDescription = input.end 
+            ? `Inicio: ${input.start}. Fin: ${input.end}` 
+            : input.start;
+
+        const parseResult = await llmDateParser.execute!({ dateDescription });
+        
+        if (!parseResult.success || !parseResult.start) {
+             throw new Error(`No pude entender la fecha: ${parseResult.error || 'error desconocido'}`);
         }
+        
+        const smartStart = parseResult.start;
+        // El LLM ya aplicó la regla de 1 hora por defecto si faltaba
+        const smartEnd = parseResult.end!; 
 
         // Sanitización y conversión a hora local
         const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
