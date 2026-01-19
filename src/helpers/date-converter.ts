@@ -276,7 +276,7 @@ function trySpecificPatterns(
     
     // Formato: "en 3 días a las 14"
     {
-      pattern: /^en\s+(\d+)\s+d[ií]as?\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/,
+      pattern: /en\s+(\d+)\s+d[ií]as?\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
       handler: (match, today) => {
         const days = parseInt(match[1]);
         const hour = parseInt(match[3]);
@@ -290,7 +290,7 @@ function trySpecificPatterns(
     
     // Formato: "10 de la mañana" o "2 de la tarde"
     {
-      pattern: /^(\d{1,2})\s+(de\s+la\s+)?(manana|mañana|tarde|noche)$/,
+      pattern: /(\d{1,2})\s+(de\s+la\s+)?(manana|mañana|tarde|noche)/i,
       handler: (match, today) => {
         const hour = parseInt(match[1]);
         const period = match[3];
@@ -312,7 +312,7 @@ function trySpecificPatterns(
     
     // Formato: "esta tarde" o "esta noche"
     {
-      pattern: /^(esta|esta misma)\s+(manana|mañana|tarde|noche)$/,
+      pattern: /(esta|esta misma)\s+(manana|mañana|tarde|noche)/i,
       handler: (match, today) => {
         const period = match[2];
         const now = config.referenceDate;

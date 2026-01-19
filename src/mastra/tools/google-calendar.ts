@@ -134,7 +134,15 @@ const parseDateInput = async (input: string): Promise<string> => {
       try {
         // 0. Smart Parsing (Natural Language Support)
         const smartStart = await parseDateInput(input.start);
-        const smartEnd = input.end ? await parseDateInput(input.end) : smartStart;
+        let smartEnd: string;
+        if (input.end) {
+            smartEnd = await parseDateInput(input.end);
+        } else {
+            // Default: 1 hour duration
+            const startDate = new Date(smartStart);
+            startDate.setHours(startDate.getHours() + 1);
+            smartEnd = startDate.toISOString();
+        }
 
         // Sanitización y conversión a hora local
         const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
