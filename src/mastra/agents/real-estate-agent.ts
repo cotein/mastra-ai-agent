@@ -52,9 +52,10 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
 
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
 
-  const selectedTools: any = operacionTipo === 'ALQUILAR' 
+  const op = (operacionTipo || '').trim().toUpperCase();
+  const selectedTools: any = op === 'ALQUILAR' 
     ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent }
-    : operacionTipo === 'VENDER'
+    : op === 'VENDER'
     ? { potential_sale_email: potentialSaleEmailTool }
     : { };
 

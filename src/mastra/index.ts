@@ -128,6 +128,13 @@ export const mastra = new Mastra({
                           ...(clientData || {}) // 3. Override actual
                       } as ClientData;
 
+                      // FIX: Recuperar operacionTipo de DB si no está en RAM
+                      if (!propertyOperationType && finalContextData.operacionTipo) {
+                          propertyOperationType = finalContextData.operacionTipo;
+                          console.log(`💾 [DB] Tipo de operación recuperado: ${propertyOperationType}`);
+                          sessionOperationMap.set(currentThreadId, propertyOperationType);
+                      }
+
                     } catch (err) {
                       console.error("⚠️ Error gestionando contexto en DB (usando fallback):", err);
                       // Fallback: intentar seguir con lo que tenemos
@@ -137,12 +144,20 @@ export const mastra = new Mastra({
                     // Recuperar LINK de la sesión (RAM) si existe para mantener contexto
                     if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
                         finalContextData.link = sessionLinkMap.get(currentThreadId);
+                    } else if (finalContextData.link && !sessionLinkMap.has(currentThreadId)) {
+                        // Sync DB -> RAM
+                        sessionLinkMap.set(currentThreadId, finalContextData.link);
+                        console.log(`💾 [DB] Link recuperado y sincronizado a RAM`);
                     }
 
                     // Recuperar PropiedadInfo de la sesión (RAM) si existe
                     if (!finalContextData.propiedadInfo && sessionPropiedadInfoMap.has(currentThreadId)) {
                          finalContextData.propiedadInfo = sessionPropiedadInfoMap.get(currentThreadId);
                          console.log(`💾 [RAM] Recuperando propiedadInfo de sesión para ${currentThreadId}`);
+                    } else if (finalContextData.propiedadInfo && !sessionPropiedadInfoMap.has(currentThreadId)) {
+                         // Sync DB -> RAM
+                         sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
+                         console.log(`💾 [DB] PropiedadInfo recuperado y sincronizado a RAM`);
                     }
 
                     // B. WORKFLOW / LOGICA DE NEGOCIO
@@ -177,10 +192,18 @@ export const mastra = new Mastra({
                                 finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
 
-                                // ACTUALIZAR SESIÓN EN MEMORIA
+                                // ACTUALIZAR SESIÓN EN MEMORIA Y DB
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
                                 sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
-                                console.log(`💾 [RAM] Tipo de operación guardado para ${currentThreadId}: ${propertyOperationType}`);
+                                
+                                const validResourceId = userId || "anonymous_user"; 
+                                await ThreadContextService.updateContext(threadId, validResourceId, {
+                                    operacionTipo: propertyOperationType,
+                                    propiedadInfo: finalContextData.propiedadInfo,
+                                    link: url
+                                });
+
+                                console.log(`💾 [RAM+DB] Operación guardada: ${propertyOperationType}`);
                                 console.log(`💾 [RAM] PropiedadInfo guardado para ${currentThreadId}`);
                             }
                         }
