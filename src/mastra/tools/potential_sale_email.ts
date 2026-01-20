@@ -27,6 +27,8 @@ export const potentialSaleEmailTool = createTool({
     console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
 
     const gmail = getGmail();
+    console.log("🔧 Gmail client initialized");
+
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     
     const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, '');
@@ -65,6 +67,7 @@ export const potentialSaleEmailTool = createTool({
 
     // Ejecutamos los envíos
     const sendPromises = recipients.map(async (to) => {
+      console.log(`📧 Preparing email for: ${to}`);
       const messageParts = [
         `From: Nico Agent <me@gmail.com>`,
         `To: ${to}`,
@@ -77,18 +80,28 @@ export const potentialSaleEmailTool = createTool({
       const message = messageParts.join('\n');
       const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-      return gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw: encodedMessage },
-      });
+      try {
+        console.log(`🚀 Sending to: ${to}`);
+        const res = await gmail.users.messages.send({
+          userId: 'me',
+          requestBody: { raw: encodedMessage },
+        });
+        console.log(`✅ Email sent to: ${to} - Status: ${res.status}`);
+        return res;
+      } catch (innerErr) {
+        console.error(`❌ Error sending to ${to}:`, innerErr);
+        throw innerErr;
+      }
     });
 
     // IMPORTANTE: No usamos 'await' aquí si queremos que sea 100% asíncrono,
     // pero Mastra maneja las ejecuciones de tools de forma que si retornas el resultado rápido, el agente sigue.
     try {
         await Promise.all(sendPromises);
+        console.log("🏁 All emails processed");
     } catch (err) {
-        console.error("Error enviando mails de venta:", err);
+        console.error("Error global enviando mails de venta:", err);
+
         throw new Error("Falló el envío del correo de venta. Revisa los logs.");
     }
     

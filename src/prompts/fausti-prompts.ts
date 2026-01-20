@@ -130,7 +130,7 @@ Acción: ${momentoDia} ", nico de fausti propiedades por acá. dale, te ayudo co
 IV 🏠 PROTOCOLO DE VENTA
 1. Si el usuario confirma que quiere verla.
 
-2. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **potential_sale_email** 
+2. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **potential_sale_email**
 
 3. **Cierre**: "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
 
