@@ -95,11 +95,26 @@ const cleanDataStep = createStep({
         keywordsZonaProp: inputData.text
     });
 
+    if (!("formattedText" in result)) {
+        throw new Error("Validation failed in realEstatePropertyFormatterTool");
+    }
+
+    let finalAddress = inputData.address;
+    const finalFormattedText = result.formattedText || inputData.text;
+
+    // Fallback: Si no hay address estructurada, intentar sacarla del texto formateado (LLM)
+    if (!finalAddress || finalAddress.trim() === "") {
+        const addressMatch = finalFormattedText.match(/Domicilio:\s*(.+)/i);
+        if (addressMatch && addressMatch[1]) {
+            finalAddress = addressMatch[1].trim();
+            console.log("📍 Address recuperada del LLM:", finalAddress);
+        }
+    }
 
     return {
-      formattedText: result.formattedText || inputData.text, // Fallback si falla
+      formattedText: finalFormattedText,
       operacionTipo: inputData.operacionTipo,
-      address: inputData.address
+      address: finalAddress
     };
   },
 });

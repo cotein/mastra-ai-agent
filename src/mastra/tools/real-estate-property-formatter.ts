@@ -25,7 +25,7 @@ export const realEstatePropertyFormatterTool = createTool({
     
     ### CAMPOS A EXTRAER:
     1. **Tipo Operación**: (Alquiler, Venta o Temporal).
-    2. **Ubicación**: Barrio y Localidad (Ej: "Palermo, CABA" o "El Cantón, Escobar"). Limpia nombres de inmobiliarias.
+    2. **Domicilio**: Localidad y Domicilio (Ej: "CABA, Av. del Libertador 1234" o "Monte Grande, Fray Luis Beltrán 1234"). Limpia nombres de inmobiliarias y centrate en conseguir el domicilio.
     3. **Superficie**: Prioriza Metros Totales y Cubiertos (Ej: "800m² Totales / 200m² Cubiertos").
     4. **Ambientes**: Cantidad de ambientes y dormitorios.
     5. **Requisitos**: Busca menciones sobre garantías (Ej: "Garantía Propietaria", "Seguro Caución", "Recibo de sueldo"). Si no hay info explícita, pon "Consultar".
@@ -39,7 +39,7 @@ export const realEstatePropertyFormatterTool = createTool({
 
     ### FORMATO DE SALIDA (Texto Plano):
     Operación: [Valor]
-    Ubicación: [Valor]
+    Domicilio: [Valor]
     Superficie: [Valor]
     Ambientes: [Valor]
     Precio: [Valor]
