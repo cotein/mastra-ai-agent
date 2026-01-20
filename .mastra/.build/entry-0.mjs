@@ -2,17 +2,17 @@ import 'dotenv/config';
 import { Mastra } from '@mastra/core';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
-import { openai as openai$1 } from '@ai-sdk/openai';
+import { openai } from '@ai-sdk/openai';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
-import { generateText } from 'ai';
+import { generateText, generateObject } from 'ai';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
+import { es } from 'chrono-node';
+import { isValid, addDays, startOfDay, setHours, setMinutes, setSeconds, setMilliseconds, formatISO } from 'date-fns';
 import axios from 'axios';
-import OpenAI from 'openai';
-import { createStep, createWorkflow } from '@mastra/core/workflows';
 
 "use strict";
 const connectionString = process.env.SUPABASE_POSTGRES_URL;
@@ -143,7 +143,7 @@ class WhatsAppStyleProcessor {
     if (!textToHumanize) return args.messages;
     try {
       const { text } = await generateText({
-        model: openai$1("gpt-4o-mini"),
+        model: openai("gpt-4o-mini"),
         system: `Eres un experto en comunicaci\xF3n por WhatsApp. 
                      Tu trabajo es reescribir el siguiente mensaje para que suene como un humano escribiendo r\xE1pido en WhatsApp.
                      Reglas:
@@ -188,6 +188,395 @@ class WhatsAppStyleProcessor {
 }
 
 "use strict";
+function naturalDateToISO8601(naturalDate, options = {}) {
+  try {
+    const config = {
+      referenceDate: /* @__PURE__ */ new Date(),
+      timezone: "local",
+      includeTime: true,
+      futureDate: true,
+      ...options
+    };
+    if (!naturalDate || typeof naturalDate !== "string") {
+      throw new Error("La fecha debe ser una cadena de texto");
+    }
+    const normalizedInput = normalizeInput(naturalDate);
+    const specificPatternResult = trySpecificPatterns(normalizedInput, config);
+    let resultDate;
+    if (specificPatternResult) {
+      resultDate = specificPatternResult;
+    } else {
+      const chronoResults = es.parse(normalizedInput, config.referenceDate);
+      if (!chronoResults || chronoResults.length === 0) {
+        throw new Error(`No se pudo interpretar la fecha: "${naturalDate}"`);
+      }
+      const parsedResult = chronoResults[0];
+      resultDate = parsedResult.start.date();
+      if (!parsedResult.start.isCertain("hour") && config.includeTime) {
+        resultDate = setDefaultTime(resultDate, config);
+      }
+    }
+    if (!isValid(resultDate)) {
+      throw new Error("La fecha resultante no es v\xE1lida");
+    }
+    if (config.futureDate && resultDate < config.referenceDate) {
+      const dayOfWeek = resultDate.getDay();
+      const daysToAdd = dayOfWeek >= 0 ? 7 : 0;
+      resultDate = addDays(resultDate, daysToAdd);
+    }
+    const isoDate = formatAccordingToOptions(resultDate, config);
+    return {
+      isoDate,
+      date: resultDate,
+      success: true
+    };
+  } catch (error) {
+    return {
+      isoDate: "",
+      date: /* @__PURE__ */ new Date(NaN),
+      success: false,
+      error: error instanceof Error ? error.message : "Error desconocido"
+    };
+  }
+}
+function normalizeInput(text) {
+  return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").replace(/(\d)\s*([ap]\.?\s*m\.?)/gi, "$1$2").replace(/\./g, "").trim();
+}
+function trySpecificPatterns(text, config) {
+  const today = startOfDay(config.referenceDate);
+  const weekDaysMap = {
+    "lunes": 1,
+    "martes": 2,
+    "miercoles": 3,
+    "jueves": 4,
+    "viernes": 5,
+    "sabado": 6,
+    "domingo": 0,
+    "lun": 1,
+    "mar": 2,
+    "mie": 3,
+    "jue": 4,
+    "vie": 5,
+    "sab": 6,
+    "dom": 0
+  };
+  const relativeDaysMap = {
+    "hoy": 0,
+    "ahora": 0,
+    "manana": 1,
+    "ma\xF1ana": 1,
+    "pasado manana": 2,
+    "pasado ma\xF1ana": 2,
+    "ayer": -1,
+    "anteayer": -2,
+    "ante ayer": -2
+  };
+  for (const [key, offset] of Object.entries(relativeDaysMap)) {
+    if (text === key) {
+      return offset === 0 ? new Date(config.referenceDate) : addDays(today, offset);
+    }
+  }
+  for (const [dayName, dayNumber] of Object.entries(weekDaysMap)) {
+    if (text === dayName || text === `el ${dayName}`) {
+      return getNextWeekday(today, dayNumber, config.futureDate);
+    }
+  }
+  const timePatterns = [
+    // Formato: "jueves 22 a las 10" (Día + Número + Hora)
+    {
+      // Quitamos ^ para permitir texto previo ("dale jueves...")
+      pattern: /(?:^|\s)(?:el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(\d{1,2})\s+(?:de\s+[^0-9]+\s+)?(a\s+las?|alas|a\s+la)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
+      handler: (match, today2) => {
+        const dayNumber = parseInt(match[2]);
+        const hour = parseInt(match[4]);
+        const minute = match[5] ? parseInt(match[5]) : 0;
+        const ampm = match[6] || "";
+        let date = new Date(config.referenceDate);
+        const currentDay = date.getDate();
+        if (config.futureDate && dayNumber < currentDay) {
+          date.setMonth(date.getMonth() + 1);
+        }
+        date.setDate(dayNumber);
+        return setTimeWithAMPM(date, hour, minute, ampm);
+      }
+    },
+    // Formato: "martes a las 10"
+    {
+      pattern: /(?:^|\s)(?:el\s+)?(lunes|martes|miercoles|jueves|viernes|sabado|domingo|lun|mar|mie|jue|vie|sab|dom)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
+      handler: (match, today2) => {
+        const dayName = match[1];
+        const hour = parseInt(match[3]);
+        const minute = match[4] ? parseInt(match[4]) : 0;
+        const ampm = match[5] || "";
+        const dayNumber = weekDaysMap[dayName];
+        let date = getNextWeekday(today2, dayNumber, config.futureDate);
+        return setTimeWithAMPM(date, hour, minute, ampm);
+      }
+    },
+    // Formato: "mañana a las 15:30"
+    {
+      pattern: /(?:^|\s)(hoy|manana|mañana|pasado manana|pasado mañana|ayer|anteayer|ante ayer)\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
+      handler: (match, today2) => {
+        const dayRef = match[1];
+        const hour = parseInt(match[3]);
+        const minute = match[4] ? parseInt(match[4]) : 0;
+        const ampm = match[5] || "";
+        const offset = relativeDaysMap[dayRef] || 0;
+        let date = offset === 0 ? new Date(config.referenceDate) : addDays(today2, offset);
+        return setTimeWithAMPM(date, hour, minute, ampm);
+      }
+    },
+    // Formato: "a las 10" o "a las 10:30"
+    {
+      pattern: /(?:^|\s)(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
+      handler: (match, today2) => {
+        const hour = parseInt(match[2]);
+        const minute = match[3] ? parseInt(match[3]) : 0;
+        const ampm = match[4] || "";
+        let date = config.futureDate && config.referenceDate.getHours() > hour ? addDays(today2, 1) : new Date(config.referenceDate);
+        return setTimeWithAMPM(date, hour, minute, ampm);
+      }
+    },
+    // Formato: "en 3 días a las 14"
+    {
+      pattern: /en\s+(\d+)\s+d[ií]as?\s+(a\s+las?|alas)\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?/i,
+      handler: (match, today2) => {
+        const days = parseInt(match[1]);
+        const hour = parseInt(match[3]);
+        const minute = match[4] ? parseInt(match[4]) : 0;
+        const ampm = match[5] || "";
+        let date = addDays(today2, days);
+        return setTimeWithAMPM(date, hour, minute, ampm);
+      }
+    },
+    // Formato: "10 de la mañana" o "2 de la tarde"
+    {
+      pattern: /(\d{1,2})\s+(de\s+la\s+)?(manana|mañana|tarde|noche)/i,
+      handler: (match, today2) => {
+        const hour = parseInt(match[1]);
+        const period = match[3];
+        let adjustedHour = hour;
+        if (period === "tarde" && hour < 12) adjustedHour += 12;
+        if (period === "noche" && hour < 12) adjustedHour += 12;
+        if (period === "manana" || period === "ma\xF1ana") {
+          adjustedHour = hour === 12 ? 0 : hour;
+        }
+        let date = config.futureDate && config.referenceDate.getHours() > adjustedHour ? addDays(today2, 1) : new Date(config.referenceDate);
+        return setHours(setMinutes(date, 0), adjustedHour);
+      }
+    },
+    // Formato: "esta tarde" o "esta noche"
+    {
+      pattern: /(esta|esta misma)\s+(manana|mañana|tarde|noche)/i,
+      handler: (match, today2) => {
+        const period = match[2];
+        const now = config.referenceDate;
+        let hour = 0;
+        switch (period) {
+          case "manana":
+          case "ma\xF1ana":
+            hour = 9;
+            break;
+          case "tarde":
+            hour = 15;
+            break;
+          case "noche":
+            hour = 20;
+            break;
+        }
+        let date = new Date(now);
+        if (now.getHours() > hour) {
+          date = addDays(date, 1);
+        }
+        return setHours(setMinutes(date, 0), hour);
+      }
+    }
+  ];
+  for (const { pattern, handler } of timePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      return handler(match, today);
+    }
+  }
+  return null;
+}
+function getNextWeekday(fromDate, targetWeekday, futureDate = true) {
+  const currentWeekday = fromDate.getDay();
+  let daysToAdd = targetWeekday - currentWeekday;
+  if (!futureDate && daysToAdd < 0) daysToAdd += 7;
+  if (futureDate && daysToAdd <= 0) daysToAdd += 7;
+  return addDays(fromDate, daysToAdd);
+}
+function setTimeWithAMPM(date, hour, minute, ampm) {
+  let adjustedHour = hour;
+  if (ampm) {
+    const isPM = ampm.toLowerCase().startsWith("p");
+    if (isPM && hour < 12) adjustedHour += 12;
+    if (!isPM && hour === 12) adjustedHour = 0;
+  } else if (hour < 12) {
+    const now = /* @__PURE__ */ new Date();
+    if (now.getHours() >= 12 && hour <= 4) {
+      adjustedHour += 12;
+    }
+  }
+  return setHours(setMinutes(setSeconds(setMilliseconds(date, 0), 0), minute), adjustedHour);
+}
+function setDefaultTime(date, config) {
+  if (config.includeTime) {
+    const now = config.referenceDate;
+    return setHours(
+      setMinutes(
+        setSeconds(
+          setMilliseconds(date, now.getMilliseconds()),
+          now.getSeconds()
+        ),
+        now.getMinutes()
+      ),
+      now.getHours()
+    );
+  }
+  return setHours(setMinutes(setSeconds(setMilliseconds(date, 0), 0), 0), 0);
+}
+function formatAccordingToOptions(date, config) {
+  if (!config.includeTime) {
+    return formatISO(date, { representation: "date" });
+  }
+  if (config.timezone === "utc") {
+    return formatISO(date, { representation: "complete" });
+  }
+  return formatISO(date);
+}
+function isNaturalDate(text) {
+  if (!text || typeof text !== "string") return false;
+  const normalized = normalizeInput(text);
+  const dateKeywords = [
+    "lunes",
+    "martes",
+    "miercoles",
+    "jueves",
+    "viernes",
+    "sabado",
+    "domingo",
+    "hoy",
+    "manana",
+    "ma\xF1ana",
+    "ayer",
+    "anteayer",
+    "a las",
+    "alas",
+    "de la",
+    "tarde",
+    "noche",
+    "manana",
+    "ma\xF1ana",
+    "en",
+    "dias",
+    "d\xEDas",
+    "semana",
+    "proximo",
+    "pr\xF3ximo",
+    "proxima",
+    "pr\xF3xima"
+  ];
+  return dateKeywords.some((keyword) => normalized.includes(keyword));
+}
+function runExamples() {
+  const examples = [
+    "martes a las 10",
+    "ma\xF1ana a las 15:30",
+    "hoy a las 20",
+    "viernes a las 9:00",
+    "en 2 d\xEDas a las 14",
+    "a las 18:30",
+    "pasado ma\xF1ana a las 8",
+    "ayer a las 23:45",
+    "jueves alas 11",
+    "10 de la ma\xF1ana",
+    "2 de la tarde",
+    "esta tarde",
+    "el lunes a las 14:30",
+    "a las 10 am",
+    "a las 3 pm"
+  ];
+  console.log("=== Ejemplos de conversi\xF3n ===\n");
+  examples.forEach((example) => {
+    const result2 = naturalDateToISO8601(example);
+    console.log(`Entrada: "${example}"`);
+    console.log(`Salida:  ${result2.isoDate}`);
+    console.log(`\xC9xito:   ${result2.success}`);
+    if (result2.error) console.log(`Error:   ${result2.error}`);
+    console.log("---");
+  });
+  console.log("\n=== Con opciones personalizadas ===\n");
+  const referenceDate = /* @__PURE__ */ new Date("2024-01-15T12:00:00");
+  const result = naturalDateToISO8601("martes a las 10", { referenceDate });
+  console.log(`Referencia: ${referenceDate.toISOString()}`);
+  console.log(`Entrada: "martes a las 10"`);
+  console.log(`Salida:  ${result.isoDate}`);
+}
+
+"use strict";
+const llmDateParser = createTool({
+  id: "llm_date_parser",
+  description: 'Parses natural language date/time expressions into strict ISO 8601 format using an LLM. Handles complex phrases like "next Tuesday at 10", "tomorrow afternoon", etc. Enforces business rules.',
+  inputSchema: z.object({
+    dateDescription: z.string().describe('The natural language text describing the date and time (e.g., "martes 20 a las 10hs").')
+  }),
+  execute: async ({ dateDescription }) => {
+    console.log(`\u{1F916} LLM Parser Invoked with: "${dateDescription}"`);
+    const now = /* @__PURE__ */ new Date();
+    const currentIso = now.toISOString();
+    const currentDayName = now.toLocaleDateString("es-AR", { weekday: "long" });
+    const prompt = `
+      Eres un experto asistente de calendario para una inmobiliaria en Argentina. 
+      Tu \xFAnica funci\xF3n es convertir expresiones de fecha/hora en lenguaje natural a formato ISO 8601 estricto.
+
+      CONTEXTO ACTUAL:
+      - Fecha y Hora actual (Reference): ${currentIso}
+      - D\xEDa de la semana actual: ${currentDayName}
+      - Zona Horaria: America/Argentina/Buenos_Aires (-03:00)
+
+      REGLAS DE NEGOCIO (ESTRICTAS):
+      1. Si el usuario da solo fecha de inicio (ej: "martes 20 a las 10"), asume AUTOM\xC1TICAMENTE una duraci\xF3n de 1 HORA.
+      2. Si la fecha mencionada ya pas\xF3 (ej: hoy es 20 y pide 'lunes 10'), asume que se refiere al futuro (mes siguiente o a\xF1o siguiente), NUNCA al pasado.
+      3. Interpreta prefijos coloquiales ("dale", "bueno", "agendame", "quiero el") como ruido. Ign\xF3ralos.
+      4. "Ma\xF1ana" se calcula desde la Fecha actual.
+      5. Si no se especifica hora, asume 10:00 AM (horario laboral default).
+      6. "Mediod\xEDa" = 12:00. "Tarde" = 15:00 (si no se especifica hora). "Noche" = 20:00.
+
+      TU TAREA:
+      Analiza el texto "${dateDescription}" y genera un JSON con start y end en formato ISO 8601 con offset correcto (-03:00).
+    `;
+    try {
+      const { object } = await generateObject({
+        model: openai("gpt-4o-mini"),
+        schema: z.object({
+          start: z.string().describe("ISO 8601 start date-time with -03:00 offset"),
+          end: z.string().describe("ISO 8601 end date-time with -03:00 offset"),
+          explanation: z.string().describe("Brief reason for the calculation")
+        }),
+        prompt,
+        temperature: 0
+        // Deterministic
+      });
+      console.log(`\u2705 LLM Parsed Result:`, JSON.stringify(object, null, 2));
+      return {
+        success: true,
+        ...object
+      };
+    } catch (error) {
+      console.error("\u274C LLM Parsing Failed:", error);
+      return {
+        success: false,
+        error: error.message,
+        start: null,
+        end: null
+      };
+    }
+  }
+});
+
+"use strict";
 const CALENDAR_ID = "c.vogzan@gmail.com";
 const getGoogleCalendar = () => {
   const auth = new google.auth.OAuth2(
@@ -202,6 +591,7 @@ const getGoogleCalendar = () => {
   return google.calendar({ version: "v3", auth });
 };
 const getSanitizedDates = (startIso, endIso) => {
+  const timeZone = "America/Argentina/Buenos_Aires";
   const now = /* @__PURE__ */ new Date();
   let startDate = new Date(startIso);
   let endDate = new Date(endIso);
@@ -210,21 +600,47 @@ const getSanitizedDates = (startIso, endIso) => {
     startDate.setFullYear(startDate.getFullYear() + 1);
     endDate.setFullYear(endDate.getFullYear() + 1);
   }
-  return {
-    start: startDate.toISOString(),
-    end: endDate.toISOString()
+  const toLocalIsoString = (date) => {
+    const options = {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    };
+    const localString = new Intl.DateTimeFormat("sv-SE", options).format(date);
+    return localString.replace(" ", "T");
   };
+  return {
+    start: toLocalIsoString(startDate),
+    end: toLocalIsoString(endDate)
+  };
+};
+const parseDateInput = async (input) => {
+  const isoDate = new Date(input);
+  if (!isNaN(isoDate.getTime()) && input.includes("T")) {
+    return input;
+  }
+  console.log(`\u26A0\uFE0F Input date '${input}' is not strict ISO. Attempting Natural Language Parse via Helper...`);
+  const result = naturalDateToISO8601(input);
+  if (!result.success || !result.isoDate) {
+    throw new Error(`No pude entender la fecha indicada: "${input}". Error: ${result.error || "Desconocido"}. Por favor usa un formato m\xE1s claro.`);
+  }
+  console.log(`\u2705 Smart Parse Success: '${input}' -> ${result.isoDate}`);
+  return result.isoDate;
 };
 const createCalendarEvent = createTool({
   id: "create_calendar_event",
-  description: "Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario. Requiere datos del cliente y propiedad.",
+  description: "Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario.",
   inputSchema: z.object({
     title: z.string().optional().describe("T\xEDtulo descriptivo del evento"),
-    start: z.string().describe(`Fecha inicio ISO8601. REGLA: Si hoy es ${(/* @__PURE__ */ new Date()).toLocaleDateString()} y agend\xE1s para un mes anterior, us\xE1 el a\xF1o ${(/* @__PURE__ */ new Date()).getFullYear()}.`),
-    end: z.string().optional().describe("Fecha fin ISO8601"),
-    clientName: z.string().describe("Nombre y Apellido del cliente"),
+    start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Ma\xF1ana 15:00").'),
+    end: z.string().optional().describe("Fecha y hora de fin. Puede ser formato ISO8601 O texto natural."),
+    clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
     clientPhone: z.string().optional().describe("Tel\xE9fono del cliente"),
-    clientEmail: z.string().optional().describe("Email del cliente"),
     propertyAddress: z.string().optional().describe("Direcci\xF3n de la propiedad"),
     propertyLink: z.string().optional().describe("Link de la propiedad")
   }),
@@ -233,23 +649,46 @@ const createCalendarEvent = createTool({
     console.log("\u{1F4CA} [PARAMS] Par\xE1metros recibidos del agente:", JSON.stringify(input, null, 2));
     const calendar = getGoogleCalendar();
     const calendarId = CALENDAR_ID;
-    const { start, end } = getSanitizedDates(input.start, input.end);
-    const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
-    const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || "Sin tel"} - email: ${input.clientEmail || "Sin email"} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || "Sin link"}`;
     try {
+      let smartStart;
+      let smartEnd;
+      const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes("T");
+      if (isIsoStart) {
+        console.log("\u26A1 [FAST PATH] Detectado formato ISO. Saltando LLM Parser.");
+        smartStart = input.start;
+        if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes("T")) {
+          smartEnd = input.end;
+        } else {
+          const startDate = new Date(smartStart);
+          startDate.setHours(startDate.getHours() + 1);
+          smartEnd = startDate.toISOString();
+        }
+      } else {
+        console.log("\u{1F422} [SLOW PATH] Detectado lenguaje natural. Invocando LLM Parser...");
+        const dateDescription = input.end ? `Inicio: ${input.start}. Fin: ${input.end}` : input.start;
+        const parseResult = await llmDateParser.execute({ dateDescription });
+        if (!parseResult.success || !parseResult.start) {
+          throw new Error(`No pude entender la fecha: ${parseResult.error || "error desconocido"}`);
+        }
+        smartStart = parseResult.start;
+        smartEnd = parseResult.end;
+      }
+      const { start, end } = getSanitizedDates(smartStart, smartEnd);
+      const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
+      const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || "Sin tel"} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || "Sin link"}`;
       const response = await calendar.events.insert({
         calendarId,
         requestBody: {
           summary: eventSummary,
           location: input.propertyAddress,
           description,
-          // USAMOS EL FORMATO GENERADO
           start: {
-            dateTime: start.replace(/Z$/, ""),
+            dateTime: start,
+            // Ya viene formato "YYYY-MM-DDTHH:mm:ss" correcta para la TZ
             timeZone: "America/Argentina/Buenos_Aires"
           },
           end: {
-            dateTime: end.replace(/Z$/, ""),
+            dateTime: end,
             timeZone: "America/Argentina/Buenos_Aires"
           }
         }
@@ -262,8 +701,16 @@ const createCalendarEvent = createTool({
         message: "Cita agendada correctamente con formato estandarizado."
       };
     } catch (error) {
-      console.error("Error creando evento en Google Calendar:", error);
-      return { success: false, error: error.message };
+      console.error("\u274C [ERROR FATAL] Error creando evento en Google Calendar:", error);
+      if (error.response) {
+        console.error("\u{1F4E6} [GOOGLE API ERROR DATA]:", JSON.stringify(error.response.data, null, 2));
+      }
+      return {
+        success: false,
+        error: error.message,
+        details: error.response ? error.response.data : "Error desconocido",
+        rawError: JSON.stringify(error, Object.getOwnPropertyNames(error))
+      };
     }
   }
 });
@@ -328,13 +775,12 @@ const updateCalendarEvent = createTool({
     summary: z.string().optional().describe("Nuevo t\xEDtulo del evento"),
     description: z.string().optional().describe("Nueva descripci\xF3n manual (NO RECOMENDADO - usar datos estructurados)"),
     location: z.string().optional().describe("Nueva ubicaci\xF3n"),
-    start: z.string().optional().describe("Nueva fecha de inicio (ISO)"),
-    end: z.string().optional().describe("Nueva fecha de fin (ISO)"),
+    start: z.string().optional().describe("Nueva fecha de inicio (ISO o Natural)"),
+    end: z.string().optional().describe("Nueva fecha de fin (ISO o Natural)"),
     userEmail: z.string().optional().describe("Email del usuario para enviar notificaciones de actualizaci\xF3n (opcional)"),
     // Datos Estructurados para reconstrucción de formato
     clientName: z.string().optional().describe("Nombre y Apellido del cliente (para actualizar ficha)"),
     clientPhone: z.string().optional().describe("Tel\xE9fono del cliente"),
-    clientEmail: z.string().optional().describe("Email del cliente"),
     propertyAddress: z.string().optional().describe("Direcci\xF3n de la propiedad"),
     propertyLink: z.string().optional().describe("Link de la propiedad")
   }),
@@ -351,32 +797,34 @@ const updateCalendarEvent = createTool({
     } catch (e) {
       return { success: false, error: "Evento no encontrado: " + e.message };
     }
-    let startBody = currentEvent.start;
-    let endBody = currentEvent.end;
-    if (start && end) {
-      const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(start, end);
-      startBody = { dateTime: sanitizedStart.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
-      endBody = { dateTime: sanitizedEnd.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
-    }
-    let finalDescription = description || currentEvent.description;
-    if (!description && (clientName || clientPhone || clientEmail || propertyAddress || propertyLink)) {
-      const cName = clientName || "Cliente Actualizado";
-      const cPhone = clientPhone || "Sin tel";
-      const cEmail = clientEmail || "Sin email";
-      const pAddress = propertyAddress || location || currentEvent.location || "Ver link";
-      const pLink = propertyLink || "Sin link";
-      finalDescription = `visita propiedad - cliente: ${cName} - tel: ${cPhone} - email: ${cEmail} - Domicilio: ${pAddress} - Link: ${pLink}`;
-    }
-    const requestBody = {
-      ...currentEvent,
-      summary: summary || currentEvent.summary,
-      description: finalDescription,
-      location: location || propertyAddress || currentEvent.location,
-      // propertyAddress también actualiza location si se provee
-      start: startBody,
-      end: endBody
-    };
     try {
+      let startBody = currentEvent.start;
+      let endBody = currentEvent.end;
+      if (start && end) {
+        const smartStart = await parseDateInput(start);
+        const smartEnd = await parseDateInput(end);
+        const { start: sanitizedStart, end: sanitizedEnd } = getSanitizedDates(smartStart, smartEnd);
+        startBody = { dateTime: sanitizedStart.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
+        endBody = { dateTime: sanitizedEnd.replace(/Z$/, ""), timeZone: "America/Argentina/Buenos_Aires" };
+      }
+      let finalDescription = description || currentEvent.description;
+      if (!description && (clientName || clientPhone || clientEmail || propertyAddress || propertyLink)) {
+        const cName = clientName || "Cliente Actualizado";
+        const cPhone = clientPhone || "Sin tel";
+        const cEmail = clientEmail || "Sin email";
+        const pAddress = propertyAddress || location || currentEvent.location || "Ver link";
+        const pLink = propertyLink || "Sin link";
+        finalDescription = `visita propiedad - cliente: ${cName} - tel: ${cPhone} - email: ${cEmail} - Domicilio: ${pAddress} - Link: ${pLink}`;
+      }
+      const requestBody = {
+        ...currentEvent,
+        summary: summary || currentEvent.summary,
+        description: finalDescription,
+        location: location || propertyAddress || currentEvent.location,
+        // propertyAddress también actualiza location si se provee
+        start: startBody,
+        end: endBody
+      };
       const response = await calendar.events.update({
         calendarId,
         eventId,
@@ -507,16 +955,13 @@ const findEventByNaturalDate = createTool({
   execute: async ({ query }) => {
     console.log("\u{1F6E0}\uFE0F Tool Invoked: find_event_by_natural_date");
     console.log("\u{1F4E5} Query recibido:", query);
-    const chrono = await import('chrono-node');
     const calendar = getGoogleCalendar();
-    let normalizedQuery = query.toLowerCase().replace(/mediod[ií]a/g, "12:00").replace(/del d[ií]a/g, "").replace(/de la ma[ñn]ana/g, "am").replace(/de la tarde/g, "pm").replace(/de la noche/g, "pm");
-    const results = chrono.es.parse(normalizedQuery, /* @__PURE__ */ new Date());
-    if (results.length === 0) {
-      return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser m\xE1s espec\xEDfico (ej. 'Lunes 12 de enero a las 15:00')." };
+    const result = naturalDateToISO8601(query, { futureDate: false });
+    if (!result.success) {
+      return { success: false, message: "No pude entender la fecha y hora indicadas. Por favor, intenta ser m\xE1s espec\xEDfico." };
     }
-    const result = results[0];
-    const date = result.start.date();
-    const hasTime = result.start.isCertain("hour");
+    const date = result.date;
+    const hasTime = true;
     let timeMin;
     let timeMax;
     if (hasTime) {
@@ -571,6 +1016,49 @@ const findEventByNaturalDate = createTool({
     } catch (error) {
       console.error("Error buscando eventos por fecha natural:", error);
       return { success: false, error: error.message };
+    }
+  }
+});
+
+"use strict";
+const apifyScraperTool = createTool({
+  id: "apify-web-scraper",
+  description: `Extrae el contenido textual crudo de una URL.`,
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    data: z.array(z.any()).optional(),
+    error: z.string().optional()
+  }),
+  execute: async ({ url }) => {
+    const APIFY_TOKEN = process.env.APIFY_TOKEN;
+    const ACTOR_NAME = "apify~website-content-crawler";
+    if (!APIFY_TOKEN) {
+      return { success: false, error: "Falta APIFY_TOKEN en .env" };
+    }
+    try {
+      const response = await axios.post(
+        `https://api.apify.com/v2/acts/${ACTOR_NAME}/runs?token=${APIFY_TOKEN}`,
+        { startUrls: [{ url }] }
+      );
+      const runId = response.data.data.id;
+      const datasetId = response.data.data.defaultDatasetId;
+      let status = "RUNNING";
+      while (status === "RUNNING" || status === "READY") {
+        await new Promise((r) => setTimeout(r, 2e3));
+        const check = await axios.get(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`);
+        status = check.data.data.status;
+      }
+      const items = await axios.get(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`);
+      return {
+        success: true,
+        data: items.data
+      };
+    } catch (e) {
+      const msg = e.response?.data?.error?.message || e.message;
+      return { success: false, error: msg };
     }
   }
 });
@@ -639,49 +1127,6 @@ const listEmails = createTool({
       })
     );
     return messages;
-  }
-});
-
-"use strict";
-const apifyScraperTool = createTool({
-  id: "apify-web-scraper",
-  description: `Extrae el contenido textual crudo de una URL.`,
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    success: z.boolean(),
-    data: z.array(z.any()).optional(),
-    error: z.string().optional()
-  }),
-  execute: async ({ url }) => {
-    const APIFY_TOKEN = process.env.APIFY_TOKEN;
-    const ACTOR_NAME = "apify~website-content-crawler";
-    if (!APIFY_TOKEN) {
-      return { success: false, error: "Falta APIFY_TOKEN en .env" };
-    }
-    try {
-      const response = await axios.post(
-        `https://api.apify.com/v2/acts/${ACTOR_NAME}/runs?token=${APIFY_TOKEN}`,
-        { startUrls: [{ url }] }
-      );
-      const runId = response.data.data.id;
-      const datasetId = response.data.data.defaultDatasetId;
-      let status = "RUNNING";
-      while (status === "RUNNING" || status === "READY") {
-        await new Promise((r) => setTimeout(r, 2e3));
-        const check = await axios.get(`https://api.apify.com/v2/actor-runs/${runId}?token=${APIFY_TOKEN}`);
-        status = check.data.data.status;
-      }
-      const items = await axios.get(`https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}`);
-      return {
-        success: true,
-        data: items.data
-      };
-    } catch (e) {
-      const msg = e.response?.data?.error?.message || e.message;
-      return { success: false, error: msg };
-    }
   }
 });
 
@@ -774,25 +1219,11 @@ const potentialSaleEmailTool = createTool({
 
 "use strict";
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
-const commonTools = {
-  createCalendarEvent,
-  listCalendarEvents,
-  getCalendarEvent,
-  updateCalendarEvent,
-  deleteCalendarEvent,
-  findEventByNaturalDate,
-  sendEmail,
-  listEmails
-};
-const salesTools = {
-  potential_sale_email: potentialSaleEmailTool
-  // Solo para ventas
-};
 const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
   const memory = new Memory({
     storage,
     vector: vectorStore,
-    embedder: openai$1.embedding("text-embedding-3-small"),
+    embedder: openai.embedding("text-embedding-3-small"),
     options: {
       lastMessages: 22,
       semanticRecall: {
@@ -818,26 +1249,31 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     }
   });
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
-  const selectedTools = operacionTipo === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent } : operacionTipo === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  const op = (operacionTipo || "").trim().toUpperCase();
+  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
   console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
+  console.log("");
+  console.log("=".repeat(50));
+  console.log("\u{1F6E0}\uFE0F TOOLS ACTIVAS:", Object.keys(selectedTools));
+  console.log("=".repeat(50));
   return new Agent({
     // ID obligatorio para Mastra
     id: "real-estate-agent",
     name: "Real Estate Agent",
     instructions: finalInstructions,
-    model: openai$1("gpt-4o"),
+    model: openai("gpt-4o"),
     memory,
     tools: selectedTools,
     inputProcessors: [
       new PromptInjectionDetector({
-        model: openai$1("gpt-4o-mini"),
+        model: openai("gpt-4o-mini"),
         threshold: 0.8,
         strategy: "block"
       }),
       new ModerationProcessor({
-        model: openai$1("gpt-4o-mini"),
+        model: openai("gpt-4o-mini"),
         threshold: 0.7,
         strategy: "block"
       }),
@@ -845,7 +1281,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     ],
     outputProcessors: [
       new SystemPromptScrubber({
-        model: openai$1("gpt-4o-mini"),
+        model: openai("gpt-4o-mini"),
         strategy: "redact",
         redactionMethod: "placeholder"
       }),
@@ -855,283 +1291,10 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
 };
 
 "use strict";
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-const realEstatePropertyFormatterTool = createTool({
-  id: "real-estate-property-formatter",
-  description: "Limpia, extrae y formatea informaci\xF3n de descripciones inmobiliarias.",
-  inputSchema: z.object({
-    keywordsZonaProp: z.string().describe("El texto bruto de la descripci\xF3n de la propiedad")
-  }),
-  outputSchema: z.object({
-    formattedText: z.string().describe("El listado formateado y coherente")
-  }),
-  execute: async ({ keywordsZonaProp }) => {
-    console.log("   [Tool] \u{1F6E0}\uFE0F  Conectando directo con API OpenAI (gpt-4o-mini)...");
-    const systemPrompt = `Eres un motor de extracci\xF3n de datos t\xE9cnicos inmobiliarios de Alta Precisi\xF3n.
-    Analiza el texto desordenado y extrae la siguiente informaci\xF3n estructurada.
-    
-    ### CAMPOS A EXTRAER:
-    1. **Tipo Operaci\xF3n**: (Alquiler, Venta o Temporal).
-    2. **Ubicaci\xF3n**: Barrio y Localidad (Ej: "Palermo, CABA" o "El Cant\xF3n, Escobar"). Limpia nombres de inmobiliarias.
-    3. **Superficie**: Prioriza Metros Totales y Cubiertos (Ej: "800m\xB2 Totales / 200m\xB2 Cubiertos").
-    4. **Ambientes**: Cantidad de ambientes y dormitorios.
-    5. **Requisitos**: Busca menciones sobre garant\xEDas (Ej: "Garant\xEDa Propietaria", "Seguro Cauci\xF3n", "Recibo de sueldo"). Si no hay info expl\xEDcita, pon "Consultar".
-    6. **Mascotas**: Busca "Acepta mascotas", "No acepta mascotas" o \xEDconos. Si no dice nada, pon "A confirmar".
-    7. **Precio**: Moneda y Valor (Ej: "USD 2.100").
-    8. **Expensas**: Si figuran.
-
-    ### REGLAS DE LIMPIEZA:
-    - Ignora textos de publicidad como "Garant\xEDas 100% online", "Avisarme si baja", etc, salvo que sirvan para deducir requisitos.
-    - Si hay datos contradictorios (ej: 4 amb y 6 amb), usa el m\xE1s espec\xEDfico o el que aparezca en la descripci\xF3n t\xE9cnica.
-
-    ### FORMATO DE SALIDA (Texto Plano):
-    Operaci\xF3n: [Valor]
-    Ubicaci\xF3n: [Valor]
-    Superficie: [Valor]
-    Ambientes: [Valor]
-    Precio: [Valor]
-    Requisitos: [Valor]
-    Mascotas: [Valor]
-    `;
-    const userPrompt = `Procesa este texto raw: "${keywordsZonaProp}"`;
-    try {
-      const completion = await openai.chat.completions.create({
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ],
-        model: "gpt-4o-mini",
-        temperature: 0.1
-      });
-      const text = completion.choices[0]?.message?.content || "No se pudo generar texto";
-      console.log("   [Tool] \u2705 Respuesta recibida (Tokens usados: " + completion.usage?.total_tokens + ")");
-      console.log("   [Tool] \u{1F4E6} DATA EXTRA\xCDDA:\n", text);
-      return {
-        formattedText: text
-      };
-    } catch (error) {
-      console.error("   [Tool] \u274C Error Nativo OpenAI:", error.message);
-      if (error.status === 429) {
-        throw new Error("rate_limit_exceeded");
-      }
-      throw error;
-    }
-  }
-});
-
-"use strict";
-const realEstateCleaningAgent = new Agent({
-  id: "real-estate-cleaning-agent",
-  name: "Real Estate Cleaning Agent",
-  tools: { realEstatePropertyFormatterTool },
-  instructions: `
-    Eres un experto en procesamiento de datos inmobiliarios. 
-    Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
-    Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
-    No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
-    El tono debe ser profesional y persuasivo, destacando los beneficios.
-
-    Interpretar:
-    - Requisitos.
-    - Informaci\xF3n de mascotas (solo si est\xE1 expl\xEDcita).
-
-    Reglas:
-    - Si no hay info de mascotas, no mencionarlas.
-    - Si no hay requisitos: "Los requisitos son: garant\xEDa propietaria o seguro de cauci\xF3n, recibos que tripliquen el alquiler, mes de adelanto, dep\xF3sito y gastos de informes."
-    - No decir "en el aviso no figura".
-  `,
-  model: "openai/gpt-4.1-mini"
-});
-
-"use strict";
-const sleep = async (seconds) => {
-  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
-};
-
-"use strict";
-const propertyDataProcessorTool = createTool({
-  id: "property-data-processor",
-  description: "Procesa los datos crudos de una propiedad (JSON) y extrae caracteristicas, requisitos, localidad y direcci\xF3n.",
-  inputSchema: z.object({
-    rawData: z.array(z.any())
-    // Recibe el array de objetos que retorna el scraper
-  }),
-  outputSchema: z.object({
-    keywords: z.string().optional(),
-    text: z.string().optional(),
-    addressLocality: z.string().optional(),
-    streetAddress: z.string().optional(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""])
-  }),
-  execute: async ({ rawData }) => {
-    const dataItem = rawData[0];
-    if (!dataItem) {
-      return { operacionTipo: "" };
-    }
-    const metadata = dataItem.metadata || {};
-    const keywords = metadata.keywords;
-    const text = dataItem.text || dataItem.markdown || metadata.text || "";
-    let addressLocality;
-    let streetAddress;
-    let operacionTipo = "";
-    if (metadata.jsonLd && Array.isArray(metadata.jsonLd)) {
-      const itemWithAddress = metadata.jsonLd.find((item) => item?.address);
-      if (itemWithAddress && itemWithAddress.address) {
-        addressLocality = itemWithAddress.address.addressLocality;
-        streetAddress = itemWithAddress.address.streetAddress;
-      }
-    }
-    const detectOperation = (content = "") => {
-      const upper = content.toUpperCase();
-      if (upper.includes("ALQUILAR") || upper.includes("ALQUILER") || upper.includes("ALQUILA")) return "ALQUILAR";
-      if (upper.includes("VENDER") || upper.includes("VENTA") || upper.includes("VENDE")) return "VENDER";
-      return "";
-    };
-    if (keywords) {
-      operacionTipo = detectOperation(keywords);
-    }
-    if (!operacionTipo && metadata.title) {
-      operacionTipo = detectOperation(metadata.title);
-    }
-    if (!operacionTipo && text) {
-      operacionTipo = detectOperation(text.substring(0, 500));
-    }
-    return {
-      keywords,
-      addressLocality,
-      streetAddress,
-      operacionTipo,
-      text
-    };
-  }
-});
-
-"use strict";
-const scrapeStep = createStep({
-  id: "scrapeStep",
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    success: z.boolean(),
-    data: z.any()
-  }),
-  execute: async ({ inputData }) => {
-    await sleep(1);
-    const result = await apifyScraperTool.execute(
-      { url: inputData.url }
-    );
-    if (!("data" in result)) {
-      throw new Error("Scraping failed");
-    }
-    return {
-      success: true,
-      data: result.data || []
-    };
-  }
-});
-const extratDataFromScrapperTool = createStep({
-  id: "extratDataFromScrapperTool",
-  inputSchema: z.object({
-    data: z.any()
-  }),
-  outputSchema: z.object({
-    address: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    keywords: z.string(),
-    text: z.string()
-  }),
-  maxRetries: 2,
-  retryDelay: 2500,
-  execute: async ({ inputData, mastra }) => {
-    try {
-      const result = await propertyDataProcessorTool.execute(
-        { rawData: inputData.data },
-        { mastra }
-      );
-      if (!("operacionTipo" in result)) {
-        throw new Error("Validation failed in propertyDataProcessorTool");
-      }
-      console.log(">>> INICIO: PASO 2 (Formato)");
-      return {
-        address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
-        operacionTipo: result.operacionTipo,
-        // Guaranteed by the check above
-        keywords: result.keywords || "",
-        text: result.text || ""
-      };
-    } catch (error) {
-      if (error.message.includes("rate_limit_exceeded") || error.statusCode === 429) {
-        console.warn("\u26A0\uFE0F Rate limit detectado. Reintentando paso...");
-      }
-      throw error;
-    }
-  }
-});
-const cleanDataStep = createStep({
-  id: "cleanDataStep",
-  inputSchema: z.object({
-    keywords: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string(),
-    text: z.string()
-  }),
-  outputSchema: z.object({
-    formattedText: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
-  }),
-  execute: async ({ inputData }) => {
-    const result = await realEstatePropertyFormatterTool.execute({
-      keywordsZonaProp: inputData.text
-    });
-    return {
-      formattedText: result.formattedText || inputData.text,
-      // Fallback si falla
-      operacionTipo: inputData.operacionTipo,
-      address: inputData.address
-    };
-  }
-});
-const logicStep = createStep({
-  id: "logicStep",
-  inputSchema: z.object({
-    address: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    formattedText: z.string()
-  }),
-  outputSchema: z.object({
-    minimalDescription: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
-  }),
-  execute: async ({ inputData }) => {
-    return {
-      minimalDescription: inputData.formattedText,
-      operacionTipo: inputData.operacionTipo,
-      address: inputData.address
-    };
-  }
-});
-const propertyWorkflow = createWorkflow({
-  id: "property-intelligence-pipeline",
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    minimalDescription: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
-  })
-}).then(scrapeStep).then(extratDataFromScrapperTool).then(cleanDataStep).then(logicStep).commit();
-
-"use strict";
 await storage.init();
 const realEstateAgent = await getRealEstateAgent("");
-const rentalAgent = await getRealEstateAgent("test-user", "", "ALQUILAR");
-const salesAgent = await getRealEstateAgent("test-user", "", "VENDER");
+const dynamicInstructions = "Eres un experto administrador de bienes ra\xEDces que puede agendar citas con clientes para ver propiedades. Cuando el cliente solicita una visita ejecuta la herramienta get_available_slots, luego cuando el cliente confirma la fecha y hora de la visita ejecuta la herramienta create_calendar_event";
+const alquiler = await getRealEstateAgent("test-user", dynamicInstructions, "ALQUILAR");
 const activeProcessing = /* @__PURE__ */ new Set();
 const sessionOperationMap = /* @__PURE__ */ new Map();
 const sessionLinkMap = /* @__PURE__ */ new Map();
@@ -1142,16 +1305,7 @@ const mastra = new Mastra({
     vectorStore
   },
   agents: {
-    realEstateAgent,
-    realEstateCleaningAgent,
-    rentalAgent,
-    salesAgent
-  },
-  tools: {
-    realEstatePropertyFormatterTool
-  },
-  workflows: {
-    propertyWorkflow
+    alquiler
   }
 });
 

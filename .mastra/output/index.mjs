@@ -1,5 +1,7 @@
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/evals/scoreTraces';
 import { Mastra } from '@mastra/core';
+import { registerApiRoute, MastraServerBase } from '@mastra/core/server';
+import axios from 'axios';
 import { Agent, isSupportedLanguageModel, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList } from '@mastra/core/agent';
 import { Memory as Memory$1 } from '@mastra/memory';
 import { openai as openai$1 } from '@ai-sdk/openai';
@@ -7,18 +9,23 @@ import { PgVector, PostgresStore } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
 import { generateText } from 'ai';
-import { createCalendarEvent, getAvailableSlots } from './tools/7502800f-064d-468c-ab15-2e9b5305aa9c.mjs';
-import { potentialSaleEmailTool } from './tools/36f923ca-b834-4f16-a873-2611aaaa61d5.mjs';
+import { deleteCalendarEvent, updateCalendarEvent, findEventByNaturalDate, createCalendarEvent, getAvailableSlots } from './tools/44ed5c04-2b85-40bd-b626-19e2769176fb.mjs';
+import { potentialSaleEmailTool } from './tools/12d110da-3457-404e-9878-5337bdb2f8eb.mjs';
+import { realEstatePropertyFormatterTool } from './tools/f76cb2c8-9443-46df-8084-88d3735ebd55.mjs';
+import { createWorkflow, createStep } from '@mastra/core/workflows';
+import z$1, { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
+import { apifyScraperTool } from './tools/cb8d3990-837f-4e4d-9156-d9620369b405.mjs';
+import { propertyDataProcessorTool } from './tools/1cf53194-0286-4130-93e0-14e3ed619d92.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
+import { fileURLToPath } from 'url';
 import { createServer } from 'http';
 import { Http2ServerRequest } from 'http2';
 import { Readable, Writable } from 'stream';
 import crypto$1 from 'crypto';
 import { readFileSync, existsSync, createReadStream, lstatSync } from 'fs';
 import { isVercelTool, createTool, Tool } from '@mastra/core/tools';
-import z, { z as z$1, ZodOptional, ZodNullable, ZodArray, ZodRecord, ZodObject, ZodFirstPartyTypeKind } from 'zod';
 import { zodToJsonSchema as zodToJsonSchema$1 } from '@mastra/core/utils/zod-to-json';
 import { MastraError, ErrorDomain, ErrorCategory } from '@mastra/core/error';
 import { generateEmptyFromSchema } from '@mastra/core/utils';
@@ -35,18 +42,20 @@ import { createRequire } from 'module';
 import util, { promisify } from 'util';
 import { ModelRouterLanguageModel, PROVIDER_REGISTRY } from '@mastra/core/llm';
 import { tmpdir } from 'os';
-import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { RequestContext } from '@mastra/core/request-context';
-import { MastraServerBase } from '@mastra/core/server';
 import { Buffer as Buffer$1 } from 'buffer';
 import { tools } from './tools.mjs';
 import 'googleapis';
+import 'chrono-node';
+import 'date-fns';
+import './tools/b6cc3e52-d044-4cc8-80db-19229c5cf201.mjs';
+import 'openai';
 
 const connectionString = process.env.SUPABASE_POSTGRES_URL;
 if (!connectionString) {
   throw new Error("\u274C SUPABASE_POSTGRES_URL missing");
 }
-new Pool({
+const pool = new Pool({
   connectionString,
   max: 10,
   // Límite conservador para dejar espacio a las instancias de Mastra
@@ -63,6 +72,92 @@ const vectorStore = new PgVector({
   columnName: "embedding",
   dims: 1536
 });
+class ThreadContextService {
+  static async getContext(threadId) {
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT metadata FROM mastra_threads WHERE id = $1`,
+        [threadId]
+      );
+      return res.rows[0]?.metadata || {};
+    } catch (err) {
+      console.error("\u{1F525} Error DB GetContext:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async updateContext(threadId, resourceId, newClientData) {
+    if (!newClientData || Object.keys(newClientData).length === 0) {
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const jsonString = JSON.stringify(newClientData);
+      const query = `
+        INSERT INTO mastra_threads (id, "resourceId", title, metadata, "createdAt", "updatedAt")
+        VALUES ($1, $2, 'Nueva Conversaci\xF3n', $3::jsonb, NOW(), NOW())
+        ON CONFLICT (id) 
+        DO UPDATE SET 
+          metadata = COALESCE(mastra_threads.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+          "updatedAt" = NOW()
+          -- Nota: No tocamos el title en el update para no borrar res\xFAmenes previos
+        RETURNING metadata; 
+      `;
+      await client.query(query, [threadId, resourceId, jsonString]);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] ERROR CR\xCDTICO AL GUARDAR:", err);
+    } finally {
+      client.release();
+    }
+  }
+  static async getResourceProfile(resourceId) {
+    if (!resourceId) return {};
+    const client = await pool.connect();
+    try {
+      const res = await client.query(
+        `SELECT "workingMemory" FROM mastra_resources WHERE id = $1 LIMIT 1`,
+        [resourceId]
+      );
+      const rawText = res.rows[0]?.workingMemory || "";
+      if (!rawText) return {};
+      const extract = (key) => {
+        const regex = new RegExp(`- \\*\\*${key}\\*\\*:\\s*(.*)`, "i");
+        const match = rawText.match(regex);
+        return match && match[1].trim() ? match[1].trim() : void 0;
+      };
+      return {
+        // Asegúrate que estas keys coincidan con tu Template de Mastra
+        nombre: extract("First Name") || extract("Name"),
+        // Fallback por si acaso
+        apellido: extract("Last Name"),
+        email: extract("Email"),
+        telefono: extract("Phone") || extract("Tel\xE9fono")
+      };
+    } catch (err) {
+      console.error("\u{1F525} Error leyendo Mastra Resources:", err);
+      return {};
+    } finally {
+      client.release();
+    }
+  }
+  static async clearThreadMessages(threadId) {
+    const client = await pool.connect();
+    try {
+      console.log(`\u{1F9F9} [Storage] Limpiando historial para thread: ${threadId}`);
+      await client.query(
+        `DELETE FROM mastra_messages WHERE "thread_id" = $1`,
+        [threadId]
+      );
+      console.log(`\u2705 [Storage] Historial eliminado exitosamente.`);
+    } catch (err) {
+      console.error("\u{1F525} [Storage] Error al limpiar mensajes:", err);
+    } finally {
+      client.release();
+    }
+  }
+}
 
 class WhatsAppStyleProcessor {
   id = "whatsapp-style-processor";
@@ -158,7 +253,8 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     }
   });
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
-  const selectedTools = operacionTipo === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent } : operacionTipo === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  const op = (operacionTipo || "").trim().toUpperCase();
+  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
   console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
@@ -198,18 +294,528 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   });
 };
 
+const realEstateCleaningAgent = new Agent({
+  id: "real-estate-cleaning-agent",
+  name: "Real Estate Cleaning Agent",
+  tools: { realEstatePropertyFormatterTool },
+  instructions: `
+    Eres un experto en procesamiento de datos inmobiliarios. 
+    Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
+    Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
+    No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
+    El tono debe ser profesional y persuasivo, destacando los beneficios.
+
+    Interpretar:
+    - Requisitos.
+    - Informaci\xF3n de mascotas (solo si est\xE1 expl\xEDcita).
+
+    Reglas:
+    - Si no hay info de mascotas, no mencionarlas.
+    - Si no hay requisitos: "Los requisitos son: garant\xEDa propietaria o seguro de cauci\xF3n, recibos que tripliquen el alquiler, mes de adelanto, dep\xF3sito y gastos de informes."
+    - No decir "en el aviso no figura".
+  `,
+  model: "openai/gpt-4.1-mini"
+});
+
+const dynamicInstructions = (datos, op) => {
+  const ahora = new Intl.DateTimeFormat("es-AR", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    hour: "numeric",
+    hour12: false
+  }).format(/* @__PURE__ */ new Date());
+  const hora = parseInt(ahora);
+  let momentoDia = "";
+  if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
+  else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
+  else momentoDia = "\xA1Buenas noches!";
+  const hasName = !!(datos.nombre && datos.nombre !== "Preguntar");
+  const hasLink = !!datos.link;
+  const opType = (op || "INDEFINIDO").trim().toUpperCase();
+  let saludoSugerido = "";
+  if (hasLink && !hasName) {
+    saludoSugerido = momentoDia + " C\xF3mo est\xE1s? Nico te saluda, lo reviso y te digo... \xBFMe dec\xEDs tu nombre y apellido as\xED te agendo bien?";
+  } else if (!hasLink && !hasName) {
+    saludoSugerido = momentoDia + " C\xF3mo est\xE1s? Nico te saluda \u{1F44B} \xBFMe podr\xEDas decir tu nombre y apellido as\xED te agendo bien?";
+  } else if (hasName && !hasLink) {
+    saludoSugerido = momentoDia + ` ${datos.nombre}, para ayudarte mejor, entr\xE1 en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
+  }
+  let operationalProtocol = "";
+  if (opType === "ALQUILAR") {
+    operationalProtocol = `
+III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
+1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
+Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
+
+Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
+
+Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
+
+2. FASE DE CALIFICACI\xD3N (REQUISITOS DE ALQUILER)
+Una vez obtenido el nombre, antes de ofrecer visitas, DEBES filtrar al interesado:
+
+Prioridad M\xE1xima: Lee la "Informaci\xF3n Propiedad" en el Contexto.
+
+Acci\xF3n: Resume los requisitos (ej: garant\xEDa propietaria, recibos de sueldo, meses de dep\xF3sito).
+
+Pregunta de Cierre: "la propiedad est\xE1 disponible. los requisitos son [INSERTAR REQUISITOS]. \xBFquer\xE9s coordinar una visita?"
+
+IV \u{1F3E0} PROTOCOLO DE ALQUILER
+1. Si el usuario confirma que quiere verla, activa el flujo de agenda.
+
+2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **get_available_slots** 
+   - NO asumas horarios.
+3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+
+
+V. EJEMPLOS DE \xC9XITO (FEW-SHOT PARA ALQUILER)
+
+Estos ejemplos muestran c\xF3mo debes pensar y responder. Nota c\xF3mo el agente verifica requisitos antes de agendar.
+
+### EJEMPLO 1: Flujo Ideal (Diego)
+
+User: "Hola, vi este depto: https://zonaprop..."
+Pensamiento: El usuario quiere alquilar. No tengo su nombre. Debo aplicar protocolo de BLOQUEO.
+Nico: \xA1buenas tardes! nico te saluda, lo reviso y te digo... \xBFme dec\xEDs tu nombre y apellido as\xED te agendo bien?
+
+User: "Diego Barrueta"
+Pensamiento: Tengo nombre. Fase de Calificaci\xF3n: Debo mencionar requisitos (Garant\xEDa y Recibos) antes de ofrecer visita.
+Nico: genial diego! ya te agend\xE9. la propiedad es un 4 ambientes hermoso. el alquiler es de $950.000. piden garant\xEDa propietaria y recibos de sueldo. \xBFcont\xE1s con eso? si es as\xED, \xBFquer\xE9s coordinar una visita?
+
+User: "S\xED, quiero ir a verla"
+Pensamiento: El usuario cumple requisitos. Debo consultar disponibilidad usando la herramienta 'get_available_slots'.
+[SISTEMA: El agente llama a get_available_slots y recibe: "Martes a las 11:00, Jueves a las 16:30"]
+Nico: genial diego! Tengo los siguientes horarios disponibles para la visita:
+
+Jueves 22:
+
+12:30 
+13:30 
+16:30 
+Viernes 23:
+
+10:00 
+11:00 
+\xBFAlguno de estos horarios te viene bien?
+
+User: "El Jueves a las 16:30 me va bien"
+Pensamiento: Usuario confirma horario. Debo agendar usando 'create_calendar_event'.
+Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email para mandarte el recordatorio?
+User: dale, diego@diego.com
+Nico: genial diego! gracias!
+ `;
+  } else if (opType === "VENDER") {
+    operationalProtocol = `
+III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
+
+## 1. Regla de Oro: Identificaci\xF3n
+- **BLOQUEO CR\xCDTICO**: Si el nombre del lead es "Desconocido", NO proporciones horarios, NO confirmes visitas y NO ejecutes ninguna herramienta de email. 
+- **Acci\xF3n**: Pide el nombre de forma amable pero firme antes de seguir.
+- **Acci\xF3n**: Estrictamente luego de obtener el nombre, p\xEDdele si quiere ver la propiedad.
+
+## 2. Detecci\xF3n de Intenci\xF3n de Visita
+Si el usuario confirma que quiere ver la propiedad, coordinar una cita o avanzar (ej: "quiero ir", "me interesa verla", "pasame horarios"):
+
+### PASO A: Ejecuci\xF3n de Herramienta (Prioridad Absoluta)
+- Debes invocar la herramienta /potential_sale_email/ inmediatamente. 
+- Pasa los datos del lead y el link de la propiedad como argumentos.
+
+### PASO B: Confirmaci\xF3n al Usuario
+- SOLO despu\xE9s de ejecutar la herramienta, responde: "dale, ya le mand\xE9 tus datos al equipo de ventas para que te contacten y coordinen la visita. \xBFalguna otra duda?"
+
+# IV. RESTRICCIONES DE SEGURIDAD
+- NO utilices /get_available_slots/.
+- Si preguntan por datos de terceros, di: "No tengo acceso a esa informaci\xF3n."
+- Si preguntan "\xBFqu\xE9 sab\xE9s de m\xED?", responde solo con los datos de la secci\xF3n II.
+
+# V. EJEMPLOS DE \xC9XITO (FEW-SHOT)
+
+ `;
+  }
+  return `
+# I. IDENTIDAD & ROL
+Eres NICO, asistente de IA de Fausti Propiedades. Inmobiliaria de Lomas de Zamora, buenos Aires, Argentina.
+
+## \u{1F4F1} ESTILO DE COMUNICACI\xD3N (WHATSAPP MODE)
+Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
+- **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
+- **TONO**: Calido, Profesional, Casual, emp\xE1tico, directo ("vos", "dale", "genial").
+- **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
+- **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
+- **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
+
+## Reglas Operativas
+- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
+- **Privacidad**:
+  1. TERCEROS: JAM\xC1S reveles datos de otros.
+  2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
+  3. Si te piden informaci\xF3n que no corresponde revelar, respond\xE9: "No tengo acceso a esa informaci\xF3n."
+
+# II. CONTEXTO ACTUAL DEL LEAD
+- **Nombre**: ${datos.nombre || "Desconocido"}
+- **Apellido**: ${datos.apellido || "Desconocido"}
+- **Email**: ${datos.email || "Pendiente"}
+- **Tel\xE9fono**: ${datos.telefono || "Pendiente"}
+- **Link Propiedad**: ${datos.link || "Pendiente"}
+- **Operaci\xF3n**: ${opType}
+- **Domicilio Propiedad**: ${datos.propertyAddress || "Pendiente"}
+- **Informaci\xF3n Propiedad**: ${datos.propiedadInfo || "Pendiente"} 
+
+${operationalProtocol}
+
+# SALUDO INICIAL (Solo si es el primer mensaje):
+"${saludoSugerido}"
+
+- Fecha actual: ${(/* @__PURE__ */ new Date()).toLocaleDateString("es-AR")}
+`;
+};
+
+const sleep = async (seconds) => {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+};
+
+const scrapeStep = createStep({
+  id: "scrapeStep",
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    data: z.any()
+  }),
+  execute: async ({ inputData }) => {
+    await sleep(1);
+    const result = await apifyScraperTool.execute(
+      { url: inputData.url }
+    );
+    if (!("data" in result)) {
+      throw new Error("Scraping failed");
+    }
+    return {
+      success: true,
+      data: result.data || []
+    };
+  }
+});
+const extratDataFromScrapperTool = createStep({
+  id: "extratDataFromScrapperTool",
+  inputSchema: z.object({
+    data: z.any()
+  }),
+  outputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    keywords: z.string(),
+    text: z.string()
+  }),
+  maxRetries: 2,
+  retryDelay: 2500,
+  execute: async ({ inputData, mastra }) => {
+    try {
+      const result = await propertyDataProcessorTool.execute(
+        { rawData: inputData.data },
+        { mastra }
+      );
+      if (!("operacionTipo" in result)) {
+        throw new Error("Validation failed in propertyDataProcessorTool");
+      }
+      console.log(">>> INICIO: PASO 2 (Formato)");
+      return {
+        address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
+        operacionTipo: result.operacionTipo,
+        // Guaranteed by the check above
+        keywords: result.keywords || "",
+        text: result.text || ""
+      };
+    } catch (error) {
+      if (error.message.includes("rate_limit_exceeded") || error.statusCode === 429) {
+        console.warn("\u26A0\uFE0F Rate limit detectado. Reintentando paso...");
+      }
+      throw error;
+    }
+  }
+});
+const cleanDataStep = createStep({
+  id: "cleanDataStep",
+  inputSchema: z.object({
+    keywords: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string(),
+    text: z.string()
+  }),
+  outputSchema: z.object({
+    formattedText: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    const result = await realEstatePropertyFormatterTool.execute({
+      keywordsZonaProp: inputData.text
+    });
+    return {
+      formattedText: result.formattedText || inputData.text,
+      // Fallback si falla
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const logicStep = createStep({
+  id: "logicStep",
+  inputSchema: z.object({
+    address: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    formattedText: z.string()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  }),
+  execute: async ({ inputData }) => {
+    return {
+      minimalDescription: inputData.formattedText,
+      operacionTipo: inputData.operacionTipo,
+      address: inputData.address
+    };
+  }
+});
+const propertyWorkflow = createWorkflow({
+  id: "property-intelligence-pipeline",
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    minimalDescription: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string()
+  })
+}).then(scrapeStep).then(extratDataFromScrapperTool).then(cleanDataStep).then(logicStep).commit();
+
 await storage.init();
-await getRealEstateAgent();
-const venta = await getRealEstateAgent("test-user", "", "VENDER");
+const realEstateAgent = await getRealEstateAgent();
+const activeProcessing = /* @__PURE__ */ new Set();
+const sessionOperationMap = /* @__PURE__ */ new Map();
+const sessionLinkMap = /* @__PURE__ */ new Map();
+const sessionPropiedadInfoMap = /* @__PURE__ */ new Map();
 const mastra = new Mastra({
   storage,
   vectors: {
     vectorStore
   },
   agents: {
-    venta
+    realEstateAgent,
+    realEstateCleaningAgent
+  },
+  tools: {
+    realEstatePropertyFormatterTool
+  },
+  workflows: {
+    propertyWorkflow
+  },
+  server: {
+    port: 4111,
+    apiRoutes: [registerApiRoute("/chat", {
+      method: "POST",
+      handler: async (c) => {
+        try {
+          const body = await c.req.json();
+          let message = body.custom_fields.endResponse;
+          let whatsappPhone = body.whatsapp_phone;
+          let threadId = body.id;
+          let userId = body.id;
+          let clientData = {};
+          if (whatsappPhone) {
+            clientData.telefono = whatsappPhone;
+          }
+          console.log("\n\u{1F525}\u{1F525}\u{1F525} INICIO DEL REQUEST \u{1F525}\u{1F525}\u{1F525}");
+          if (!threadId && !userId) {
+            return c.json({
+              error: "Either ThreadID or UserID is required"
+            }, 400);
+          }
+          const currentThreadId = threadId || `chat_${userId}`;
+          const urlRegex = /(https?:\/\/[^\s]+)/g;
+          const linksEncontrados = message?.match(urlRegex);
+          const requestHash = `${userId || "anon"}_${message?.substring(0, 50)}`;
+          if (activeProcessing.has(requestHash)) {
+            console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
+            return c.json({
+              status: "ignored_duplicate"
+            });
+          }
+          activeProcessing.add(requestHash);
+          setTimeout(() => activeProcessing.delete(requestHash), 15e3);
+          let ackResponse = void 0;
+          if (userId && body.custom_fields) {
+            console.log("\u26A1 Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
+            ackResponse = c.json({
+              response_text: "",
+              // Texto vacío para que Manychat no muestre nada y espere el Push
+              status: "processing"
+            });
+          }
+          (async () => {
+            try {
+              let finalContextData = {};
+              finalContextData.telefono = whatsappPhone;
+              let propertyOperationType = sessionOperationMap.get(currentThreadId) || "";
+              finalContextData.operacionTipo = propertyOperationType;
+              try {
+                if (clientData && Object.keys(clientData).length > 0) {
+                  const validResourceId = userId || "anonymous_user";
+                  await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+                }
+                const dbContext = await ThreadContextService.getContext(threadId);
+                const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+                finalContextData = {
+                  ...mastraProfile,
+                  // 1. Base (Mastra)
+                  ...dbContext,
+                  // 2. Contexto Thread
+                  ...clientData || {}
+                  // 3. Override actual
+                };
+                if (!propertyOperationType && finalContextData.operacionTipo) {
+                  propertyOperationType = finalContextData.operacionTipo;
+                  sessionOperationMap.set(currentThreadId, propertyOperationType);
+                }
+              } catch (err) {
+                console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
+                finalContextData = clientData || {};
+              }
+              if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
+                finalContextData.link = sessionLinkMap.get(currentThreadId);
+              } else if (finalContextData.link && !sessionLinkMap.has(currentThreadId)) {
+                sessionLinkMap.set(currentThreadId, finalContextData.link);
+              }
+              if (!finalContextData.propiedadInfo && sessionPropiedadInfoMap.has(currentThreadId)) {
+                finalContextData.propiedadInfo = sessionPropiedadInfoMap.get(currentThreadId);
+              } else if (finalContextData.propiedadInfo && !sessionPropiedadInfoMap.has(currentThreadId)) {
+                sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
+              }
+              if (linksEncontrados && linksEncontrados.length > 0) {
+                const url = linksEncontrados[0].trim();
+                finalContextData.link = url;
+                sessionLinkMap.set(currentThreadId, url);
+                if (currentThreadId) {
+                  await ThreadContextService.clearThreadMessages(currentThreadId);
+                }
+                try {
+                  const workflow = mastra.getWorkflow("propertyWorkflow");
+                  const run = await workflow.createRun();
+                  const result = await run.start({
+                    inputData: {
+                      url
+                    }
+                  });
+                  if (result.status !== "success") {
+                    console.error(`\u274C Workflow failed: ${result.status}`);
+                  } else if (result.result) {
+                    const outputLogica = result.result;
+                    console.log("\u{1F4E6} Output Workflow recibido", outputLogica);
+                    if (outputLogica.operacionTipo) {
+                      propertyOperationType = outputLogica.operacionTipo;
+                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      finalContextData.propertyAddress = outputLogica.address;
+                      finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripci\xF3n disponible";
+                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      sessionOperationMap.set(currentThreadId, propertyOperationType);
+                      sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
+                      const validResourceId = userId || "anonymous_user";
+                      await ThreadContextService.updateContext(threadId, validResourceId, {
+                        operacionTipo: propertyOperationType,
+                        propiedadInfo: finalContextData.propiedadInfo,
+                        link: url
+                      });
+                    }
+                  }
+                } catch (workflowErr) {
+                  console.error("\u274C Workflow error:", workflowErr);
+                }
+              }
+              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
+              const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
+              const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
+              const response = await agent.generate(message, {
+                threadId: currentThreadId,
+                resourceId: userId
+              });
+              if (response.toolResults && response.toolResults.length > 0) {
+                response.toolResults.forEach((toolRes) => {
+                  if (toolRes.status === "error" || toolRes.error) {
+                    console.error(`\u274C [ERROR CR\xCDTICO POST-EXEC] Tool '${toolRes.toolName}' fall\xF3:`);
+                    console.error(`   Motivo:`, JSON.stringify(toolRes.error || toolRes.result, null, 2));
+                  }
+                });
+              }
+              if (userId && body.custom_fields) {
+                const parts = response.text.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+                for (const part of parts) {
+                  await sendToManychat(userId, part);
+                  if (parts.length > 1) {
+                    const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
+                    await sleep(randomDelay);
+                  }
+                }
+              } else {
+                console.log("\u2139\uFE0F Respuesta generada (modo background), pero cliente no es Manychat/Async.");
+              }
+            } catch (bgError) {
+              console.error("\u{1F4A5} Error en proceso background:", bgError);
+              if (userId && body.custom_fields) {
+                await sendToManychat(userId, "Lo siento, tuve un error t\xE9cnico analizando esa informaci\xF3n.");
+              }
+            } finally {
+            }
+          })();
+          if (ackResponse) {
+            return ackResponse;
+          }
+          return c.json({
+            status: "started_background_job"
+          });
+        } catch (error) {
+          console.error("\u{1F4A5} Error general en el handler:", error);
+          return c.json({
+            error: "Internal Server Error"
+          }, 500);
+        }
+      }
+    })]
   }
 });
+async function sendToManychat(subscriberId, text) {
+  const apiKey = "3448431:145f772cd4441c32e7a20cfc6d4868f6";
+  const headers = {
+    "Authorization": `Bearer ${apiKey}`,
+    "Content-Type": "application/json"
+  };
+  try {
+    console.log(`1\uFE0F\u20E3 [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
+    const setFieldRes = await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
+      subscriber_id: Number(subscriberId),
+      // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
+      fields: [{
+        field_name: "response1",
+        field_value: text
+      }]
+    }, {
+      headers
+    });
+    console.log("\u2705 Custom Field Set:", setFieldRes.data);
+    console.log(`2\uFE0F\u20E3 [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
+    await sleep(2);
+    const sendFlowRes = await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
+      subscriber_id: Number(subscriberId),
+      flow_ns: "content20250919131239_298410"
+    }, {
+      headers
+    });
+    console.log("\u2705 Flow Sent:", sendFlowRes.data);
+  } catch (err) {
+    console.error("\u274C Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
+  }
+}
 
 function normalizeStudioBase(studioBase) {
   if (studioBase.includes("..") || studioBase.includes("?") || studioBase.includes("#")) {
@@ -504,73 +1110,73 @@ function handleError$1(error, defaultMessage) {
 }
 
 // src/server/schemas/common.ts
-var runIdSchema = z.object({
-  runId: z.string().describe("Unique identifier for the run")
+var runIdSchema = z$1.object({
+  runId: z$1.string().describe("Unique identifier for the run")
 });
-var optionalRunIdSchema = z.object({
-  runId: z.string().optional()
+var optionalRunIdSchema = z$1.object({
+  runId: z$1.string().optional()
 });
-var paginationInfoSchema = z.object({
-  total: z.number(),
-  page: z.number(),
-  perPage: z.union([z.number(), z.literal(false)]),
-  hasMore: z.boolean()
+var paginationInfoSchema = z$1.object({
+  total: z$1.number(),
+  page: z$1.number(),
+  perPage: z$1.union([z$1.number(), z$1.literal(false)]),
+  hasMore: z$1.boolean()
 });
 var createPagePaginationSchema = (defaultPerPage) => {
   const baseSchema = {
-    page: z.coerce.number().optional().default(0)
+    page: z$1.coerce.number().optional().default(0)
   };
   if (defaultPerPage !== void 0) {
-    return z.object({
+    return z$1.object({
       ...baseSchema,
-      perPage: z.coerce.number().optional().default(defaultPerPage)
+      perPage: z$1.coerce.number().optional().default(defaultPerPage)
     });
   } else {
-    return z.object({
+    return z$1.object({
       ...baseSchema,
-      perPage: z.coerce.number().optional()
+      perPage: z$1.coerce.number().optional()
     });
   }
 };
 var createCombinedPaginationSchema = () => {
-  return z.object({
-    page: z.coerce.number().optional(),
-    perPage: z.coerce.number().optional(),
+  return z$1.object({
+    page: z$1.coerce.number().optional(),
+    perPage: z$1.coerce.number().optional(),
     /**
      * @deprecated Use page and perPage instead
      */
-    offset: z.coerce.number().optional(),
+    offset: z$1.coerce.number().optional(),
     /**
      * @deprecated Use page and perPage instead
      */
-    limit: z.coerce.number().optional()
+    limit: z$1.coerce.number().optional()
   });
 };
-var tracingOptionsSchema = z.object({
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  requestContextKeys: z.array(z.string()).optional(),
-  traceId: z.string().optional(),
-  parentSpanId: z.string().optional()
+var tracingOptionsSchema = z$1.object({
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  requestContextKeys: z$1.array(z$1.string()).optional(),
+  traceId: z$1.string().optional(),
+  parentSpanId: z$1.string().optional()
 });
-var coreMessageSchema = z.any();
-var successResponseSchema = z.object({
-  success: z.boolean()
+var coreMessageSchema = z$1.any();
+var successResponseSchema = z$1.object({
+  success: z$1.boolean()
 });
-var messageResponseSchema = z.object({
-  message: z.string()
+var messageResponseSchema = z$1.object({
+  message: z$1.string()
 });
-z.object({
-  partial: z.string().optional()
+z$1.object({
+  partial: z$1.string().optional()
 });
-var baseLogMessageSchema = z.object({
-  level: z.enum(["debug", "info", "warn", "error", "silent"]),
-  msg: z.string(),
-  time: z.date(),
-  context: z.record(z.string(), z.unknown()).optional(),
-  runId: z.string().optional(),
-  pid: z.number(),
-  hostname: z.string(),
-  name: z.string()
+var baseLogMessageSchema = z$1.object({
+  level: z$1.enum(["debug", "info", "warn", "error", "silent"]),
+  msg: z$1.string(),
+  time: z$1.date(),
+  context: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  runId: z$1.string().optional(),
+  pid: z$1.number(),
+  hostname: z$1.string(),
+  name: z$1.string()
 });
 
 // src/server/server-adapter/openapi-utils.ts
@@ -720,39 +1326,45 @@ function pickParams(schema, params) {
   return result;
 }
 function jsonQueryParam(schema) {
-  return z$1.union([
+  return z.union([
     schema,
     // Already the expected type (non-string input)
-    z$1.string().transform((val, ctx) => {
+    z.string().transform((val, ctx) => {
       try {
         const parsed = JSON.parse(val);
         const result = schema.safeParse(parsed);
         if (!result.success) {
           for (const issue of result.error.issues) {
             ctx.addIssue({
-              code: z$1.ZodIssueCode.custom,
+              code: z.ZodIssueCode.custom,
               message: issue.message,
               path: issue.path
             });
           }
-          return z$1.NEVER;
+          return z.NEVER;
         }
         return result.data;
       } catch (e) {
         ctx.addIssue({
-          code: z$1.ZodIssueCode.custom,
+          code: z.ZodIssueCode.custom,
           message: `Invalid JSON: ${e instanceof Error ? e.message : "parse error"}`
         });
-        return z$1.NEVER;
+        return z.NEVER;
       }
     })
   ]);
 }
+function getZodTypeName(schema) {
+  return schema?._def?.typeName;
+}
 function isComplexType(schema) {
   let inner = schema;
-  if (inner instanceof ZodOptional) inner = inner.unwrap();
-  if (inner instanceof ZodNullable) inner = inner.unwrap();
-  return inner instanceof ZodArray || inner instanceof ZodRecord || inner instanceof ZodObject;
+  let typeName = getZodTypeName(inner);
+  while (typeName === "ZodOptional" || typeName === "ZodNullable") {
+    inner = inner._def.innerType;
+    typeName = getZodTypeName(inner);
+  }
+  return typeName === "ZodArray" || typeName === "ZodRecord" || typeName === "ZodObject";
 }
 function wrapSchemaForQueryParams(schema) {
   const newShape = {};
@@ -763,7 +1375,7 @@ function wrapSchemaForQueryParams(schema) {
       newShape[key] = fieldSchema;
     }
   }
-  return z$1.object(newShape);
+  return z.object(newShape);
 }
 function createRoute(config) {
   const { summary, description, tags, deprecated, ...baseRoute } = config;
@@ -786,56 +1398,56 @@ function createRoute(config) {
   };
 }
 
-var storedAgentIdPathParams = z.object({
-  storedAgentId: z.string().describe("Unique identifier for the stored agent")
+var storedAgentIdPathParams = z$1.object({
+  storedAgentId: z$1.string().describe("Unique identifier for the stored agent")
 });
-var storageOrderBySchema$1 = z.object({
-  field: z.enum(["createdAt", "updatedAt"]).optional(),
-  direction: z.enum(["ASC", "DESC"]).optional()
+var storageOrderBySchema$1 = z$1.object({
+  field: z$1.enum(["createdAt", "updatedAt"]).optional(),
+  direction: z$1.enum(["ASC", "DESC"]).optional()
 });
 var listStoredAgentsQuerySchema = createPagePaginationSchema(100).extend({
   orderBy: storageOrderBySchema$1.optional()
 });
-var scorerConfigSchema = z.object({
-  sampling: z.object({
-    type: z.enum(["ratio", "count"]),
-    rate: z.number().optional(),
-    count: z.number().optional()
+var scorerConfigSchema = z$1.object({
+  sampling: z$1.object({
+    type: z$1.enum(["ratio", "count"]),
+    rate: z$1.number().optional(),
+    count: z$1.number().optional()
   }).optional()
 });
-var storedAgentBaseSchema = z.object({
-  name: z.string().describe("Name of the agent"),
-  description: z.string().optional().describe("Description of the agent"),
-  instructions: z.string().describe("System instructions for the agent"),
-  model: z.record(z.string(), z.unknown()).describe("Model configuration (provider, name, etc.)"),
-  tools: z.array(z.string()).optional().describe("Array of tool keys to resolve from Mastra registry"),
-  defaultOptions: z.record(z.string(), z.unknown()).optional().describe("Default options for generate/stream calls"),
-  workflows: z.array(z.string()).optional().describe("Array of workflow keys to resolve from Mastra registry"),
-  agents: z.array(z.string()).optional().describe("Array of agent keys to resolve from Mastra registry"),
-  inputProcessors: z.array(z.record(z.string(), z.unknown())).optional().describe("Input processor configurations"),
-  outputProcessors: z.array(z.record(z.string(), z.unknown())).optional().describe("Output processor configurations"),
-  memory: z.string().optional().describe("Memory key to resolve from Mastra registry"),
-  scorers: z.record(z.string(), scorerConfigSchema).optional().describe("Scorer keys with optional sampling config"),
-  metadata: z.record(z.string(), z.unknown()).optional().describe("Additional metadata for the agent")
+var storedAgentBaseSchema = z$1.object({
+  name: z$1.string().describe("Name of the agent"),
+  description: z$1.string().optional().describe("Description of the agent"),
+  instructions: z$1.string().describe("System instructions for the agent"),
+  model: z$1.record(z$1.string(), z$1.unknown()).describe("Model configuration (provider, name, etc.)"),
+  tools: z$1.array(z$1.string()).optional().describe("Array of tool keys to resolve from Mastra registry"),
+  defaultOptions: z$1.record(z$1.string(), z$1.unknown()).optional().describe("Default options for generate/stream calls"),
+  workflows: z$1.array(z$1.string()).optional().describe("Array of workflow keys to resolve from Mastra registry"),
+  agents: z$1.array(z$1.string()).optional().describe("Array of agent keys to resolve from Mastra registry"),
+  inputProcessors: z$1.array(z$1.record(z$1.string(), z$1.unknown())).optional().describe("Input processor configurations"),
+  outputProcessors: z$1.array(z$1.record(z$1.string(), z$1.unknown())).optional().describe("Output processor configurations"),
+  memory: z$1.string().optional().describe("Memory key to resolve from Mastra registry"),
+  scorers: z$1.record(z$1.string(), scorerConfigSchema).optional().describe("Scorer keys with optional sampling config"),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional().describe("Additional metadata for the agent")
 });
 var createStoredAgentBodySchema = storedAgentBaseSchema.extend({
-  id: z.string().describe("Unique identifier for the agent")
+  id: z$1.string().describe("Unique identifier for the agent")
 });
 var updateStoredAgentBodySchema = storedAgentBaseSchema.partial();
 var storedAgentSchema = storedAgentBaseSchema.extend({
-  id: z.string(),
-  createdAt: z.date(),
-  updatedAt: z.date()
+  id: z$1.string(),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date()
 });
 var listStoredAgentsResponseSchema = paginationInfoSchema.extend({
-  agents: z.array(storedAgentSchema)
+  agents: z$1.array(storedAgentSchema)
 });
 var getStoredAgentResponseSchema = storedAgentSchema;
 var createStoredAgentResponseSchema = storedAgentSchema;
 var updateStoredAgentResponseSchema = storedAgentSchema;
-var deleteStoredAgentResponseSchema = z.object({
-  success: z.boolean(),
-  message: z.string()
+var deleteStoredAgentResponseSchema = z$1.object({
+  success: z$1.boolean(),
+  message: z$1.string()
 });
 
 // src/server/handlers/stored-agents.ts
@@ -1056,12 +1668,12 @@ var DELETE_STORED_AGENT_ROUTE = createRoute({
   }
 });
 
-var mastraPackageSchema = z$1.object({
-  name: z$1.string(),
-  version: z$1.string()
+var mastraPackageSchema = z.object({
+  name: z.string(),
+  version: z.string()
 });
-var systemPackagesResponseSchema = z$1.object({
-  packages: z$1.array(mastraPackageSchema)
+var systemPackagesResponseSchema = z.object({
+  packages: z.array(mastraPackageSchema)
 });
 
 // src/server/handlers/system.ts
@@ -1122,232 +1734,240 @@ function parseFilters(filters) {
   );
 }
 
-var agentIdPathParams = z.object({
-  agentId: z.string().describe("Unique identifier for the agent")
+var agentIdPathParams = z$1.object({
+  agentId: z$1.string().describe("Unique identifier for the agent")
 });
-var toolIdPathParams = z.object({
-  toolId: z.string().describe("Unique identifier for the tool")
+var toolIdPathParams = z$1.object({
+  toolId: z$1.string().describe("Unique identifier for the tool")
 });
 var agentToolPathParams = agentIdPathParams.extend({
-  toolId: z.string().describe("Unique identifier for the tool")
+  toolId: z$1.string().describe("Unique identifier for the tool")
 });
 var modelConfigIdPathParams = agentIdPathParams.extend({
-  modelConfigId: z.string().describe("Unique identifier for the model configuration")
+  modelConfigId: z$1.string().describe("Unique identifier for the model configuration")
 });
-var serializedProcessorSchema = z.object({
-  id: z.string(),
-  name: z.string().optional()
+var serializedProcessorSchema = z$1.object({
+  id: z$1.string(),
+  name: z$1.string().optional()
 });
-var serializedToolSchema = z.object({
-  id: z.string(),
-  description: z.string().optional(),
-  inputSchema: z.string().optional(),
-  outputSchema: z.string().optional(),
-  requireApproval: z.boolean().optional()
+var serializedToolSchema = z$1.object({
+  id: z$1.string(),
+  description: z$1.string().optional(),
+  inputSchema: z$1.string().optional(),
+  outputSchema: z$1.string().optional(),
+  requireApproval: z$1.boolean().optional()
 });
-var serializedWorkflowSchema = z.object({
-  name: z.string(),
-  steps: z.record(
-    z.string(),
-    z.object({
-      id: z.string(),
-      description: z.string().optional()
+var serializedWorkflowSchema = z$1.object({
+  name: z$1.string(),
+  steps: z$1.record(
+    z$1.string(),
+    z$1.object({
+      id: z$1.string(),
+      description: z$1.string().optional()
     })
   ).optional()
 });
-var serializedAgentDefinitionSchema = z.object({
-  id: z.string(),
-  name: z.string()
+var serializedAgentDefinitionSchema = z$1.object({
+  id: z$1.string(),
+  name: z$1.string()
 });
-var systemMessageSchema = z.union([
-  z.string(),
-  z.array(z.string()),
-  z.any(),
+var systemMessageSchema = z$1.union([
+  z$1.string(),
+  z$1.array(z$1.string()),
+  z$1.any(),
   // CoreSystemMessage or SystemModelMessage
-  z.array(z.any())
+  z$1.array(z$1.any())
 ]);
-var modelConfigSchema = z.object({
-  model: z.object({
-    modelId: z.string(),
-    provider: z.string(),
-    modelVersion: z.string()
+var modelConfigSchema = z$1.object({
+  model: z$1.object({
+    modelId: z$1.string(),
+    provider: z$1.string(),
+    modelVersion: z$1.string()
   })
   // Additional fields from AgentModelManagerConfig can be added here
 });
-var serializedAgentSchema = z.object({
-  name: z.string(),
-  description: z.string().optional(),
+var serializedAgentSchema = z$1.object({
+  name: z$1.string(),
+  description: z$1.string().optional(),
   instructions: systemMessageSchema.optional(),
-  tools: z.record(z.string(), serializedToolSchema),
-  agents: z.record(z.string(), serializedAgentDefinitionSchema),
-  workflows: z.record(z.string(), serializedWorkflowSchema),
-  inputProcessors: z.array(serializedProcessorSchema),
-  outputProcessors: z.array(serializedProcessorSchema),
-  provider: z.string().optional(),
-  modelId: z.string().optional(),
-  modelVersion: z.string().optional(),
-  modelList: z.array(modelConfigSchema).optional(),
-  defaultOptions: z.record(z.string(), z.any()).optional(),
-  defaultGenerateOptionsLegacy: z.record(z.string(), z.any()).optional(),
-  defaultStreamOptionsLegacy: z.record(z.string(), z.any()).optional()
+  tools: z$1.record(z$1.string(), serializedToolSchema),
+  agents: z$1.record(z$1.string(), serializedAgentDefinitionSchema),
+  workflows: z$1.record(z$1.string(), serializedWorkflowSchema),
+  inputProcessors: z$1.array(serializedProcessorSchema),
+  outputProcessors: z$1.array(serializedProcessorSchema),
+  provider: z$1.string().optional(),
+  modelId: z$1.string().optional(),
+  modelVersion: z$1.string().optional(),
+  modelList: z$1.array(modelConfigSchema).optional(),
+  defaultOptions: z$1.record(z$1.string(), z$1.any()).optional(),
+  defaultGenerateOptionsLegacy: z$1.record(z$1.string(), z$1.any()).optional(),
+  defaultStreamOptionsLegacy: z$1.record(z$1.string(), z$1.any()).optional()
 });
 serializedAgentSchema.extend({
-  id: z.string()
+  id: z$1.string()
 });
-var providerSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  label: z.string().optional(),
-  description: z.string().optional()
+var providerSchema = z$1.object({
+  id: z$1.string(),
+  name: z$1.string(),
+  label: z$1.string().optional(),
+  description: z$1.string().optional()
 });
-var providersResponseSchema = z.object({
-  providers: z.array(providerSchema)
+var providersResponseSchema = z$1.object({
+  providers: z$1.array(providerSchema)
 });
-var listAgentsResponseSchema = z.record(z.string(), serializedAgentSchema);
-var listToolsResponseSchema = z.record(z.string(), serializedToolSchema);
-var agentMemoryOptionSchema = z.object({
-  thread: z.union([z.string(), z.object({ id: z.string() }).passthrough()]),
-  resource: z.string(),
-  options: z.record(z.string(), z.any()).optional(),
-  readOnly: z.boolean().optional()
+var listAgentsResponseSchema = z$1.record(z$1.string(), serializedAgentSchema);
+var listToolsResponseSchema = z$1.record(z$1.string(), serializedToolSchema);
+var agentMemoryOptionSchema = z$1.object({
+  thread: z$1.union([z$1.string(), z$1.object({ id: z$1.string() }).passthrough()]),
+  resource: z$1.string(),
+  options: z$1.record(z$1.string(), z$1.any()).optional(),
+  readOnly: z$1.boolean().optional()
 });
-var toolChoiceSchema = z.union([
-  z.enum(["auto", "none", "required"]),
-  z.object({ type: z.literal("tool"), toolName: z.string() })
+var toolChoiceSchema = z$1.union([
+  z$1.enum(["auto", "none", "required"]),
+  z$1.object({ type: z$1.literal("tool"), toolName: z$1.string() })
 ]);
-var agentExecutionBodySchema$1 = z.object({
+var agentExecutionBodySchema$1 = z$1.object({
   // REQUIRED
-  messages: z.union([
-    z.array(coreMessageSchema),
+  messages: z$1.union([
+    z$1.array(coreMessageSchema),
     // Array of messages
-    z.string()
+    z$1.string()
     // Single user message shorthand
   ]),
   // Message Configuration
   instructions: systemMessageSchema.optional(),
   system: systemMessageSchema.optional(),
-  context: z.array(coreMessageSchema).optional(),
+  context: z$1.array(coreMessageSchema).optional(),
   // Memory & Persistence
   memory: agentMemoryOptionSchema.optional(),
-  resourceId: z.string().optional(),
-  // @deprecated
-  resourceid: z.string().optional(),
-  threadId: z.string().optional(),
-  // @deprecated
-  runId: z.string().optional(),
-  savePerStep: z.boolean().optional(),
+  runId: z$1.string().optional(),
+  savePerStep: z$1.boolean().optional(),
   // Request Context (handler-specific field - merged with server's requestContext)
-  requestContext: z.record(z.string(), z.any()).optional(),
+  requestContext: z$1.record(z$1.string(), z$1.any()).optional(),
   // Execution Control
-  maxSteps: z.number().optional(),
-  stopWhen: z.any().optional(),
+  maxSteps: z$1.number().optional(),
+  stopWhen: z$1.any().optional(),
   // Model Configuration
-  providerOptions: z.object({
-    anthropic: z.record(z.string(), z.any()).optional(),
-    google: z.record(z.string(), z.any()).optional(),
-    openai: z.record(z.string(), z.any()).optional(),
-    xai: z.record(z.string(), z.any()).optional()
+  providerOptions: z$1.object({
+    anthropic: z$1.record(z$1.string(), z$1.any()).optional(),
+    google: z$1.record(z$1.string(), z$1.any()).optional(),
+    openai: z$1.record(z$1.string(), z$1.any()).optional(),
+    xai: z$1.record(z$1.string(), z$1.any()).optional()
   }).optional(),
-  modelSettings: z.any().optional(),
+  modelSettings: z$1.any().optional(),
   // Tool Configuration
-  activeTools: z.array(z.string()).optional(),
-  toolsets: z.record(z.string(), z.any()).optional(),
-  clientTools: z.record(z.string(), z.any()).optional(),
+  activeTools: z$1.array(z$1.string()).optional(),
+  toolsets: z$1.record(z$1.string(), z$1.any()).optional(),
+  clientTools: z$1.record(z$1.string(), z$1.any()).optional(),
   toolChoice: toolChoiceSchema.optional(),
-  requireToolApproval: z.boolean().optional(),
+  requireToolApproval: z$1.boolean().optional(),
   // Evaluation
-  scorers: z.union([
-    z.record(z.string(), z.any()),
-    z.record(
-      z.string(),
-      z.object({
-        scorer: z.string(),
-        sampling: z.any().optional()
+  scorers: z$1.union([
+    z$1.record(z$1.string(), z$1.any()),
+    z$1.record(
+      z$1.string(),
+      z$1.object({
+        scorer: z$1.string(),
+        sampling: z$1.any().optional()
       })
     )
   ]).optional(),
-  returnScorerData: z.boolean().optional(),
+  returnScorerData: z$1.boolean().optional(),
   // Observability
   tracingOptions: tracingOptionsSchema.optional(),
   // Structured Output
-  output: z.any().optional(),
+  output: z$1.any().optional(),
   // Zod schema, JSON schema, or structured output object
-  structuredOutput: z.object({
-    schema: z.object({}).passthrough(),
-    model: z.union([z.string(), z.any()]).optional(),
-    instructions: z.string().optional(),
-    jsonPromptInjection: z.boolean().optional(),
-    errorStrategy: z.enum(["strict", "warn", "fallback"]).optional(),
-    fallbackValue: z.any().optional()
+  structuredOutput: z$1.object({
+    schema: z$1.object({}).passthrough(),
+    model: z$1.union([z$1.string(), z$1.any()]).optional(),
+    instructions: z$1.string().optional(),
+    jsonPromptInjection: z$1.boolean().optional(),
+    errorStrategy: z$1.enum(["strict", "warn", "fallback"]).optional(),
+    fallbackValue: z$1.any().optional()
   }).optional()
 }).passthrough();
-var executeToolDataBodySchema = z.object({
-  data: z.custom((x) => x !== void 0, { message: "data is required" })
+var agentExecutionLegacyBodySchema = agentExecutionBodySchema$1.extend({
+  resourceId: z$1.string().optional(),
+  resourceid: z$1.string().optional(),
+  // lowercase variant
+  threadId: z$1.string().optional()
+});
+var executeToolDataBodySchema = z$1.object({
+  data: z$1.custom((x) => x !== void 0, { message: "data is required" })
 });
 var executeToolBodySchema$1 = executeToolDataBodySchema.extend({
-  requestContext: z.record(z.string(), z.any()).optional()
+  requestContext: z$1.record(z$1.string(), z$1.any()).optional()
 });
 var executeToolContextBodySchema = executeToolDataBodySchema.extend({
-  requestContext: z.record(z.string(), z.any()).optional()
+  requestContext: z$1.record(z$1.string(), z$1.any()).optional()
 });
-var voiceSpeakersResponseSchema = z.array(
-  z.object({
-    voiceId: z.string()
+var voiceSpeakersResponseSchema = z$1.array(
+  z$1.object({
+    voiceId: z$1.string()
   }).passthrough()
   // Allow provider-specific fields like name, language, etc.
 );
-var toolCallActionBodySchema = z.object({
-  runId: z.string(),
-  requestContext: z.record(z.string(), z.any()).optional(),
-  toolCallId: z.string(),
-  format: z.string().optional()
+var toolCallActionBodySchema = z$1.object({
+  runId: z$1.string(),
+  requestContext: z$1.record(z$1.string(), z$1.any()).optional(),
+  toolCallId: z$1.string(),
+  format: z$1.string().optional()
+});
+var networkToolCallActionBodySchema = z$1.object({
+  runId: z$1.string(),
+  requestContext: z$1.record(z$1.string(), z$1.any()).optional(),
+  format: z$1.string().optional()
 });
 var approveToolCallBodySchema = toolCallActionBodySchema;
 var declineToolCallBodySchema = toolCallActionBodySchema;
-var toolCallResponseSchema = z.object({
-  fullStream: z.any()
+var approveNetworkToolCallBodySchema = networkToolCallActionBodySchema;
+var declineNetworkToolCallBodySchema = networkToolCallActionBodySchema;
+var toolCallResponseSchema = z$1.object({
+  fullStream: z$1.any()
   // ReadableStream
 });
-var updateAgentModelBodySchema = z.object({
-  modelId: z.string(),
-  provider: z.string()
+var updateAgentModelBodySchema = z$1.object({
+  modelId: z$1.string(),
+  provider: z$1.string()
 });
-var reorderAgentModelListBodySchema = z.object({
-  reorderedModelIds: z.array(z.string())
+var reorderAgentModelListBodySchema = z$1.object({
+  reorderedModelIds: z$1.array(z$1.string())
 });
-var updateAgentModelInModelListBodySchema = z.object({
-  model: z.object({
-    modelId: z.string(),
-    provider: z.string()
+var updateAgentModelInModelListBodySchema = z$1.object({
+  model: z$1.object({
+    modelId: z$1.string(),
+    provider: z$1.string()
   }).optional(),
-  maxRetries: z.number().optional(),
-  enabled: z.boolean().optional()
+  maxRetries: z$1.number().optional(),
+  enabled: z$1.boolean().optional()
 });
 var modelManagementResponseSchema = messageResponseSchema;
-var generateSpeechBodySchema = z.object({
-  text: z.string(),
-  speakerId: z.string().optional()
+var generateSpeechBodySchema = z$1.object({
+  text: z$1.string(),
+  speakerId: z$1.string().optional()
 });
-var transcribeSpeechBodySchema = z.object({
-  audio: z.any(),
+var transcribeSpeechBodySchema = z$1.object({
+  audio: z$1.any(),
   // Buffer
-  options: z.record(z.string(), z.any()).optional()
+  options: z$1.record(z$1.string(), z$1.any()).optional()
 });
-var transcribeSpeechResponseSchema = z.object({
-  text: z.string()
+var transcribeSpeechResponseSchema = z$1.object({
+  text: z$1.string()
 });
-var getListenerResponseSchema = z.any();
-var generateResponseSchema = z.any();
-var streamResponseSchema = z.any();
-var speakResponseSchema = z.any();
-var executeToolResponseSchema$1 = z.any();
-var enhanceInstructionsBodySchema = z.object({
-  instructions: z.string().describe("The current agent instructions to enhance"),
-  comment: z.string().describe("User comment describing how to enhance the instructions")
+var getListenerResponseSchema = z$1.any();
+var generateResponseSchema = z$1.any();
+var streamResponseSchema = z$1.any();
+var speakResponseSchema = z$1.any();
+var executeToolResponseSchema$1 = z$1.any();
+var enhanceInstructionsBodySchema = z$1.object({
+  instructions: z$1.string().describe("The current agent instructions to enhance"),
+  comment: z$1.string().describe("User comment describing how to enhance the instructions")
 });
-var enhanceInstructionsResponseSchema = z.object({
-  explanation: z.string().describe("Explanation of the changes made"),
-  new_prompt: z.string().describe("The enhanced instructions")
+var enhanceInstructionsResponseSchema = z$1.object({
+  explanation: z$1.string().describe("Explanation of the changes made"),
+  new_prompt: z$1.string().describe("The enhanced instructions")
 });
 
 // ../../node_modules/.pnpm/superjson@2.2.2/node_modules/superjson/dist/double-indexed-kv.js
@@ -2360,40 +2980,40 @@ __export(vector_exports, {
   queryVectors: () => queryVectors,
   upsertVectors: () => upsertVectors
 });
-var vectorNamePathParams = z.object({
-  vectorName: z.string().describe("Name of the vector store")
+var vectorNamePathParams = z$1.object({
+  vectorName: z$1.string().describe("Name of the vector store")
 });
 var vectorIndexPathParams = vectorNamePathParams.extend({
-  indexName: z.string().describe("Name of the index")
+  indexName: z$1.string().describe("Name of the index")
 });
-var indexBodyBaseSchema = z.object({
-  indexName: z.string()
+var indexBodyBaseSchema = z$1.object({
+  indexName: z$1.string()
 });
 var upsertVectorsBodySchema = indexBodyBaseSchema.extend({
-  vectors: z.array(z.array(z.number())),
-  metadata: z.array(z.record(z.string(), z.any())).optional(),
-  ids: z.array(z.string()).optional()
+  vectors: z$1.array(z$1.array(z$1.number())),
+  metadata: z$1.array(z$1.record(z$1.string(), z$1.any())).optional(),
+  ids: z$1.array(z$1.string()).optional()
 });
 var createIndexBodySchema = indexBodyBaseSchema.extend({
-  dimension: z.number(),
-  metric: z.enum(["cosine", "euclidean", "dotproduct"]).optional()
+  dimension: z$1.number(),
+  metric: z$1.enum(["cosine", "euclidean", "dotproduct"]).optional()
 });
 var queryVectorsBodySchema = indexBodyBaseSchema.extend({
-  queryVector: z.array(z.number()),
-  topK: z.number().optional(),
-  filter: z.record(z.string(), z.any()).optional(),
-  includeVector: z.boolean().optional()
+  queryVector: z$1.array(z$1.number()),
+  topK: z$1.number().optional(),
+  filter: z$1.record(z$1.string(), z$1.any()).optional(),
+  includeVector: z$1.boolean().optional()
 });
-var upsertVectorsResponseSchema = z.object({
-  ids: z.array(z.string())
+var upsertVectorsResponseSchema = z$1.object({
+  ids: z$1.array(z$1.string())
 });
 var createIndexResponseSchema = successResponseSchema;
-var queryVectorsResponseSchema = z.array(z.unknown());
-var listIndexesResponseSchema = z.array(z.string());
-var describeIndexResponseSchema = z.object({
-  dimension: z.number(),
-  count: z.number(),
-  metric: z.string().optional()
+var queryVectorsResponseSchema = z$1.array(z$1.unknown());
+var listIndexesResponseSchema = z$1.array(z$1.string());
+var describeIndexResponseSchema = z$1.object({
+  dimension: z$1.number(),
+  count: z$1.number(),
+  metric: z$1.string().optional()
 });
 var deleteIndexResponseSchema = successResponseSchema;
 
@@ -2854,21 +3474,21 @@ __export(logs_exports, {
   LIST_LOG_TRANSPORTS_ROUTE: () => LIST_LOG_TRANSPORTS_ROUTE
 });
 var listLogsQuerySchema = createPagePaginationSchema().extend({
-  fromDate: z.coerce.date().optional(),
-  toDate: z.coerce.date().optional(),
-  logLevel: z.enum(["debug", "info", "warn", "error", "silent"]).optional(),
-  filters: z.union([z.string(), z.array(z.string())]).optional(),
-  transportId: z.string()
+  fromDate: z$1.coerce.date().optional(),
+  toDate: z$1.coerce.date().optional(),
+  logLevel: z$1.enum(["debug", "info", "warn", "error", "silent"]).optional(),
+  filters: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
+  transportId: z$1.string()
 });
-var listLogsResponseSchema = z.object({
-  logs: z.array(baseLogMessageSchema),
-  total: z.number(),
-  page: z.number(),
-  perPage: z.union([z.number(), z.literal(false)]),
-  hasMore: z.boolean()
+var listLogsResponseSchema = z$1.object({
+  logs: z$1.array(baseLogMessageSchema),
+  total: z$1.number(),
+  page: z$1.number(),
+  perPage: z$1.union([z$1.number(), z$1.literal(false)]),
+  hasMore: z$1.boolean()
 });
-var listLogTransportsResponseSchema = z.object({
-  transports: z.array(z.string())
+var listLogTransportsResponseSchema = z$1.object({
+  transports: z$1.array(z$1.string())
 });
 
 // src/server/handlers/logs.ts
@@ -2964,67 +3584,67 @@ __export(mcp_exports, {
   MCP_SSE_MESSAGES_ROUTE: () => MCP_SSE_MESSAGES_ROUTE,
   MCP_SSE_TRANSPORT_ROUTE: () => MCP_SSE_TRANSPORT_ROUTE
 });
-var mcpServerIdPathParams = z$1.object({
-  serverId: z$1.string().describe("MCP server ID")
+var mcpServerIdPathParams = z.object({
+  serverId: z.string().describe("MCP server ID")
 });
-var mcpServerDetailPathParams = z$1.object({
-  id: z$1.string().describe("MCP server ID")
+var mcpServerDetailPathParams = z.object({
+  id: z.string().describe("MCP server ID")
 });
-var mcpServerToolPathParams = z$1.object({
-  serverId: z$1.string().describe("MCP server ID"),
-  toolId: z$1.string().describe("Tool ID")
+var mcpServerToolPathParams = z.object({
+  serverId: z.string().describe("MCP server ID"),
+  toolId: z.string().describe("Tool ID")
 });
-var executeToolBodySchema = z$1.object({
-  data: z$1.unknown().optional()
+var executeToolBodySchema = z.object({
+  data: z.unknown().optional()
 });
 var listMcpServersQuerySchema = createCombinedPaginationSchema();
-var getMcpServerDetailQuerySchema = z$1.object({
-  version: z$1.string().optional()
+var getMcpServerDetailQuerySchema = z.object({
+  version: z.string().optional()
 });
-var versionDetailSchema = z$1.object({
-  version: z$1.string(),
-  release_date: z$1.string(),
-  is_latest: z$1.boolean()
+var versionDetailSchema = z.object({
+  version: z.string(),
+  release_date: z.string(),
+  is_latest: z.boolean()
 });
-var serverInfoSchema = z$1.object({
-  id: z$1.string(),
-  name: z$1.string(),
+var serverInfoSchema = z.object({
+  id: z.string(),
+  name: z.string(),
   version_detail: versionDetailSchema
 });
-var listMcpServersResponseSchema = z$1.object({
-  servers: z$1.array(serverInfoSchema),
-  total_count: z$1.number(),
-  next: z$1.string().nullable()
+var listMcpServersResponseSchema = z.object({
+  servers: z.array(serverInfoSchema),
+  total_count: z.number(),
+  next: z.string().nullable()
 });
-var serverDetailSchema = z$1.object({
-  id: z$1.string(),
-  name: z$1.string(),
-  description: z$1.string().optional(),
+var serverDetailSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().optional(),
   version_detail: versionDetailSchema,
-  package_canonical: z$1.string().optional(),
-  packages: z$1.array(z$1.unknown()).optional(),
-  remotes: z$1.array(z$1.unknown()).optional()
+  package_canonical: z.string().optional(),
+  packages: z.array(z.unknown()).optional(),
+  remotes: z.array(z.unknown()).optional()
 });
-var mcpToolInfoSchema = z$1.object({
-  name: z$1.string(),
-  description: z$1.string().optional(),
-  inputSchema: z$1.unknown(),
-  outputSchema: z$1.unknown().optional(),
-  toolType: z$1.string().optional()
+var mcpToolInfoSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  inputSchema: z.unknown(),
+  outputSchema: z.unknown().optional(),
+  toolType: z.string().optional()
 });
-var listMcpServerToolsResponseSchema = z$1.object({
-  tools: z$1.array(mcpToolInfoSchema)
+var listMcpServerToolsResponseSchema = z.object({
+  tools: z.array(mcpToolInfoSchema)
 });
-var executeToolResponseSchema = z$1.object({
-  result: z$1.unknown()
+var executeToolResponseSchema = z.object({
+  result: z.unknown()
 });
-z$1.object({
-  jsonrpc: z$1.literal("2.0"),
-  error: z$1.object({
-    code: z$1.number(),
-    message: z$1.string()
+z.object({
+  jsonrpc: z.literal("2.0"),
+  error: z.object({
+    code: z.number(),
+    message: z.string()
   }),
-  id: z$1.null()
+  id: z.null()
 });
 
 // src/server/handlers/mcp.ts
@@ -3248,6 +3868,7 @@ var MCP_SSE_MESSAGES_ROUTE = createRoute({
 // src/server/handlers/memory.ts
 var memory_exports = {};
 __export(memory_exports, {
+  CLONE_THREAD_ROUTE: () => CLONE_THREAD_ROUTE,
   CREATE_THREAD_NETWORK_ROUTE: () => CREATE_THREAD_NETWORK_ROUTE,
   CREATE_THREAD_ROUTE: () => CREATE_THREAD_ROUTE,
   DELETE_MESSAGES_NETWORK_ROUTE: () => DELETE_MESSAGES_NETWORK_ROUTE,
@@ -3272,21 +3893,16 @@ __export(memory_exports, {
   UPDATE_WORKING_MEMORY_ROUTE: () => UPDATE_WORKING_MEMORY_ROUTE,
   getTextContent: () => getTextContent
 });
-var threadIdPathParams = z.object({
-  threadId: z.string().describe("Unique identifier for the conversation thread")
+var threadIdPathParams = z$1.object({
+  threadId: z$1.string().describe("Unique identifier for the conversation thread")
 });
-var agentIdQuerySchema = z.object({
-  agentId: z.string()
+var agentIdQuerySchema = z$1.object({
+  agentId: z$1.string()
 });
-var storageOrderBySchema = z.object({
-  field: z.enum(["createdAt", "updatedAt"]).optional(),
-  direction: z.enum(["ASC", "DESC"]).optional()
+var optionalAgentIdQuerySchema = z$1.object({
+  agentId: z$1.string().optional()
 });
-var messageOrderBySchema = z.object({
-  field: z.enum(["createdAt"]).optional(),
-  direction: z.enum(["ASC", "DESC"]).optional()
-});
-var includeSchema = z.preprocess(
+var storageOrderBySchema = z$1.preprocess(
   (val) => {
     if (typeof val === "string") {
       try {
@@ -3297,16 +3913,48 @@ var includeSchema = z.preprocess(
     }
     return val;
   },
-  z.array(
-    z.object({
-      id: z.string(),
-      threadId: z.string().optional(),
-      withPreviousMessages: z.number().optional(),
-      withNextMessages: z.number().optional()
+  z$1.object({
+    field: z$1.enum(["createdAt", "updatedAt"]).optional(),
+    direction: z$1.enum(["ASC", "DESC"]).optional()
+  }).optional()
+);
+var messageOrderBySchema = z$1.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      try {
+        return JSON.parse(val);
+      } catch {
+        return void 0;
+      }
+    }
+    return val;
+  },
+  z$1.object({
+    field: z$1.enum(["createdAt"]).optional(),
+    direction: z$1.enum(["ASC", "DESC"]).optional()
+  }).optional()
+);
+var includeSchema = z$1.preprocess(
+  (val) => {
+    if (typeof val === "string") {
+      try {
+        return JSON.parse(val);
+      } catch {
+        return void 0;
+      }
+    }
+    return val;
+  },
+  z$1.array(
+    z$1.object({
+      id: z$1.string(),
+      threadId: z$1.string().optional(),
+      withPreviousMessages: z$1.number().optional(),
+      withNextMessages: z$1.number().optional()
     })
   ).optional()
 );
-var filterSchema = z.preprocess(
+var filterSchema = z$1.preprocess(
   (val) => {
     if (typeof val === "string") {
       try {
@@ -3317,14 +3965,14 @@ var filterSchema = z.preprocess(
     }
     return val;
   },
-  z.object({
-    dateRange: z.object({
-      start: z.coerce.date().optional(),
-      end: z.coerce.date().optional()
+  z$1.object({
+    dateRange: z$1.object({
+      start: z$1.coerce.date().optional(),
+      end: z$1.coerce.date().optional()
     }).optional()
   }).optional()
 );
-var memoryConfigSchema = z.preprocess((val) => {
+var memoryConfigSchema = z$1.preprocess((val) => {
   if (typeof val === "string") {
     try {
       return JSON.parse(val);
@@ -3333,47 +3981,47 @@ var memoryConfigSchema = z.preprocess((val) => {
     }
   }
   return val;
-}, z.record(z.string(), z.unknown()).optional());
-var threadSchema = z.object({
-  id: z.string(),
-  title: z.string().optional(),
-  resourceId: z.string(),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-  metadata: z.record(z.string(), z.unknown()).optional()
+}, z$1.record(z$1.string(), z$1.unknown()).optional());
+var threadSchema = z$1.object({
+  id: z$1.string(),
+  title: z$1.string().optional(),
+  resourceId: z$1.string(),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional()
 });
-var messageSchema$1 = z.any();
+var messageSchema$1 = z$1.any();
 var getMemoryStatusQuerySchema = agentIdQuerySchema;
 var getMemoryConfigQuerySchema = agentIdQuerySchema;
 var listThreadsQuerySchema = createPagePaginationSchema(100).extend({
-  agentId: z.string(),
-  resourceId: z.string(),
-  orderBy: storageOrderBySchema.optional()
+  agentId: z$1.string().optional(),
+  resourceId: z$1.string(),
+  orderBy: storageOrderBySchema
 });
-var getThreadByIdQuerySchema = agentIdQuerySchema;
+var getThreadByIdQuerySchema = optionalAgentIdQuerySchema;
 var listMessagesQuerySchema = createPagePaginationSchema(40).extend({
-  agentId: z.string(),
-  resourceId: z.string().optional(),
-  orderBy: messageOrderBySchema.optional(),
+  agentId: z$1.string().optional(),
+  resourceId: z$1.string().optional(),
+  orderBy: messageOrderBySchema,
   include: includeSchema,
   filter: filterSchema
 });
-var getWorkingMemoryQuerySchema = z.object({
-  agentId: z.string(),
-  resourceId: z.string().optional(),
+var getWorkingMemoryQuerySchema = z$1.object({
+  agentId: z$1.string(),
+  resourceId: z$1.string().optional(),
   memoryConfig: memoryConfigSchema
 });
 var getMemoryStatusNetworkQuerySchema = agentIdQuerySchema;
 var listThreadsNetworkQuerySchema = createPagePaginationSchema(100).extend({
-  agentId: z.string(),
-  resourceId: z.string(),
-  orderBy: storageOrderBySchema.optional()
+  agentId: z$1.string().optional(),
+  resourceId: z$1.string(),
+  orderBy: storageOrderBySchema
 });
-var getThreadByIdNetworkQuerySchema = agentIdQuerySchema;
+var getThreadByIdNetworkQuerySchema = optionalAgentIdQuerySchema;
 var listMessagesNetworkQuerySchema = createPagePaginationSchema(40).extend({
-  agentId: z.string(),
-  resourceId: z.string().optional(),
-  orderBy: messageOrderBySchema.optional(),
+  agentId: z$1.string().optional(),
+  resourceId: z$1.string().optional(),
+  orderBy: messageOrderBySchema,
   include: includeSchema,
   filter: filterSchema
 });
@@ -3382,84 +4030,102 @@ var createThreadNetworkQuerySchema = agentIdQuerySchema;
 var updateThreadNetworkQuerySchema = agentIdQuerySchema;
 var deleteThreadNetworkQuerySchema = agentIdQuerySchema;
 var deleteMessagesNetworkQuerySchema = agentIdQuerySchema;
-var memoryStatusResponseSchema = z.object({
-  result: z.boolean()
+var memoryStatusResponseSchema = z$1.object({
+  result: z$1.boolean()
 });
-var memoryConfigResponseSchema = z.object({
-  config: z.object({
-    lastMessages: z.union([z.number(), z.literal(false)]).optional(),
-    semanticRecall: z.union([z.boolean(), z.any()]).optional(),
-    workingMemory: z.any().optional()
+var memoryConfigResponseSchema = z$1.object({
+  config: z$1.object({
+    lastMessages: z$1.union([z$1.number(), z$1.literal(false)]).optional(),
+    semanticRecall: z$1.union([z$1.boolean(), z$1.any()]).optional(),
+    workingMemory: z$1.any().optional()
   })
 });
 var listThreadsResponseSchema = paginationInfoSchema.extend({
-  threads: z.array(threadSchema)
+  threads: z$1.array(threadSchema)
 });
 var getThreadByIdResponseSchema = threadSchema;
-var listMessagesResponseSchema = z.object({
-  messages: z.array(messageSchema$1),
-  uiMessages: z.unknown()
+var listMessagesResponseSchema = z$1.object({
+  messages: z$1.array(messageSchema$1),
+  uiMessages: z$1.unknown()
   // Converted messages in UI format
 });
-var getWorkingMemoryResponseSchema = z.object({
-  workingMemory: z.unknown(),
+var getWorkingMemoryResponseSchema = z$1.object({
+  workingMemory: z$1.unknown(),
   // Can be string or structured object depending on template
-  source: z.enum(["thread", "resource"]),
-  workingMemoryTemplate: z.unknown(),
+  source: z$1.enum(["thread", "resource"]),
+  workingMemoryTemplate: z$1.unknown(),
   // Template structure varies
-  threadExists: z.boolean()
+  threadExists: z$1.boolean()
 });
-var saveMessagesBodySchema = z.object({
-  messages: z.array(messageSchema$1)
+var saveMessagesBodySchema = z$1.object({
+  messages: z$1.array(messageSchema$1)
 });
-var createThreadBodySchema = z.object({
-  resourceId: z.string(),
-  title: z.string().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  threadId: z.string().optional()
+var createThreadBodySchema = z$1.object({
+  resourceId: z$1.string(),
+  title: z$1.string().optional(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  threadId: z$1.string().optional()
 });
-var updateThreadBodySchema = z.object({
-  title: z.string().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
-  resourceId: z.string().optional()
+var updateThreadBodySchema = z$1.object({
+  title: z$1.string().optional(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  resourceId: z$1.string().optional()
 });
-var updateWorkingMemoryBodySchema = z.object({
-  workingMemory: z.string(),
-  resourceId: z.string().optional(),
-  memoryConfig: z.record(z.string(), z.unknown()).optional()
+var updateWorkingMemoryBodySchema = z$1.object({
+  workingMemory: z$1.string(),
+  resourceId: z$1.string().optional(),
+  memoryConfig: z$1.record(z$1.string(), z$1.unknown()).optional()
 });
-var deleteMessagesBodySchema = z.object({
-  messageIds: z.union([
-    z.string(),
-    z.array(z.string()),
-    z.object({ id: z.string() }),
-    z.array(z.object({ id: z.string() }))
+var deleteMessagesBodySchema = z$1.object({
+  messageIds: z$1.union([
+    z$1.string(),
+    z$1.array(z$1.string()),
+    z$1.object({ id: z$1.string() }),
+    z$1.array(z$1.object({ id: z$1.string() }))
   ])
 });
-var searchMemoryQuerySchema = z.object({
-  agentId: z.string(),
-  searchQuery: z.string(),
-  resourceId: z.string(),
-  threadId: z.string().optional(),
-  limit: z.coerce.number().optional().default(20),
+var searchMemoryQuerySchema = z$1.object({
+  agentId: z$1.string(),
+  searchQuery: z$1.string(),
+  resourceId: z$1.string(),
+  threadId: z$1.string().optional(),
+  limit: z$1.coerce.number().optional().default(20),
   memoryConfig: memoryConfigSchema
 });
-var saveMessagesResponseSchema = z.object({
-  messages: z.array(messageSchema$1)
+var saveMessagesResponseSchema = z$1.object({
+  messages: z$1.array(messageSchema$1)
 });
-var deleteThreadResponseSchema = z.object({
-  result: z.string()
+var deleteThreadResponseSchema = z$1.object({
+  result: z$1.string()
 });
 var updateWorkingMemoryResponseSchema = successResponseSchema;
 var deleteMessagesResponseSchema = successResponseSchema.extend({
-  message: z.string()
+  message: z$1.string()
 });
-var searchMemoryResponseSchema = z.object({
-  results: z.array(z.unknown()),
-  count: z.number(),
-  query: z.string(),
-  searchScope: z.string().optional(),
-  searchType: z.string().optional()
+var searchMemoryResponseSchema = z$1.object({
+  results: z$1.array(z$1.unknown()),
+  count: z$1.number(),
+  query: z$1.string(),
+  searchScope: z$1.string().optional(),
+  searchType: z$1.string().optional()
+});
+var cloneThreadBodySchema = z$1.object({
+  newThreadId: z$1.string().optional(),
+  resourceId: z$1.string().optional(),
+  title: z$1.string().optional(),
+  metadata: z$1.record(z$1.string(), z$1.unknown()).optional(),
+  options: z$1.object({
+    messageLimit: z$1.number().optional(),
+    messageFilter: z$1.object({
+      startDate: z$1.coerce.date().optional(),
+      endDate: z$1.coerce.date().optional(),
+      messageIds: z$1.array(z$1.string()).optional()
+    }).optional()
+  }).optional()
+});
+var cloneThreadResponseSchema = z$1.object({
+  thread: threadSchema,
+  clonedMessages: z$1.array(messageSchema$1)
 });
 
 // src/server/handlers/memory.ts
@@ -3513,6 +4179,9 @@ async function getMemoryFromContext({
     });
   }
 }
+function getStorageFromContext({ mastra }) {
+  return mastra.getStorage();
+}
 var GET_MEMORY_STATUS_ROUTE = createRoute({
   method: "GET",
   path: "/api/memory/status",
@@ -3525,10 +4194,16 @@ var GET_MEMORY_STATUS_ROUTE = createRoute({
   handler: async ({ mastra, agentId, requestContext }) => {
     try {
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        return { result: false };
+      if (memory) {
+        return { result: true };
       }
-      return { result: true };
+      if (!agentId) {
+        const storage = getStorageFromContext({ mastra });
+        if (storage) {
+          return { result: true };
+        }
+      }
+      return { result: false };
     } catch (error) {
       return handleError$1(error, "Error getting memory status");
     }
@@ -3567,18 +4242,33 @@ var LIST_THREADS_ROUTE = createRoute({
   tags: ["Memory"],
   handler: async ({ mastra, agentId, resourceId, requestContext, page, perPage, orderBy }) => {
     try {
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
       validateBody({ resourceId });
-      const result = await memory.listThreadsByResourceId({
-        resourceId,
-        page,
-        perPage,
-        orderBy
-      });
-      return result;
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (memory) {
+        const result = await memory.listThreadsByResourceId({
+          resourceId,
+          page,
+          perPage,
+          orderBy
+        });
+        return result;
+      }
+      if (!agentId) {
+        const storage = getStorageFromContext({ mastra });
+        if (storage) {
+          const memoryStore = await storage.getStore("memory");
+          if (memoryStore) {
+            const result = await memoryStore.listThreadsByResourceId({
+              resourceId,
+              page,
+              perPage,
+              orderBy
+            });
+            return result;
+          }
+        }
+      }
+      throw new HTTPException$2(400, { message: "Memory is not initialized" });
     } catch (error) {
       return handleError$1(error, "Error listing threads");
     }
@@ -3598,14 +4288,27 @@ var GET_THREAD_BY_ID_ROUTE = createRoute({
     try {
       validateBody({ threadId });
       const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
+      if (memory) {
+        const thread = await memory.getThreadById({ threadId });
+        if (!thread) {
+          throw new HTTPException$2(404, { message: "Thread not found" });
+        }
+        return thread;
       }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
+      if (!agentId) {
+        const storage = getStorageFromContext({ mastra });
+        if (storage) {
+          const memoryStore = await storage.getStore("memory");
+          if (memoryStore) {
+            const thread = await memoryStore.getThreadById({ threadId });
+            if (!thread) {
+              throw new HTTPException$2(404, { message: "Thread not found" });
+            }
+            return thread;
+          }
+        }
       }
-      return thread;
+      throw new HTTPException$2(400, { message: "Memory is not initialized" });
     } catch (error) {
       return handleError$1(error, "Error getting thread");
     }
@@ -3635,27 +4338,49 @@ var LIST_MESSAGES_ROUTE = createRoute({
   }) => {
     try {
       validateBody({ threadId });
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
       if (!threadId) {
         throw new HTTPException$2(400, { message: "No threadId found" });
       }
-      const thread = await memory.getThreadById({ threadId });
-      if (!thread) {
-        throw new HTTPException$2(404, { message: "Thread not found" });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (memory) {
+        const thread = await memory.getThreadById({ threadId });
+        if (!thread) {
+          throw new HTTPException$2(404, { message: "Thread not found" });
+        }
+        const result = await memory.recall({
+          threadId,
+          resourceId,
+          perPage,
+          page,
+          orderBy,
+          include,
+          filter
+        });
+        return result;
       }
-      const result = await memory.recall({
-        threadId,
-        resourceId,
-        perPage,
-        page,
-        orderBy,
-        include,
-        filter
-      });
-      return result;
+      if (!agentId) {
+        const storage = getStorageFromContext({ mastra });
+        if (storage) {
+          const memoryStore = await storage.getStore("memory");
+          if (memoryStore) {
+            const thread = await memoryStore.getThreadById({ threadId });
+            if (!thread) {
+              throw new HTTPException$2(404, { message: "Thread not found" });
+            }
+            const result = await memoryStore.listMessages({
+              threadId,
+              resourceId,
+              perPage,
+              page,
+              orderBy,
+              include,
+              filter
+            });
+            return result;
+          }
+        }
+      }
+      return { messages: [], uiMessages: [] };
     } catch (error) {
       return handleError$1(error, "Error getting messages");
     }
@@ -3829,6 +4554,38 @@ var DELETE_THREAD_ROUTE = createRoute({
     }
   }
 });
+var CLONE_THREAD_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/memory/threads/:threadId/clone",
+  responseType: "json",
+  pathParamSchema: threadIdPathParams,
+  queryParamSchema: agentIdQuerySchema,
+  bodySchema: cloneThreadBodySchema,
+  responseSchema: cloneThreadResponseSchema,
+  summary: "Clone thread",
+  description: "Creates a copy of a conversation thread with all its messages",
+  tags: ["Memory"],
+  handler: async ({ mastra, agentId, threadId, newThreadId, resourceId, title, metadata, options, requestContext }) => {
+    try {
+      validateBody({ threadId });
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (!memory) {
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
+      }
+      const result = await memory.cloneThread({
+        sourceThreadId: threadId,
+        newThreadId,
+        resourceId,
+        title,
+        metadata,
+        options
+      });
+      return result;
+    } catch (error) {
+      return handleError$1(error, "Error cloning thread");
+    }
+  }
+});
 var UPDATE_WORKING_MEMORY_ROUTE = createRoute({
   method: "POST",
   path: "/api/memory/threads/:threadId/working-memory",
@@ -3873,10 +4630,6 @@ var DELETE_MESSAGES_ROUTE = createRoute({
       if (messageIds === void 0 || messageIds === null) {
         throw new HTTPException$2(400, { message: "messageIds is required" });
       }
-      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
-      if (!memory) {
-        throw new HTTPException$2(400, { message: "Memory is not initialized" });
-      }
       let normalizedIds;
       if (Array.isArray(messageIds)) {
         normalizedIds = messageIds;
@@ -3885,7 +4638,25 @@ var DELETE_MESSAGES_ROUTE = createRoute({
       } else {
         normalizedIds = [messageIds];
       }
-      await memory.deleteMessages(normalizedIds);
+      const memory = await getMemoryFromContext({ mastra, agentId, requestContext });
+      if (memory) {
+        await memory.deleteMessages(normalizedIds);
+      } else if (!agentId) {
+        const storage = getStorageFromContext({ mastra });
+        if (storage) {
+          const memoryStore = await storage.getStore("memory");
+          if (memoryStore) {
+            const stringIds = normalizedIds.map((id) => typeof id === "string" ? id : id.id);
+            await memoryStore.deleteMessages(stringIds);
+          } else {
+            throw new HTTPException$2(400, { message: "Memory is not initialized" });
+          }
+        } else {
+          throw new HTTPException$2(400, { message: "Memory is not initialized" });
+        }
+      } else {
+        throw new HTTPException$2(400, { message: "Memory is not initialized" });
+      }
       const count = Array.isArray(messageIds) ? messageIds.length : 1;
       return { success: true, message: `${count} message${count === 1 ? "" : "s"} deleted successfully` };
     } catch (error) {
@@ -4132,13 +4903,13 @@ __export(observability_exports, {
   LIST_TRACES_ROUTE: () => LIST_TRACES_ROUTE,
   SCORE_TRACES_ROUTE: () => SCORE_TRACES_ROUTE
 });
-var legacyQueryParamsSchema = z$1.object({
+var legacyQueryParamsSchema = z.object({
   // Old: dateRange was in pagination, now it's startedAt in filters
   dateRange: dateRangeSchema.optional(),
   // Old: name matched span names like "agent run: 'myAgent'"
-  name: z$1.string().optional(),
+  name: z.string().optional(),
   // entityType needs preprocessing to handle legacy 'workflow' value
-  entityType: z$1.preprocess((val) => val === "workflow" ? "workflow_run" : val, z$1.string().optional())
+  entityType: z.preprocess((val) => val === "workflow" ? "workflow_run" : val, z.string().optional())
 });
 function transformLegacyParams(params) {
   const result = { ...params };
@@ -4302,58 +5073,58 @@ __export(scores_exports, {
   LIST_SCORES_BY_SCORER_ID_ROUTE: () => LIST_SCORES_BY_SCORER_ID_ROUTE,
   SAVE_SCORE_ROUTE: () => SAVE_SCORE_ROUTE
 });
-var scoringSamplingConfigSchema = z.object({});
-var mastraScorerConfigSchema = z.object({
-  id: z.string(),
-  name: z.string().optional(),
-  description: z.string(),
-  type: z.unknown().optional(),
-  judge: z.unknown().optional()
+var scoringSamplingConfigSchema = z$1.object({});
+var mastraScorerConfigSchema = z$1.object({
+  id: z$1.string(),
+  name: z$1.string().optional(),
+  description: z$1.string(),
+  type: z$1.unknown().optional(),
+  judge: z$1.unknown().optional()
 });
-var mastraScorerSchema = z.object({
+var mastraScorerSchema = z$1.object({
   config: mastraScorerConfigSchema
 });
-var scorerEntrySchema = z.object({
+var scorerEntrySchema = z$1.object({
   scorer: mastraScorerSchema,
   sampling: scoringSamplingConfigSchema.optional(),
-  agentIds: z.array(z.string()),
-  agentNames: z.array(z.string()),
-  workflowIds: z.array(z.string()),
-  isRegistered: z.boolean()
+  agentIds: z$1.array(z$1.string()),
+  agentNames: z$1.array(z$1.string()),
+  workflowIds: z$1.array(z$1.string()),
+  isRegistered: z$1.boolean()
 });
-var listScorersResponseSchema = z.record(z.string(), scorerEntrySchema);
-var scorerIdPathParams = z.object({
-  scorerId: z.string().describe("Unique identifier for the scorer")
+var listScorersResponseSchema = z$1.record(z$1.string(), scorerEntrySchema);
+var scorerIdPathParams = z$1.object({
+  scorerId: z$1.string().describe("Unique identifier for the scorer")
 });
-var entityPathParams = z.object({
-  entityType: z.string().describe("Type of the entity (AGENT or WORKFLOW)"),
-  entityId: z.string().describe("Unique identifier for the entity")
+var entityPathParams = z$1.object({
+  entityType: z$1.string().describe("Type of the entity (AGENT or WORKFLOW)"),
+  entityId: z$1.string().describe("Unique identifier for the entity")
 });
-var listScoresByRunIdQuerySchema = z.object({
-  page: z.coerce.number().optional().default(0),
-  perPage: z.coerce.number().optional().default(10)
+var listScoresByRunIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10)
 });
-var listScoresByScorerIdQuerySchema = z.object({
-  page: z.coerce.number().optional().default(0),
-  perPage: z.coerce.number().optional().default(10),
-  entityId: z.string().optional(),
-  entityType: z.string().optional()
+var listScoresByScorerIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10),
+  entityId: z$1.string().optional(),
+  entityType: z$1.string().optional()
 });
-var listScoresByEntityIdQuerySchema = z.object({
-  page: z.coerce.number().optional().default(0),
-  perPage: z.coerce.number().optional().default(10)
+var listScoresByEntityIdQuerySchema = z$1.object({
+  page: z$1.coerce.number().optional().default(0),
+  perPage: z$1.coerce.number().optional().default(10)
 });
-var saveScoreBodySchema = z.object({
-  score: z.unknown()
+var saveScoreBodySchema = z$1.object({
+  score: z$1.unknown()
   // ScoreRowData - complex type
 });
-var scoresWithPaginationResponseSchema = z.object({
+var scoresWithPaginationResponseSchema = z$1.object({
   pagination: paginationInfoSchema,
-  scores: z.array(z.unknown())
+  scores: z$1.array(z$1.unknown())
   // Array of score records
 });
-var saveScoreResponseSchema = z.object({
-  score: z.unknown()
+var saveScoreResponseSchema = z$1.object({
+  score: z$1.unknown()
   // ScoreRowData
 });
 
@@ -4606,6 +5377,7 @@ function getSteps(steps, path) {
       outputSchema: step.outputSchema ? stringify(zodToJsonSchema$1(step.outputSchema)) : void 0,
       resumeSchema: step.resumeSchema ? stringify(zodToJsonSchema$1(step.resumeSchema)) : void 0,
       suspendSchema: step.suspendSchema ? stringify(zodToJsonSchema$1(step.suspendSchema)) : void 0,
+      stateSchema: step.stateSchema ? stringify(zodToJsonSchema$1(step.stateSchema)) : void 0,
       isWorkflow: step.component === "WORKFLOW",
       component: step.component
     };
@@ -4627,7 +5399,8 @@ function getWorkflowInfo(workflow, partial = false) {
       steps: {},
       allSteps: {},
       inputSchema: void 0,
-      outputSchema: void 0
+      outputSchema: void 0,
+      stateSchema: void 0
     };
   }
   return {
@@ -4641,6 +5414,7 @@ function getWorkflowInfo(workflow, partial = false) {
         outputSchema: step.outputSchema ? stringify(zodToJsonSchema$1(step.outputSchema)) : void 0,
         resumeSchema: step.resumeSchema ? stringify(zodToJsonSchema$1(step.resumeSchema)) : void 0,
         suspendSchema: step.suspendSchema ? stringify(zodToJsonSchema$1(step.suspendSchema)) : void 0,
+        stateSchema: step.stateSchema ? stringify(zodToJsonSchema$1(step.stateSchema)) : void 0,
         component: step.component
       };
       return acc;
@@ -4649,6 +5423,7 @@ function getWorkflowInfo(workflow, partial = false) {
     stepGraph: workflow.serializedStepGraph,
     inputSchema: workflow.inputSchema ? stringify(zodToJsonSchema$1(workflow.inputSchema)) : void 0,
     outputSchema: workflow.outputSchema ? stringify(zodToJsonSchema$1(workflow.outputSchema)) : void 0,
+    stateSchema: workflow.stateSchema ? stringify(zodToJsonSchema$1(workflow.stateSchema)) : void 0,
     options: workflow.options,
     isProcessorWorkflow: workflow.type === "processor"
   };
@@ -4911,138 +5686,138 @@ function createTaskContext({
     isCancelled: () => activeCancellations.has(task.id)
   };
 }
-var a2aAgentIdPathParams = z.object({
-  agentId: z.string().describe("Unique identifier for the agent")
+var a2aAgentIdPathParams = z$1.object({
+  agentId: z$1.string().describe("Unique identifier for the agent")
 });
 a2aAgentIdPathParams.extend({
-  taskId: z.string().describe("Unique identifier for the task")
+  taskId: z$1.string().describe("Unique identifier for the task")
 });
-var pushNotificationAuthenticationInfoSchema = z.object({
-  schemes: z.array(z.string()).describe("Supported authentication schemes - e.g. Basic, Bearer"),
-  credentials: z.string().optional().describe("Optional credentials")
+var pushNotificationAuthenticationInfoSchema = z$1.object({
+  schemes: z$1.array(z$1.string()).describe("Supported authentication schemes - e.g. Basic, Bearer"),
+  credentials: z$1.string().optional().describe("Optional credentials")
 });
-var pushNotificationConfigSchema = z.object({
-  url: z.string().describe("URL for sending the push notifications"),
-  id: z.string().optional().describe("Push Notification ID - created by server to support multiple callbacks"),
-  token: z.string().optional().describe("Token unique to this task/session"),
+var pushNotificationConfigSchema = z$1.object({
+  url: z$1.string().describe("URL for sending the push notifications"),
+  id: z$1.string().optional().describe("Push Notification ID - created by server to support multiple callbacks"),
+  token: z$1.string().optional().describe("Token unique to this task/session"),
   authentication: pushNotificationAuthenticationInfoSchema.optional()
 });
-var messageSendConfigurationSchema = z.object({
-  acceptedOutputModes: z.array(z.string()).describe("Accepted output modalities by the client"),
-  blocking: z.boolean().optional().describe("If the server should treat the client as a blocking request"),
-  historyLength: z.number().optional().describe("Number of recent messages to be retrieved"),
+var messageSendConfigurationSchema = z$1.object({
+  acceptedOutputModes: z$1.array(z$1.string()).describe("Accepted output modalities by the client"),
+  blocking: z$1.boolean().optional().describe("If the server should treat the client as a blocking request"),
+  historyLength: z$1.number().optional().describe("Number of recent messages to be retrieved"),
   pushNotificationConfig: pushNotificationConfigSchema.optional()
 });
-var textPartSchema$1 = z.object({
-  kind: z.literal("text").describe("Part type - text for TextParts"),
-  text: z.string().describe("Text content"),
-  metadata: z.record(z.unknown()).optional().describe("Optional metadata associated with the part")
+var textPartSchema$1 = z$1.object({
+  kind: z$1.literal("text").describe("Part type - text for TextParts"),
+  text: z$1.string().describe("Text content"),
+  metadata: z$1.record(z$1.unknown()).optional().describe("Optional metadata associated with the part")
 });
-var fileWithBytesSchema = z.object({
-  bytes: z.string().describe("base64 encoded content of the file"),
-  mimeType: z.string().optional().describe("Optional mimeType for the file"),
-  name: z.string().optional().describe("Optional name for the file")
+var fileWithBytesSchema = z$1.object({
+  bytes: z$1.string().describe("base64 encoded content of the file"),
+  mimeType: z$1.string().optional().describe("Optional mimeType for the file"),
+  name: z$1.string().optional().describe("Optional name for the file")
 });
-var fileWithUriSchema = z.object({
-  uri: z.string().describe("URL for the File content"),
-  mimeType: z.string().optional().describe("Optional mimeType for the file"),
-  name: z.string().optional().describe("Optional name for the file")
+var fileWithUriSchema = z$1.object({
+  uri: z$1.string().describe("URL for the File content"),
+  mimeType: z$1.string().optional().describe("Optional mimeType for the file"),
+  name: z$1.string().optional().describe("Optional name for the file")
 });
-var filePartSchema$1 = z.object({
-  kind: z.literal("file").describe("Part type - file for FileParts"),
-  file: z.union([fileWithBytesSchema, fileWithUriSchema]).describe("File content either as url or bytes"),
-  metadata: z.record(z.unknown()).optional().describe("Optional metadata associated with the part")
+var filePartSchema$1 = z$1.object({
+  kind: z$1.literal("file").describe("Part type - file for FileParts"),
+  file: z$1.union([fileWithBytesSchema, fileWithUriSchema]).describe("File content either as url or bytes"),
+  metadata: z$1.record(z$1.unknown()).optional().describe("Optional metadata associated with the part")
 });
-var dataPartSchema = z.object({
-  kind: z.literal("data").describe("Part type - data for DataParts"),
-  data: z.record(z.unknown()).describe("Structured data content"),
-  metadata: z.record(z.unknown()).optional().describe("Optional metadata associated with the part")
+var dataPartSchema = z$1.object({
+  kind: z$1.literal("data").describe("Part type - data for DataParts"),
+  data: z$1.record(z$1.unknown()).describe("Structured data content"),
+  metadata: z$1.record(z$1.unknown()).optional().describe("Optional metadata associated with the part")
 });
-var partSchema = z.union([textPartSchema$1, filePartSchema$1, dataPartSchema]);
-var messageSchema = z.object({
-  kind: z.literal("message").describe("Event type"),
-  messageId: z.string().describe("Identifier created by the message creator"),
-  role: z.enum(["user", "agent"]).describe("Message sender's role"),
-  parts: z.array(partSchema).describe("Message content"),
-  contextId: z.string().optional().describe("The context the message is associated with"),
-  taskId: z.string().optional().describe("Identifier of task the message is related to"),
-  referenceTaskIds: z.array(z.string()).optional().describe("List of tasks referenced as context by this message"),
-  extensions: z.array(z.string()).optional().describe("The URIs of extensions that are present or contributed to this Message"),
-  metadata: z.record(z.unknown()).optional().describe("Extension metadata")
+var partSchema = z$1.union([textPartSchema$1, filePartSchema$1, dataPartSchema]);
+var messageSchema = z$1.object({
+  kind: z$1.literal("message").describe("Event type"),
+  messageId: z$1.string().describe("Identifier created by the message creator"),
+  role: z$1.enum(["user", "agent"]).describe("Message sender's role"),
+  parts: z$1.array(partSchema).describe("Message content"),
+  contextId: z$1.string().optional().describe("The context the message is associated with"),
+  taskId: z$1.string().optional().describe("Identifier of task the message is related to"),
+  referenceTaskIds: z$1.array(z$1.string()).optional().describe("List of tasks referenced as context by this message"),
+  extensions: z$1.array(z$1.string()).optional().describe("The URIs of extensions that are present or contributed to this Message"),
+  metadata: z$1.record(z$1.unknown()).optional().describe("Extension metadata")
 });
-var messageSendParamsSchema = z.object({
+var messageSendParamsSchema = z$1.object({
   message: messageSchema,
   configuration: messageSendConfigurationSchema.optional(),
-  metadata: z.record(z.unknown()).optional().describe("Extension metadata")
+  metadata: z$1.record(z$1.unknown()).optional().describe("Extension metadata")
 });
-var taskQueryParamsSchema = z.object({
-  id: z.string().describe("Task id"),
-  historyLength: z.number().optional().describe("Number of recent messages to be retrieved"),
-  metadata: z.record(z.unknown()).optional()
+var taskQueryParamsSchema = z$1.object({
+  id: z$1.string().describe("Task id"),
+  historyLength: z$1.number().optional().describe("Number of recent messages to be retrieved"),
+  metadata: z$1.record(z$1.unknown()).optional()
 });
-var taskIdParamsSchema = z.object({
-  id: z.string().describe("Task id"),
-  metadata: z.record(z.unknown()).optional()
+var taskIdParamsSchema = z$1.object({
+  id: z$1.string().describe("Task id"),
+  metadata: z$1.record(z$1.unknown()).optional()
 });
-z.object({
+z$1.object({
   message: messageSchema,
-  metadata: z.record(z.any()).optional()
+  metadata: z$1.record(z$1.any()).optional()
 });
-z.object({
-  id: z.string()
+z$1.object({
+  id: z$1.string()
 });
-var agentExecutionParamsSchema = z.union([messageSendParamsSchema, taskQueryParamsSchema, taskIdParamsSchema]);
-var agentExecutionBodySchema = z.object({
-  jsonrpc: z.literal("2.0"),
-  id: z.union([z.string(), z.number()]),
-  method: z.enum(["message/send", "message/stream", "tasks/get", "tasks/cancel"]),
+var agentExecutionParamsSchema = z$1.union([messageSendParamsSchema, taskQueryParamsSchema, taskIdParamsSchema]);
+var agentExecutionBodySchema = z$1.object({
+  jsonrpc: z$1.literal("2.0"),
+  id: z$1.union([z$1.string(), z$1.number()]),
+  method: z$1.enum(["message/send", "message/stream", "tasks/get", "tasks/cancel"]),
   params: agentExecutionParamsSchema
 });
-var agentCardResponseSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  url: z.string(),
-  provider: z.object({
-    organization: z.string(),
-    url: z.string()
+var agentCardResponseSchema = z$1.object({
+  name: z$1.string(),
+  description: z$1.string(),
+  url: z$1.string(),
+  provider: z$1.object({
+    organization: z$1.string(),
+    url: z$1.string()
   }).optional(),
-  version: z.string(),
-  capabilities: z.object({
-    streaming: z.boolean().optional(),
-    pushNotifications: z.boolean().optional(),
-    stateTransitionHistory: z.boolean().optional()
+  version: z$1.string(),
+  capabilities: z$1.object({
+    streaming: z$1.boolean().optional(),
+    pushNotifications: z$1.boolean().optional(),
+    stateTransitionHistory: z$1.boolean().optional()
   }),
-  defaultInputModes: z.array(z.string()),
-  defaultOutputModes: z.array(z.string()),
-  skills: z.array(
-    z.object({
-      id: z.string(),
-      name: z.string(),
-      description: z.string(),
-      tags: z.array(z.string()).optional()
+  defaultInputModes: z$1.array(z$1.string()),
+  defaultOutputModes: z$1.array(z$1.string()),
+  skills: z$1.array(
+    z$1.object({
+      id: z$1.string(),
+      name: z$1.string(),
+      description: z$1.string(),
+      tags: z$1.array(z$1.string()).optional()
     })
   )
 });
-z.unknown();
-var agentExecutionResponseSchema = z.unknown();
+z$1.unknown();
+var agentExecutionResponseSchema = z$1.unknown();
 
 // src/server/handlers/a2a.ts
-var messageSendParamsSchema2 = z$1.object({
-  message: z$1.object({
-    role: z$1.enum(["user", "agent"]),
-    parts: z$1.array(
-      z$1.object({
-        kind: z$1.enum(["text"]),
-        text: z$1.string()
+var messageSendParamsSchema2 = z.object({
+  message: z.object({
+    role: z.enum(["user", "agent"]),
+    parts: z.array(
+      z.object({
+        kind: z.enum(["text"]),
+        text: z.string()
       })
     ),
-    kind: z$1.literal("message"),
-    messageId: z$1.string(),
-    contextId: z$1.string().optional(),
-    taskId: z$1.string().optional(),
-    referenceTaskIds: z$1.array(z$1.string()).optional(),
-    extensions: z$1.array(z$1.string()).optional(),
-    metadata: z$1.record(z$1.any()).optional()
+    kind: z.literal("message"),
+    messageId: z.string(),
+    contextId: z.string().optional(),
+    taskId: z.string().optional(),
+    referenceTaskIds: z.array(z.string()).optional(),
+    extensions: z.array(z.string()).optional(),
+    metadata: z.record(z.any()).optional()
   })
 });
 async function getAgentCardByIdHandler({
@@ -5060,10 +5835,7 @@ async function getAgentCardByIdHandler({
   if (!agent) {
     throw new Error(`Agent with ID ${agentId} not found`);
   }
-  const [instructions, tools] = await Promise.all([
-    agent.getInstructions({ requestContext }),
-    agent.listTools({ requestContext })
-  ]);
+  const [instructions, tools] = await Promise.all([agent.getInstructions({ requestContext }), agent.listTools({ requestContext })]);
   const agentCard = {
     name: agent.id || agentId,
     description: convertInstructionsToString(instructions),
@@ -5093,7 +5865,7 @@ function validateMessageSendParams(params) {
   try {
     messageSendParamsSchema2.parse(params);
   } catch (error) {
-    if (error instanceof z$1.ZodError) {
+    if (error instanceof z.ZodError) {
       throw MastraA2AError.invalidParams(error.errors[0].message);
     }
     throw error;
@@ -5349,10 +6121,7 @@ var GET_AGENT_CARD_ROUTE = createRoute({
     if (!agent) {
       throw new Error(`Agent with ID ${agentId} not found`);
     }
-    const [instructions, tools] = await Promise.all([
-      agent.getInstructions({ requestContext }),
-      agent.listTools({ requestContext })
-    ]);
+    const [instructions, tools] = await Promise.all([agent.getInstructions({ requestContext }), agent.listTools({ requestContext })]);
     const agentCard = {
       name: agent.id || agentId,
       description: convertInstructionsToString(instructions),
@@ -6051,7 +6820,7 @@ function loadApiKey({
   }
   return apiKey;
 }
-var validatorSymbol$1 = Symbol.for("vercel.ai.validator");
+var validatorSymbol$1 = /* @__PURE__ */ Symbol.for("vercel.ai.validator");
 function validator$1(validate) {
   return { [validatorSymbol$1]: true, validate };
 }
@@ -6638,15 +7407,15 @@ function mapOpenAIFinishReason(finishReason) {
       return "unknown";
   }
 }
-var openaiErrorDataSchema = z$1.object({
-  error: z$1.object({
-    message: z$1.string(),
+var openaiErrorDataSchema = z.object({
+  error: z.object({
+    message: z.string(),
     // The additional information below is handled loosely to support
     // OpenAI-compatible providers that have slightly different error
     // responses:
-    type: z$1.string().nullish(),
-    param: z$1.any().nullish(),
-    code: z$1.union([z$1.string(), z$1.number()]).nullish()
+    type: z.string().nullish(),
+    param: z.any().nullish(),
+    code: z.union([z.string(), z.number()]).nullish()
   })
 });
 var openaiFailedResponseHandler = createJsonErrorResponseHandler$1({
@@ -7342,104 +8111,104 @@ var OpenAIChatLanguageModel = class {
     };
   }
 };
-var openaiTokenUsageSchema = z$1.object({
-  prompt_tokens: z$1.number().nullish(),
-  completion_tokens: z$1.number().nullish(),
-  prompt_tokens_details: z$1.object({
-    cached_tokens: z$1.number().nullish()
+var openaiTokenUsageSchema = z.object({
+  prompt_tokens: z.number().nullish(),
+  completion_tokens: z.number().nullish(),
+  prompt_tokens_details: z.object({
+    cached_tokens: z.number().nullish()
   }).nullish(),
-  completion_tokens_details: z$1.object({
-    reasoning_tokens: z$1.number().nullish(),
-    accepted_prediction_tokens: z$1.number().nullish(),
-    rejected_prediction_tokens: z$1.number().nullish()
+  completion_tokens_details: z.object({
+    reasoning_tokens: z.number().nullish(),
+    accepted_prediction_tokens: z.number().nullish(),
+    rejected_prediction_tokens: z.number().nullish()
   }).nullish()
 }).nullish();
-var openaiChatResponseSchema = z$1.object({
-  id: z$1.string().nullish(),
-  created: z$1.number().nullish(),
-  model: z$1.string().nullish(),
-  choices: z$1.array(
-    z$1.object({
-      message: z$1.object({
-        role: z$1.literal("assistant").nullish(),
-        content: z$1.string().nullish(),
-        function_call: z$1.object({
-          arguments: z$1.string(),
-          name: z$1.string()
+var openaiChatResponseSchema = z.object({
+  id: z.string().nullish(),
+  created: z.number().nullish(),
+  model: z.string().nullish(),
+  choices: z.array(
+    z.object({
+      message: z.object({
+        role: z.literal("assistant").nullish(),
+        content: z.string().nullish(),
+        function_call: z.object({
+          arguments: z.string(),
+          name: z.string()
         }).nullish(),
-        tool_calls: z$1.array(
-          z$1.object({
-            id: z$1.string().nullish(),
-            type: z$1.literal("function"),
-            function: z$1.object({
-              name: z$1.string(),
-              arguments: z$1.string()
+        tool_calls: z.array(
+          z.object({
+            id: z.string().nullish(),
+            type: z.literal("function"),
+            function: z.object({
+              name: z.string(),
+              arguments: z.string()
             })
           })
         ).nullish()
       }),
-      index: z$1.number(),
-      logprobs: z$1.object({
-        content: z$1.array(
-          z$1.object({
-            token: z$1.string(),
-            logprob: z$1.number(),
-            top_logprobs: z$1.array(
-              z$1.object({
-                token: z$1.string(),
-                logprob: z$1.number()
+      index: z.number(),
+      logprobs: z.object({
+        content: z.array(
+          z.object({
+            token: z.string(),
+            logprob: z.number(),
+            top_logprobs: z.array(
+              z.object({
+                token: z.string(),
+                logprob: z.number()
               })
             )
           })
         ).nullable()
       }).nullish(),
-      finish_reason: z$1.string().nullish()
+      finish_reason: z.string().nullish()
     })
   ),
   usage: openaiTokenUsageSchema
 });
-var openaiChatChunkSchema = z$1.union([
-  z$1.object({
-    id: z$1.string().nullish(),
-    created: z$1.number().nullish(),
-    model: z$1.string().nullish(),
-    choices: z$1.array(
-      z$1.object({
-        delta: z$1.object({
-          role: z$1.enum(["assistant"]).nullish(),
-          content: z$1.string().nullish(),
-          function_call: z$1.object({
-            name: z$1.string().optional(),
-            arguments: z$1.string().optional()
+var openaiChatChunkSchema = z.union([
+  z.object({
+    id: z.string().nullish(),
+    created: z.number().nullish(),
+    model: z.string().nullish(),
+    choices: z.array(
+      z.object({
+        delta: z.object({
+          role: z.enum(["assistant"]).nullish(),
+          content: z.string().nullish(),
+          function_call: z.object({
+            name: z.string().optional(),
+            arguments: z.string().optional()
           }).nullish(),
-          tool_calls: z$1.array(
-            z$1.object({
-              index: z$1.number(),
-              id: z$1.string().nullish(),
-              type: z$1.literal("function").nullish(),
-              function: z$1.object({
-                name: z$1.string().nullish(),
-                arguments: z$1.string().nullish()
+          tool_calls: z.array(
+            z.object({
+              index: z.number(),
+              id: z.string().nullish(),
+              type: z.literal("function").nullish(),
+              function: z.object({
+                name: z.string().nullish(),
+                arguments: z.string().nullish()
               })
             })
           ).nullish()
         }).nullish(),
-        logprobs: z$1.object({
-          content: z$1.array(
-            z$1.object({
-              token: z$1.string(),
-              logprob: z$1.number(),
-              top_logprobs: z$1.array(
-                z$1.object({
-                  token: z$1.string(),
-                  logprob: z$1.number()
+        logprobs: z.object({
+          content: z.array(
+            z.object({
+              token: z.string(),
+              logprob: z.number(),
+              top_logprobs: z.array(
+                z.object({
+                  token: z.string(),
+                  logprob: z.number()
                 })
               )
             })
           ).nullable()
         }).nullish(),
-        finish_reason: z$1.string().nullish(),
-        index: z$1.number()
+        finish_reason: z.string().nullish(),
+        index: z.number()
       })
     ),
     usage: openaiTokenUsageSchema
@@ -7808,46 +8577,46 @@ var OpenAICompletionLanguageModel = class {
     };
   }
 };
-var openaiCompletionResponseSchema = z$1.object({
-  id: z$1.string().nullish(),
-  created: z$1.number().nullish(),
-  model: z$1.string().nullish(),
-  choices: z$1.array(
-    z$1.object({
-      text: z$1.string(),
-      finish_reason: z$1.string(),
-      logprobs: z$1.object({
-        tokens: z$1.array(z$1.string()),
-        token_logprobs: z$1.array(z$1.number()),
-        top_logprobs: z$1.array(z$1.record(z$1.string(), z$1.number())).nullable()
+var openaiCompletionResponseSchema = z.object({
+  id: z.string().nullish(),
+  created: z.number().nullish(),
+  model: z.string().nullish(),
+  choices: z.array(
+    z.object({
+      text: z.string(),
+      finish_reason: z.string(),
+      logprobs: z.object({
+        tokens: z.array(z.string()),
+        token_logprobs: z.array(z.number()),
+        top_logprobs: z.array(z.record(z.string(), z.number())).nullable()
       }).nullish()
     })
   ),
-  usage: z$1.object({
-    prompt_tokens: z$1.number(),
-    completion_tokens: z$1.number()
+  usage: z.object({
+    prompt_tokens: z.number(),
+    completion_tokens: z.number()
   })
 });
-var openaiCompletionChunkSchema = z$1.union([
-  z$1.object({
-    id: z$1.string().nullish(),
-    created: z$1.number().nullish(),
-    model: z$1.string().nullish(),
-    choices: z$1.array(
-      z$1.object({
-        text: z$1.string(),
-        finish_reason: z$1.string().nullish(),
-        index: z$1.number(),
-        logprobs: z$1.object({
-          tokens: z$1.array(z$1.string()),
-          token_logprobs: z$1.array(z$1.number()),
-          top_logprobs: z$1.array(z$1.record(z$1.string(), z$1.number())).nullable()
+var openaiCompletionChunkSchema = z.union([
+  z.object({
+    id: z.string().nullish(),
+    created: z.number().nullish(),
+    model: z.string().nullish(),
+    choices: z.array(
+      z.object({
+        text: z.string(),
+        finish_reason: z.string().nullish(),
+        index: z.number(),
+        logprobs: z.object({
+          tokens: z.array(z.string()),
+          token_logprobs: z.array(z.number()),
+          top_logprobs: z.array(z.record(z.string(), z.number())).nullable()
         }).nullish()
       })
     ),
-    usage: z$1.object({
-      prompt_tokens: z$1.number(),
-      completion_tokens: z$1.number()
+    usage: z.object({
+      prompt_tokens: z.number(),
+      completion_tokens: z.number()
     }).nullish()
   }),
   openaiErrorDataSchema
@@ -7910,9 +8679,9 @@ var OpenAIEmbeddingModel = class {
     };
   }
 };
-var openaiTextEmbeddingResponseSchema = z$1.object({
-  data: z$1.array(z$1.object({ embedding: z$1.array(z$1.number()) })),
-  usage: z$1.object({ prompt_tokens: z$1.number() }).nullish()
+var openaiTextEmbeddingResponseSchema = z.object({
+  data: z.array(z.object({ embedding: z.array(z.number()) })),
+  usage: z.object({ prompt_tokens: z.number() }).nullish()
 });
 var modelMaxImagesPerCall = {
   "dall-e-3": 1,
@@ -7989,15 +8758,15 @@ var OpenAIImageModel = class {
     };
   }
 };
-var openaiImageResponseSchema = z$1.object({
-  data: z$1.array(z$1.object({ b64_json: z$1.string() }))
+var openaiImageResponseSchema = z.object({
+  data: z.array(z.object({ b64_json: z.string() }))
 });
-var openAIProviderOptionsSchema = z$1.object({
-  include: z$1.array(z$1.string()).nullish(),
-  language: z$1.string().nullish(),
-  prompt: z$1.string().nullish(),
-  temperature: z$1.number().min(0).max(1).nullish().default(0),
-  timestampGranularities: z$1.array(z$1.enum(["word", "segment"])).nullish().default(["segment"])
+var openAIProviderOptionsSchema = z.object({
+  include: z.array(z.string()).nullish(),
+  language: z.string().nullish(),
+  prompt: z.string().nullish(),
+  temperature: z.number().min(0).max(1).nullish().default(0),
+  timestampGranularities: z.array(z.enum(["word", "segment"])).nullish().default(["segment"])
 });
 var languageMap = {
   afrikaans: "af",
@@ -8145,15 +8914,15 @@ var OpenAITranscriptionModel = class {
     };
   }
 };
-var openaiTranscriptionResponseSchema = z$1.object({
-  text: z$1.string(),
-  language: z$1.string().nullish(),
-  duration: z$1.number().nullish(),
-  words: z$1.array(
-    z$1.object({
-      word: z$1.string(),
-      start: z$1.number(),
-      end: z$1.number()
+var openaiTranscriptionResponseSchema = z.object({
+  text: z.string(),
+  language: z.string().nullish(),
+  duration: z.number().nullish(),
+  words: z.array(
+    z.object({
+      word: z.string(),
+      start: z.number(),
+      end: z.number()
     })
   ).nullish()
 });
@@ -8570,59 +9339,59 @@ var OpenAIResponsesLanguageModel = class {
       body,
       failedResponseHandler: openaiFailedResponseHandler,
       successfulResponseHandler: createJsonResponseHandler$1(
-        z$1.object({
-          id: z$1.string(),
-          created_at: z$1.number(),
-          error: z$1.object({
-            message: z$1.string(),
-            code: z$1.string()
+        z.object({
+          id: z.string(),
+          created_at: z.number(),
+          error: z.object({
+            message: z.string(),
+            code: z.string()
           }).nullish(),
-          model: z$1.string(),
-          output: z$1.array(
-            z$1.discriminatedUnion("type", [
-              z$1.object({
-                type: z$1.literal("message"),
-                role: z$1.literal("assistant"),
-                content: z$1.array(
-                  z$1.object({
-                    type: z$1.literal("output_text"),
-                    text: z$1.string(),
-                    annotations: z$1.array(
-                      z$1.object({
-                        type: z$1.literal("url_citation"),
-                        start_index: z$1.number(),
-                        end_index: z$1.number(),
-                        url: z$1.string(),
-                        title: z$1.string()
+          model: z.string(),
+          output: z.array(
+            z.discriminatedUnion("type", [
+              z.object({
+                type: z.literal("message"),
+                role: z.literal("assistant"),
+                content: z.array(
+                  z.object({
+                    type: z.literal("output_text"),
+                    text: z.string(),
+                    annotations: z.array(
+                      z.object({
+                        type: z.literal("url_citation"),
+                        start_index: z.number(),
+                        end_index: z.number(),
+                        url: z.string(),
+                        title: z.string()
                       })
                     )
                   })
                 )
               }),
-              z$1.object({
-                type: z$1.literal("function_call"),
-                call_id: z$1.string(),
-                name: z$1.string(),
-                arguments: z$1.string()
+              z.object({
+                type: z.literal("function_call"),
+                call_id: z.string(),
+                name: z.string(),
+                arguments: z.string()
               }),
-              z$1.object({
-                type: z$1.literal("web_search_call")
+              z.object({
+                type: z.literal("web_search_call")
               }),
-              z$1.object({
-                type: z$1.literal("computer_call")
+              z.object({
+                type: z.literal("computer_call")
               }),
-              z$1.object({
-                type: z$1.literal("reasoning"),
-                summary: z$1.array(
-                  z$1.object({
-                    type: z$1.literal("summary_text"),
-                    text: z$1.string()
+              z.object({
+                type: z.literal("reasoning"),
+                summary: z.array(
+                  z.object({
+                    type: z.literal("summary_text"),
+                    text: z.string()
                   })
                 )
               })
             ])
           ),
-          incomplete_details: z$1.object({ reason: z$1.string() }).nullable(),
+          incomplete_details: z.object({ reason: z.string() }).nullable(),
           usage: usageSchema
         })
       ),
@@ -8843,93 +9612,93 @@ var OpenAIResponsesLanguageModel = class {
     };
   }
 };
-var usageSchema = z$1.object({
-  input_tokens: z$1.number(),
-  input_tokens_details: z$1.object({ cached_tokens: z$1.number().nullish() }).nullish(),
-  output_tokens: z$1.number(),
-  output_tokens_details: z$1.object({ reasoning_tokens: z$1.number().nullish() }).nullish()
+var usageSchema = z.object({
+  input_tokens: z.number(),
+  input_tokens_details: z.object({ cached_tokens: z.number().nullish() }).nullish(),
+  output_tokens: z.number(),
+  output_tokens_details: z.object({ reasoning_tokens: z.number().nullish() }).nullish()
 });
-var textDeltaChunkSchema = z$1.object({
-  type: z$1.literal("response.output_text.delta"),
-  delta: z$1.string()
+var textDeltaChunkSchema = z.object({
+  type: z.literal("response.output_text.delta"),
+  delta: z.string()
 });
-var responseFinishedChunkSchema = z$1.object({
-  type: z$1.enum(["response.completed", "response.incomplete"]),
-  response: z$1.object({
-    incomplete_details: z$1.object({ reason: z$1.string() }).nullish(),
+var responseFinishedChunkSchema = z.object({
+  type: z.enum(["response.completed", "response.incomplete"]),
+  response: z.object({
+    incomplete_details: z.object({ reason: z.string() }).nullish(),
     usage: usageSchema
   })
 });
-var responseCreatedChunkSchema = z$1.object({
-  type: z$1.literal("response.created"),
-  response: z$1.object({
-    id: z$1.string(),
-    created_at: z$1.number(),
-    model: z$1.string()
+var responseCreatedChunkSchema = z.object({
+  type: z.literal("response.created"),
+  response: z.object({
+    id: z.string(),
+    created_at: z.number(),
+    model: z.string()
   })
 });
-var responseOutputItemDoneSchema = z$1.object({
-  type: z$1.literal("response.output_item.done"),
-  output_index: z$1.number(),
-  item: z$1.discriminatedUnion("type", [
-    z$1.object({
-      type: z$1.literal("message")
+var responseOutputItemDoneSchema = z.object({
+  type: z.literal("response.output_item.done"),
+  output_index: z.number(),
+  item: z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("message")
     }),
-    z$1.object({
-      type: z$1.literal("function_call"),
-      id: z$1.string(),
-      call_id: z$1.string(),
-      name: z$1.string(),
-      arguments: z$1.string(),
-      status: z$1.literal("completed")
+    z.object({
+      type: z.literal("function_call"),
+      id: z.string(),
+      call_id: z.string(),
+      name: z.string(),
+      arguments: z.string(),
+      status: z.literal("completed")
     })
   ])
 });
-var responseFunctionCallArgumentsDeltaSchema = z$1.object({
-  type: z$1.literal("response.function_call_arguments.delta"),
-  item_id: z$1.string(),
-  output_index: z$1.number(),
-  delta: z$1.string()
+var responseFunctionCallArgumentsDeltaSchema = z.object({
+  type: z.literal("response.function_call_arguments.delta"),
+  item_id: z.string(),
+  output_index: z.number(),
+  delta: z.string()
 });
-var responseOutputItemAddedSchema = z$1.object({
-  type: z$1.literal("response.output_item.added"),
-  output_index: z$1.number(),
-  item: z$1.discriminatedUnion("type", [
-    z$1.object({
-      type: z$1.literal("message")
+var responseOutputItemAddedSchema = z.object({
+  type: z.literal("response.output_item.added"),
+  output_index: z.number(),
+  item: z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("message")
     }),
-    z$1.object({
-      type: z$1.literal("function_call"),
-      id: z$1.string(),
-      call_id: z$1.string(),
-      name: z$1.string(),
-      arguments: z$1.string()
+    z.object({
+      type: z.literal("function_call"),
+      id: z.string(),
+      call_id: z.string(),
+      name: z.string(),
+      arguments: z.string()
     })
   ])
 });
-var responseAnnotationAddedSchema = z$1.object({
-  type: z$1.literal("response.output_text.annotation.added"),
-  annotation: z$1.object({
-    type: z$1.literal("url_citation"),
-    url: z$1.string(),
-    title: z$1.string()
+var responseAnnotationAddedSchema = z.object({
+  type: z.literal("response.output_text.annotation.added"),
+  annotation: z.object({
+    type: z.literal("url_citation"),
+    url: z.string(),
+    title: z.string()
   })
 });
-var responseReasoningSummaryTextDeltaSchema = z$1.object({
-  type: z$1.literal("response.reasoning_summary_text.delta"),
-  item_id: z$1.string(),
-  output_index: z$1.number(),
-  summary_index: z$1.number(),
-  delta: z$1.string()
+var responseReasoningSummaryTextDeltaSchema = z.object({
+  type: z.literal("response.reasoning_summary_text.delta"),
+  item_id: z.string(),
+  output_index: z.number(),
+  summary_index: z.number(),
+  delta: z.string()
 });
-var errorChunkSchema = z$1.object({
-  type: z$1.literal("error"),
-  code: z$1.string(),
-  message: z$1.string(),
-  param: z$1.string().nullish(),
-  sequence_number: z$1.number()
+var errorChunkSchema = z.object({
+  type: z.literal("error"),
+  code: z.string(),
+  message: z.string(),
+  param: z.string().nullish(),
+  sequence_number: z.number()
 });
-var openaiResponsesChunkSchema = z$1.union([
+var openaiResponsesChunkSchema = z.union([
   textDeltaChunkSchema,
   responseFinishedChunkSchema,
   responseCreatedChunkSchema,
@@ -8939,7 +9708,7 @@ var openaiResponsesChunkSchema = z$1.union([
   responseAnnotationAddedSchema,
   responseReasoningSummaryTextDeltaSchema,
   errorChunkSchema,
-  z$1.object({ type: z$1.string() }).passthrough()
+  z.object({ type: z.string() }).passthrough()
   // fallback for unknown chunks
 ]);
 function isTextDeltaChunk(chunk) {
@@ -8990,18 +9759,18 @@ function getResponsesModelConfig(modelId) {
     requiredAutoTruncation: false
   };
 }
-var openaiResponsesProviderOptionsSchema = z$1.object({
-  metadata: z$1.any().nullish(),
-  parallelToolCalls: z$1.boolean().nullish(),
-  previousResponseId: z$1.string().nullish(),
-  store: z$1.boolean().nullish(),
-  user: z$1.string().nullish(),
-  reasoningEffort: z$1.string().nullish(),
-  strictSchemas: z$1.boolean().nullish(),
-  instructions: z$1.string().nullish(),
-  reasoningSummary: z$1.string().nullish()
+var openaiResponsesProviderOptionsSchema = z.object({
+  metadata: z.any().nullish(),
+  parallelToolCalls: z.boolean().nullish(),
+  previousResponseId: z.string().nullish(),
+  store: z.boolean().nullish(),
+  user: z.string().nullish(),
+  reasoningEffort: z.string().nullish(),
+  strictSchemas: z.boolean().nullish(),
+  instructions: z.string().nullish(),
+  reasoningSummary: z.string().nullish()
 });
-var WebSearchPreviewParameters = z$1.object({});
+var WebSearchPreviewParameters = z.object({});
 function webSearchPreviewTool({
   searchContextSize,
   userLocation
@@ -9019,9 +9788,9 @@ function webSearchPreviewTool({
 var openaiTools = {
   webSearchPreview: webSearchPreviewTool
 };
-var OpenAIProviderOptionsSchema = z$1.object({
-  instructions: z$1.string().nullish(),
-  speed: z$1.number().min(0.25).max(4).default(1).nullish()
+var OpenAIProviderOptionsSchema = z.object({
+  instructions: z.string().nullish(),
+  speed: z.number().min(0.25).max(4).default(1).nullish()
 });
 var OpenAISpeechModel = class {
   constructor(modelId, config) {
@@ -9299,11 +10068,9 @@ __export(workflows_exports, {
   DELETE_WORKFLOW_RUN_BY_ID_ROUTE: () => DELETE_WORKFLOW_RUN_BY_ID_ROUTE,
   GET_WORKFLOW_BY_ID_ROUTE: () => GET_WORKFLOW_BY_ID_ROUTE,
   GET_WORKFLOW_RUN_BY_ID_ROUTE: () => GET_WORKFLOW_RUN_BY_ID_ROUTE,
-  GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE: () => GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE,
   LIST_WORKFLOWS_ROUTE: () => LIST_WORKFLOWS_ROUTE,
   LIST_WORKFLOW_RUNS_ROUTE: () => LIST_WORKFLOW_RUNS_ROUTE,
   OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE: () => OBSERVE_STREAM_LEGACY_WORKFLOW_ROUTE,
-  OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE: () => OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE,
   OBSERVE_STREAM_WORKFLOW_ROUTE: () => OBSERVE_STREAM_WORKFLOW_ROUTE,
   RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ASYNC_ROUTE,
   RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE: () => RESTART_ALL_ACTIVE_WORKFLOW_RUNS_ROUTE,
@@ -9315,13 +10082,12 @@ __export(workflows_exports, {
   START_ASYNC_WORKFLOW_ROUTE: () => START_ASYNC_WORKFLOW_ROUTE,
   START_WORKFLOW_RUN_ROUTE: () => START_WORKFLOW_RUN_ROUTE,
   STREAM_LEGACY_WORKFLOW_ROUTE: () => STREAM_LEGACY_WORKFLOW_ROUTE,
-  STREAM_VNEXT_WORKFLOW_ROUTE: () => STREAM_VNEXT_WORKFLOW_ROUTE,
   STREAM_WORKFLOW_ROUTE: () => STREAM_WORKFLOW_ROUTE,
   TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE: () => TIME_TRAVEL_ASYNC_WORKFLOW_ROUTE,
   TIME_TRAVEL_STREAM_WORKFLOW_ROUTE: () => TIME_TRAVEL_STREAM_WORKFLOW_ROUTE,
   TIME_TRAVEL_WORKFLOW_ROUTE: () => TIME_TRAVEL_WORKFLOW_ROUTE
 });
-var workflowRunStatusSchema = z.enum([
+var workflowRunStatusSchema = z$1.enum([
   "running",
   "waiting",
   "suspended",
@@ -9333,132 +10099,156 @@ var workflowRunStatusSchema = z.enum([
   "tripwire",
   "paused"
 ]);
-var workflowIdPathParams = z.object({
-  workflowId: z.string().describe("Unique identifier for the workflow")
+var workflowIdPathParams = z$1.object({
+  workflowId: z$1.string().describe("Unique identifier for the workflow")
 });
 var workflowRunPathParams = workflowIdPathParams.extend({
-  runId: z.string().describe("Unique identifier for the workflow run")
+  runId: z$1.string().describe("Unique identifier for the workflow run")
 });
-var serializedStepSchema = z.object({
-  id: z.string(),
-  description: z.string().optional()
+var serializedStepSchema = z$1.object({
+  id: z$1.string(),
+  description: z$1.string().optional(),
+  stateSchema: z$1.string().optional(),
+  inputSchema: z$1.string().optional(),
+  outputSchema: z$1.string().optional(),
+  resumeSchema: z$1.string().optional(),
+  suspendSchema: z$1.string().optional(),
+  component: z$1.string().optional(),
+  isWorkflow: z$1.boolean().optional()
 });
-var serializedStepFlowEntrySchema = z.object({
-  type: z.enum(["step", "sleep", "sleepUntil", "waitForEvent", "parallel", "conditional", "loop", "foreach"])
+var serializedStepFlowEntrySchema = z$1.object({
+  type: z$1.enum(["step", "sleep", "sleepUntil", "waitForEvent", "parallel", "conditional", "loop", "foreach"])
 });
-var workflowInfoSchema = z.object({
-  steps: z.record(z.string(), serializedStepSchema),
-  allSteps: z.record(z.string(), serializedStepSchema),
-  name: z.string().optional(),
-  description: z.string().optional(),
-  stepGraph: z.array(serializedStepFlowEntrySchema),
-  inputSchema: z.string().optional(),
-  outputSchema: z.string().optional(),
-  options: z.object({}).optional(),
-  isProcessorWorkflow: z.boolean().optional()
+var workflowInfoSchema = z$1.object({
+  steps: z$1.record(z$1.string(), serializedStepSchema),
+  allSteps: z$1.record(z$1.string(), serializedStepSchema),
+  name: z$1.string().optional(),
+  description: z$1.string().optional(),
+  stepGraph: z$1.array(serializedStepFlowEntrySchema),
+  inputSchema: z$1.string().optional(),
+  outputSchema: z$1.string().optional(),
+  stateSchema: z$1.string().optional(),
+  options: z$1.object({}).optional(),
+  isProcessorWorkflow: z$1.boolean().optional()
 });
-var listWorkflowsResponseSchema = z.record(z.string(), workflowInfoSchema);
-var workflowRunSchema = z.object({
-  workflowName: z.string(),
-  runId: z.string(),
-  snapshot: z.union([z.object({}), z.string()]),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-  resourceId: z.string().optional()
+var listWorkflowsResponseSchema = z$1.record(z$1.string(), workflowInfoSchema);
+var workflowRunSchema = z$1.object({
+  workflowName: z$1.string(),
+  runId: z$1.string(),
+  snapshot: z$1.union([z$1.object({}), z$1.string()]),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date(),
+  resourceId: z$1.string().optional()
 });
-var workflowRunsResponseSchema = z.object({
-  runs: z.array(workflowRunSchema),
-  total: z.number()
+var workflowRunsResponseSchema = z$1.object({
+  runs: z$1.array(workflowRunSchema),
+  total: z$1.number()
 });
-var workflowRunResponseSchema = workflowRunSchema;
 var listWorkflowRunsQuerySchema = createCombinedPaginationSchema().extend({
-  fromDate: z.coerce.date().optional(),
-  toDate: z.coerce.date().optional(),
-  resourceId: z.string().optional(),
+  fromDate: z$1.coerce.date().optional(),
+  toDate: z$1.coerce.date().optional(),
+  resourceId: z$1.string().optional(),
   status: workflowRunStatusSchema.optional()
 });
-var workflowExecutionBodySchema = z.object({
-  resourceId: z.string().optional(),
-  inputData: z.unknown().optional(),
-  initialState: z.unknown().optional(),
-  requestContext: z.record(z.string(), z.unknown()).optional(),
+var workflowExecutionBodySchema = z$1.object({
+  resourceId: z$1.string().optional(),
+  inputData: z$1.unknown().optional(),
+  initialState: z$1.unknown().optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
   tracingOptions: tracingOptionsSchema.optional(),
-  perStep: z.boolean().optional()
+  perStep: z$1.boolean().optional()
 });
 var streamLegacyWorkflowBodySchema = workflowExecutionBodySchema;
 var streamWorkflowBodySchema = workflowExecutionBodySchema.extend({
-  closeOnSuspend: z.boolean().optional()
+  closeOnSuspend: z$1.boolean().optional()
 });
-var resumeBodySchema = z.object({
-  step: z.union([z.string(), z.array(z.string())]).optional(),
+var resumeBodySchema = z$1.object({
+  step: z$1.union([z$1.string(), z$1.array(z$1.string())]).optional(),
   // Optional - workflow can auto-resume all suspended steps
-  resumeData: z.unknown().optional(),
-  requestContext: z.record(z.string(), z.unknown()).optional(),
+  resumeData: z$1.unknown().optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
   tracingOptions: tracingOptionsSchema.optional(),
-  perStep: z.boolean().optional()
+  perStep: z$1.boolean().optional()
 });
-var restartBodySchema = z.object({
-  requestContext: z.record(z.string(), z.unknown()).optional(),
+var restartBodySchema = z$1.object({
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
   tracingOptions: tracingOptionsSchema.optional()
 });
-var timeTravelBodySchema = z.object({
-  inputData: z.unknown().optional(),
-  resumeData: z.unknown().optional(),
-  initialState: z.unknown().optional(),
-  step: z.union([z.string(), z.array(z.string())]),
-  context: z.record(z.string(), z.any()).optional(),
-  nestedStepsContext: z.record(z.string(), z.record(z.string(), z.any())).optional(),
-  requestContext: z.record(z.string(), z.unknown()).optional(),
+var timeTravelBodySchema = z$1.object({
+  inputData: z$1.unknown().optional(),
+  resumeData: z$1.unknown().optional(),
+  initialState: z$1.unknown().optional(),
+  step: z$1.union([z$1.string(), z$1.array(z$1.string())]),
+  context: z$1.record(z$1.string(), z$1.any()).optional(),
+  nestedStepsContext: z$1.record(z$1.string(), z$1.record(z$1.string(), z$1.any())).optional(),
+  requestContext: z$1.record(z$1.string(), z$1.unknown()).optional(),
   tracingOptions: tracingOptionsSchema.optional(),
-  perStep: z.boolean().optional()
+  perStep: z$1.boolean().optional()
 });
 var startAsyncWorkflowBodySchema = workflowExecutionBodySchema;
-z.object({
-  event: z.string(),
-  data: z.unknown()
+z$1.object({
+  event: z$1.string(),
+  data: z$1.unknown()
 });
-var workflowExecutionResultQuerySchema = z.object({
-  fields: z.string().optional().refine(
-    (value) => {
-      if (!value) return true;
-      const validFields = /* @__PURE__ */ new Set([
-        "status",
-        "result",
-        "error",
-        "payload",
-        "steps",
-        "activeStepsPath",
-        "serializedStepGraph"
-      ]);
-      const requestedFields = value.split(",").map((f) => f.trim());
-      return requestedFields.every((field) => validFields.has(field));
-    },
-    {
-      message: "Invalid field name. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph"
-    }
-  ).describe(
-    "Comma-separated list of fields to return. Available fields: status, result, error, payload, steps, activeStepsPath, serializedStepGraph. If not provided, returns all fields."
-  ),
-  withNestedWorkflows: z.enum(["true", "false"]).optional().describe(
-    "Whether to include nested workflow data in steps. Defaults to true. Set to false for better performance."
-  )
-});
-var workflowExecutionResultSchema = z.object({
+var VALID_WORKFLOW_RESULT_FIELDS = /* @__PURE__ */ new Set([
+  "result",
+  "error",
+  "payload",
+  "steps",
+  "activeStepsPath",
+  "serializedStepGraph"
+]);
+var WORKFLOW_RESULT_FIELDS_ERROR = "Invalid field name. Available fields: result, error, payload, steps, activeStepsPath, serializedStepGraph";
+var createFieldsValidator = (description) => z$1.string().optional().refine(
+  (value) => {
+    if (!value) return true;
+    const requestedFields = value.split(",").map((f) => f.trim());
+    return requestedFields.every((field) => VALID_WORKFLOW_RESULT_FIELDS.has(field));
+  },
+  { message: WORKFLOW_RESULT_FIELDS_ERROR }
+).describe(description);
+var withNestedWorkflowsField = z$1.enum(["true", "false"]).optional().describe("Whether to include nested workflow data in steps. Defaults to true. Set to false for better performance.");
+var workflowExecutionResultSchema = z$1.object({
   status: workflowRunStatusSchema.optional(),
-  result: z.unknown().optional(),
-  error: z.unknown().optional(),
-  payload: z.unknown().optional(),
-  steps: z.record(z.string(), z.any()).optional(),
-  activeStepsPath: z.record(z.string(), z.array(z.number())).optional(),
-  serializedStepGraph: z.array(serializedStepFlowEntrySchema).optional()
+  result: z$1.unknown().optional(),
+  error: z$1.unknown().optional(),
+  payload: z$1.unknown().optional(),
+  initialState: z$1.unknown().optional(),
+  steps: z$1.record(z$1.string(), z$1.any()).optional(),
+  activeStepsPath: z$1.record(z$1.string(), z$1.array(z$1.number())).optional(),
+  serializedStepGraph: z$1.array(serializedStepFlowEntrySchema).optional()
+});
+var workflowRunResultQuerySchema = z$1.object({
+  fields: createFieldsValidator(
+    "Comma-separated list of fields to return. Available fields: result, error, payload, steps, activeStepsPath, serializedStepGraph. Metadata fields (runId, workflowName, resourceId, createdAt, updatedAt) and status are always included."
+  ),
+  withNestedWorkflows: withNestedWorkflowsField
+});
+var workflowRunResultSchema = z$1.object({
+  // Metadata - always present
+  runId: z$1.string(),
+  workflowName: z$1.string(),
+  resourceId: z$1.string().optional(),
+  createdAt: z$1.date(),
+  updatedAt: z$1.date(),
+  // Execution state
+  status: workflowRunStatusSchema,
+  initialState: z$1.record(z$1.string(), z$1.any()).optional(),
+  result: z$1.unknown().optional(),
+  error: z$1.unknown().optional(),
+  payload: z$1.unknown().optional(),
+  steps: z$1.record(z$1.string(), z$1.any()).optional(),
+  // Optional detailed fields
+  activeStepsPath: z$1.record(z$1.string(), z$1.array(z$1.number())).optional(),
+  serializedStepGraph: z$1.array(serializedStepFlowEntrySchema).optional()
 });
 var workflowControlResponseSchema = messageResponseSchema;
-var createWorkflowRunResponseSchema = z.object({
-  runId: z.string()
+var createWorkflowRunResponseSchema = z$1.object({
+  runId: z$1.string()
 });
-var createWorkflowRunBodySchema = z.object({
-  resourceId: z.string().optional(),
-  disableScorers: z.boolean().optional()
+var createWorkflowRunBodySchema = z$1.object({
+  resourceId: z$1.string().optional(),
+  disableScorers: z$1.boolean().optional()
 });
 
 // src/server/handlers/workflows.ts
@@ -9503,8 +10293,8 @@ var LIST_WORKFLOWS_ROUTE = createRoute({
   method: "GET",
   path: "/api/workflows",
   responseType: "json",
-  queryParamSchema: z$1.object({
-    partial: z$1.string().optional()
+  queryParamSchema: z.object({
+    partial: z.string().optional()
   }),
   responseSchema: listWorkflowsResponseSchema,
   summary: "List all workflows",
@@ -9600,11 +10390,12 @@ var GET_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
   path: "/api/workflows/:workflowId/runs/:runId",
   responseType: "json",
   pathParamSchema: workflowRunPathParams,
-  responseSchema: workflowRunResponseSchema,
+  queryParamSchema: workflowRunResultQuerySchema,
+  responseSchema: workflowRunResultSchema,
   summary: "Get workflow run by ID",
-  description: "Returns details for a specific workflow run",
+  description: "Returns a workflow run with metadata and processed execution state. Use the fields query parameter to reduce payload size by requesting only specific fields (e.g., ?fields=status,result,metadata)",
   tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId }) => {
+  handler: async ({ mastra, workflowId, runId, fields, withNestedWorkflows }) => {
     try {
       if (!workflowId) {
         throw new HTTPException$2(400, { message: "Workflow ID is required" });
@@ -9616,7 +10407,12 @@ var GET_WORKFLOW_RUN_BY_ID_ROUTE = createRoute({
       if (!workflow) {
         throw new HTTPException$2(404, { message: "Workflow not found" });
       }
-      const run = await workflow.getWorkflowRunById(runId);
+      const fieldList = fields ? fields.split(",").map((f) => f.trim()) : void 0;
+      const run = await workflow.getWorkflowRunById(runId, {
+        withNestedWorkflows: withNestedWorkflows !== "false",
+        // Default to true unless explicitly 'false'
+        fields: fieldList
+      });
       if (!run) {
         throw new HTTPException$2(404, { message: "Workflow run not found" });
       }
@@ -9723,18 +10519,6 @@ var STREAM_WORKFLOW_ROUTE = createRoute({
     }
   }
 });
-var STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/streamVNext",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: streamWorkflowBodySchema,
-  summary: "Stream workflow execution (v2)",
-  description: "Executes a workflow using the v2 streaming API and streams the results in real-time",
-  tags: ["Workflows"],
-  handler: STREAM_WORKFLOW_ROUTE.handler
-});
 var RESUME_STREAM_WORKFLOW_ROUTE = createRoute({
   method: "POST",
   path: "/api/workflows/:workflowId/resume-stream",
@@ -9779,43 +10563,6 @@ var RESUME_STREAM_WORKFLOW_ROUTE = createRoute({
       return stream;
     } catch (error) {
       return handleError$1(error, "Error resuming workflow");
-    }
-  }
-});
-var GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/workflows/:workflowId/runs/:runId/execution-result",
-  responseType: "json",
-  pathParamSchema: workflowRunPathParams,
-  queryParamSchema: workflowExecutionResultQuerySchema,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Get workflow execution result",
-  description: "Returns the final execution result of a completed workflow run. Use the fields query parameter to reduce payload size by requesting only specific fields (e.g., ?fields=status,result)",
-  tags: ["Workflows"],
-  handler: async ({ mastra, workflowId, runId, fields, withNestedWorkflows }) => {
-    try {
-      if (!workflowId) {
-        throw new HTTPException$2(400, { message: "Workflow ID is required" });
-      }
-      if (!runId) {
-        throw new HTTPException$2(400, { message: "Run ID is required" });
-      }
-      const { workflow } = await listWorkflowsFromSystem({ mastra, workflowId });
-      if (!workflow) {
-        throw new HTTPException$2(404, { message: "Workflow not found" });
-      }
-      const fieldList = fields ? fields.split(",").map((f) => f.trim()) : void 0;
-      const executionResult = await workflow.getWorkflowRunExecutionResult(runId, {
-        withNestedWorkflows: withNestedWorkflows !== "false",
-        // Default to true unless explicitly 'false'
-        fields: fieldList
-      });
-      if (!executionResult) {
-        throw new HTTPException$2(404, { message: "Workflow run execution result not found" });
-      }
-      return executionResult;
-    } catch (error) {
-      return handleError$1(error, "Error getting workflow run execution result");
     }
   }
 });
@@ -9953,18 +10700,6 @@ var OBSERVE_STREAM_WORKFLOW_ROUTE = createRoute({
       return handleError$1(error, "Error observing workflow stream");
     }
   }
-});
-var OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/workflows/:workflowId/observe-streamVNext",
-  responseType: "stream",
-  pathParamSchema: workflowIdPathParams,
-  queryParamSchema: runIdSchema,
-  responseSchema: streamResponseSchema,
-  summary: "Observe workflow stream (v2)",
-  description: "Observes and streams updates from an already running workflow execution using v2 streaming API",
-  tags: ["Workflows"],
-  handler: OBSERVE_STREAM_WORKFLOW_ROUTE.handler
 });
 var RESUME_ASYNC_WORKFLOW_ROUTE = createRoute({
   method: "POST",
@@ -10479,7 +11214,7 @@ var require_ignore = __commonJS$3({
     var SLASH = "/";
     var TMP_KEY_IGNORE = "node-ignore";
     if (typeof Symbol !== "undefined") {
-      TMP_KEY_IGNORE = Symbol.for("node-ignore");
+      TMP_KEY_IGNORE = /* @__PURE__ */ Symbol.for("node-ignore");
     }
     var KEY_IGNORE = TMP_KEY_IGNORE;
     var define = (object5, key, value) => {
@@ -10912,7 +11647,7 @@ var require_ignore = __commonJS$3({
     module.exports = factory;
     factory.default = factory;
     module.exports.isPathValid = isPathValid;
-    define(module.exports, Symbol.for("setupWindows"), setupWindows);
+    define(module.exports, /* @__PURE__ */ Symbol.for("setupWindows"), setupWindows);
   }
 });
 
@@ -10923,24 +11658,21 @@ __export(agent_builder_exports, {
   CREATE_AGENT_BUILDER_ACTION_RUN_ROUTE: () => CREATE_AGENT_BUILDER_ACTION_RUN_ROUTE,
   GET_AGENT_BUILDER_ACTION_BY_ID_ROUTE: () => GET_AGENT_BUILDER_ACTION_BY_ID_ROUTE,
   GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE: () => GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE,
-  GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE: () => GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE,
   LIST_AGENT_BUILDER_ACTIONS_ROUTE: () => LIST_AGENT_BUILDER_ACTIONS_ROUTE,
   LIST_AGENT_BUILDER_ACTION_RUNS_ROUTE: () => LIST_AGENT_BUILDER_ACTION_RUNS_ROUTE,
   OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE: () => OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE,
   OBSERVE_STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE: () => OBSERVE_STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE,
-  OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE: () => OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_AGENT_BUILDER_ACTION_ROUTE: () => RESUME_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_ASYNC_AGENT_BUILDER_ACTION_ROUTE: () => RESUME_ASYNC_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_STREAM_AGENT_BUILDER_ACTION_ROUTE: () => RESUME_STREAM_AGENT_BUILDER_ACTION_ROUTE,
   START_AGENT_BUILDER_ACTION_RUN_ROUTE: () => START_AGENT_BUILDER_ACTION_RUN_ROUTE,
   START_ASYNC_AGENT_BUILDER_ACTION_ROUTE: () => START_ASYNC_AGENT_BUILDER_ACTION_ROUTE,
   STREAM_AGENT_BUILDER_ACTION_ROUTE: () => STREAM_AGENT_BUILDER_ACTION_ROUTE,
-  STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE: () => STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE,
-  STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE: () => STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE
+  STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE: () => STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE
 });
 
 // ../../node_modules/.pnpm/zod-to-json-schema@3.24.6_zod@3.25.76/node_modules/zod-to-json-schema/dist/esm/Options.js
-var ignoreOverride = Symbol("Let zodToJsonSchema decide on which parser to use");
+var ignoreOverride = /* @__PURE__ */ Symbol("Let zodToJsonSchema decide on which parser to use");
 var defaultOptions = {
   name: void 0,
   $refStrategy: "root",
@@ -12211,8 +12943,8 @@ var zodToJsonSchema = (schema, options) => {
 // ../../node_modules/.pnpm/zod-to-json-schema@3.24.6_zod@3.25.76/node_modules/zod-to-json-schema/dist/esm/index.js
 var esm_default = zodToJsonSchema;
 
-// ../schema-compat/dist/chunk-3UNBRBSM.js
-var PATCHED = Symbol("__mastra_patched__");
+// ../schema-compat/dist/chunk-3RG3ZAXL.js
+var PATCHED = /* @__PURE__ */ Symbol("__mastra_patched__");
 function patchRecordSchemas(schema) {
   if (!schema || typeof schema !== "object") return schema;
   if (schema[PATCHED]) return schema;
@@ -12220,7 +12952,7 @@ function patchRecordSchemas(schema) {
   const def = schema._zod?.def;
   if (def?.type === "record" && def.keyType && !def.valueType) {
     def.valueType = def.keyType;
-    def.keyType = z$1.string();
+    def.keyType = z.string();
   }
   if (!def) return schema;
   if (def.type === "object" && def.shape) {
@@ -12262,9 +12994,9 @@ function patchRecordSchemas(schema) {
 }
 function zodToJsonSchema2(zodSchema5, target = "jsonSchema7", strategy = "relative") {
   const fn = "toJSONSchema";
-  if (fn in z$1) {
+  if (fn in z) {
     patchRecordSchemas(zodSchema5);
-    return z$1[fn](zodSchema5, {
+    return z[fn](zodSchema5, {
       unrepresentable: "any",
       override: (ctx) => {
         const def = ctx.zodSchema?._def || ctx.zodSchema?._zod?.def;
@@ -13306,26 +14038,26 @@ function convertJsonSchemaToZod2(schema) {
   }
   if (schema.const !== void 0) {
     if (typeof schema.const === "string") {
-      return addMetadata(z$1.literal(schema.const), schema);
+      return addMetadata(z.literal(schema.const), schema);
     } else if (typeof schema.const === "number") {
-      return addMetadata(z$1.literal(schema.const), schema);
+      return addMetadata(z.literal(schema.const), schema);
     } else if (typeof schema.const === "boolean") {
-      return addMetadata(z$1.literal(schema.const), schema);
+      return addMetadata(z.literal(schema.const), schema);
     } else if (schema.const === null) {
-      return addMetadata(z$1.null(), schema);
+      return addMetadata(z.null(), schema);
     }
-    return addMetadata(z$1.literal(schema.const), schema);
+    return addMetadata(z.literal(schema.const), schema);
   }
   if (schema.type) {
     switch (schema.type) {
       case "string": {
         if (schema.enum) {
           if (schema.enum.length === 0) {
-            return addMetadata(z$1.string(), schema);
+            return addMetadata(z.string(), schema);
           }
-          return addMetadata(z$1.enum(schema.enum), schema);
+          return addMetadata(z.enum(schema.enum), schema);
         }
-        let stringSchema = z$1.string();
+        let stringSchema = z.string();
         if (schema.minLength !== void 0) {
           stringSchema = stringSchema.min(schema.minLength);
         }
@@ -13342,18 +14074,18 @@ function convertJsonSchemaToZod2(schema) {
       case "integer": {
         if (schema.enum) {
           if (schema.enum.length === 0) {
-            return addMetadata(z$1.number(), schema);
+            return addMetadata(z.number(), schema);
           }
-          const options = schema.enum.map((val) => z$1.literal(val));
+          const options = schema.enum.map((val) => z.literal(val));
           if (options.length === 1) {
             return addMetadata(options[0], schema);
           }
           if (options.length >= 2) {
-            const unionSchema = z$1.union([options[0], options[1], ...options.slice(2)]);
+            const unionSchema = z.union([options[0], options[1], ...options.slice(2)]);
             return addMetadata(unionSchema, schema);
           }
         }
-        let numberSchema = schema.type === "integer" ? z$1.number().int() : z$1.number();
+        let numberSchema = schema.type === "integer" ? z.number().int() : z.number();
         if (schema.minimum !== void 0) {
           numberSchema = numberSchema.min(schema.minimum);
         }
@@ -13374,20 +14106,20 @@ function convertJsonSchemaToZod2(schema) {
       case "boolean":
         if (schema.enum) {
           if (schema.enum.length === 0) {
-            return addMetadata(z$1.boolean(), schema);
+            return addMetadata(z.boolean(), schema);
           }
-          const options = schema.enum.map((val) => z$1.literal(val));
+          const options = schema.enum.map((val) => z.literal(val));
           if (options.length === 1) {
             return addMetadata(options[0], schema);
           }
           if (options.length >= 2) {
-            const unionSchema = z$1.union([options[0], options[1], ...options.slice(2)]);
+            const unionSchema = z.union([options[0], options[1], ...options.slice(2)]);
             return addMetadata(unionSchema, schema);
           }
         }
-        return addMetadata(z$1.boolean(), schema);
+        return addMetadata(z.boolean(), schema);
       case "null":
-        return addMetadata(z$1.null(), schema);
+        return addMetadata(z.null(), schema);
       case "object":
         if (schema.properties) {
           const shape = {};
@@ -13410,19 +14142,19 @@ function convertJsonSchemaToZod2(schema) {
           }
           let zodSchema5;
           if (schema.additionalProperties !== false) {
-            zodSchema5 = z$1.object(shape).passthrough();
+            zodSchema5 = z.object(shape).passthrough();
           } else {
-            zodSchema5 = z$1.object(shape);
+            zodSchema5 = z.object(shape);
           }
           return addMetadata(zodSchema5, schema);
         }
-        return addMetadata(z$1.object({}), schema);
+        return addMetadata(z.object({}), schema);
       case "array": {
         let arraySchema;
         if (schema.items) {
-          arraySchema = z$1.array(convertJsonSchemaToZod2(schema.items));
+          arraySchema = z.array(convertJsonSchemaToZod2(schema.items));
         } else {
-          arraySchema = z$1.array(z$1.any());
+          arraySchema = z.array(z.any());
         }
         if (schema.minItems !== void 0) {
           arraySchema = arraySchema.min(schema.minItems);
@@ -13455,18 +14187,18 @@ function convertJsonSchemaToZod2(schema) {
   }
   if (schema.enum) {
     if (schema.enum.length === 0) {
-      return addMetadata(z$1.never(), schema);
+      return addMetadata(z.never(), schema);
     }
     const allStrings = schema.enum.every((val) => typeof val === "string");
     if (allStrings) {
-      return addMetadata(z$1.enum(schema.enum), schema);
+      return addMetadata(z.enum(schema.enum), schema);
     } else {
-      const options = schema.enum.map((val) => z$1.literal(val));
+      const options = schema.enum.map((val) => z.literal(val));
       if (options.length === 1) {
         return addMetadata(options[0], schema);
       }
       if (options.length >= 2) {
-        const unionSchema = z$1.union([options[0], options[1], ...options.slice(2)]);
+        const unionSchema = z.union([options[0], options[1], ...options.slice(2)]);
         return addMetadata(unionSchema, schema);
       }
     }
@@ -13474,15 +14206,15 @@ function convertJsonSchemaToZod2(schema) {
   if (schema.anyOf && schema.anyOf.length >= 2) {
     const schemas = schema.anyOf.map(convertJsonSchemaToZod2);
     return addMetadata(
-      z$1.union([schemas[0], schemas[1], ...schemas.slice(2)]),
+      z.union([schemas[0], schemas[1], ...schemas.slice(2)]),
       schema
     );
   }
   if (schema.allOf) {
     return addMetadata(
       schema.allOf.reduce(
-        (acc, s) => z$1.intersection(acc, convertJsonSchemaToZod2(s)),
-        z$1.object({})
+        (acc, s) => z.intersection(acc, convertJsonSchemaToZod2(s)),
+        z.object({})
       ),
       schema
     );
@@ -13490,11 +14222,11 @@ function convertJsonSchemaToZod2(schema) {
   if (schema.oneOf && schema.oneOf.length >= 2) {
     const schemas = schema.oneOf.map(convertJsonSchemaToZod2);
     return addMetadata(
-      z$1.union([schemas[0], schemas[1], ...schemas.slice(2)]),
+      z.union([schemas[0], schemas[1], ...schemas.slice(2)]),
       schema
     );
   }
-  return addMetadata(z$1.any(), schema);
+  return addMetadata(z.any(), schema);
 }
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -13804,7 +14536,7 @@ var createIdGenerator = ({
   return (size) => `${prefix}${separator}${generator(size)}`;
 };
 createIdGenerator();
-var validatorSymbol = Symbol.for("vercel.ai.validator");
+var validatorSymbol = /* @__PURE__ */ Symbol.for("vercel.ai.validator");
 function validator(validate) {
   return { [validatorSymbol]: true, validate };
 }
@@ -13862,7 +14594,7 @@ function safeParseJSON({
     };
   }
 }
-var ignoreOverride2 = Symbol("Let zodToJsonSchema decide on which parser to use");
+var ignoreOverride2 = /* @__PURE__ */ Symbol("Let zodToJsonSchema decide on which parser to use");
 var defaultOptions2 = {
   name: void 0,
   $refStrategy: "root",
@@ -15670,7 +16402,7 @@ function zodSchema(zodSchema23, options) {
     }
   );
 }
-var schemaSymbol = Symbol.for("vercel.ai.schema");
+var schemaSymbol = /* @__PURE__ */ Symbol.for("vercel.ai.schema");
 function jsonSchema(jsonSchema23, {
   validate
 } = {}) {
@@ -15757,7 +16489,7 @@ function _makeCompatibilityCheck(ownVersion) {
 }
 var isCompatible = _makeCompatibilityCheck(VERSION);
 var major = VERSION.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY = Symbol.for("opentelemetry.js.api." + major);
+var GLOBAL_OPENTELEMETRY_API_KEY = /* @__PURE__ */ Symbol.for("opentelemetry.js.api." + major);
 var _global = _globalThis;
 function registerGlobal(type, instance, diag, allowOverride) {
   var _a172;
@@ -16437,11 +17169,11 @@ var NoObjectGeneratedError = class extends AISDKError {
   }
 };
 _a42 = symbol42;
-var dataContentSchema = z$1.union([
-  z$1.string(),
-  z$1.instanceof(Uint8Array),
-  z$1.instanceof(ArrayBuffer),
-  z$1.custom(
+var dataContentSchema = z.union([
+  z.string(),
+  z.instanceof(Uint8Array),
+  z.instanceof(ArrayBuffer),
+  z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
       var _a172, _b10;
@@ -16450,102 +17182,102 @@ var dataContentSchema = z$1.union([
     { message: "Must be a Buffer" }
   )
 ]);
-var jsonValueSchema = z$1.lazy(
-  () => z$1.union([
-    z$1.null(),
-    z$1.string(),
-    z$1.number(),
-    z$1.boolean(),
-    z$1.record(z$1.string(), jsonValueSchema),
-    z$1.array(jsonValueSchema)
+var jsonValueSchema = z.lazy(
+  () => z.union([
+    z.null(),
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.record(z.string(), jsonValueSchema),
+    z.array(jsonValueSchema)
   ])
 );
-var providerMetadataSchema = z$1.record(
-  z$1.string(),
-  z$1.record(z$1.string(), jsonValueSchema)
+var providerMetadataSchema = z.record(
+  z.string(),
+  z.record(z.string(), jsonValueSchema)
 );
-var toolResultContentSchema = z$1.array(
-  z$1.union([
-    z$1.object({ type: z$1.literal("text"), text: z$1.string() }),
-    z$1.object({
-      type: z$1.literal("image"),
-      data: z$1.string(),
-      mimeType: z$1.string().optional()
+var toolResultContentSchema = z.array(
+  z.union([
+    z.object({ type: z.literal("text"), text: z.string() }),
+    z.object({
+      type: z.literal("image"),
+      data: z.string(),
+      mimeType: z.string().optional()
     })
   ])
 );
-var textPartSchema = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string(),
+var textPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var imagePartSchema = z$1.object({
-  type: z$1.literal("image"),
-  image: z$1.union([dataContentSchema, z$1.instanceof(URL)]),
-  mimeType: z$1.string().optional(),
+var imagePartSchema = z.object({
+  type: z.literal("image"),
+  image: z.union([dataContentSchema, z.instanceof(URL)]),
+  mimeType: z.string().optional(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var filePartSchema = z$1.object({
-  type: z$1.literal("file"),
-  data: z$1.union([dataContentSchema, z$1.instanceof(URL)]),
-  filename: z$1.string().optional(),
-  mimeType: z$1.string(),
+var filePartSchema = z.object({
+  type: z.literal("file"),
+  data: z.union([dataContentSchema, z.instanceof(URL)]),
+  filename: z.string().optional(),
+  mimeType: z.string(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var reasoningPartSchema = z$1.object({
-  type: z$1.literal("reasoning"),
-  text: z$1.string(),
+var reasoningPartSchema = z.object({
+  type: z.literal("reasoning"),
+  text: z.string(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var redactedReasoningPartSchema = z$1.object({
-  type: z$1.literal("redacted-reasoning"),
-  data: z$1.string(),
+var redactedReasoningPartSchema = z.object({
+  type: z.literal("redacted-reasoning"),
+  data: z.string(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var toolCallPartSchema = z$1.object({
-  type: z$1.literal("tool-call"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  args: z$1.unknown(),
+var toolCallPartSchema = z.object({
+  type: z.literal("tool-call"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  args: z.unknown(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var toolResultPartSchema = z$1.object({
-  type: z$1.literal("tool-result"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  result: z$1.unknown(),
+var toolResultPartSchema = z.object({
+  type: z.literal("tool-result"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  result: z.unknown(),
   content: toolResultContentSchema.optional(),
-  isError: z$1.boolean().optional(),
+  isError: z.boolean().optional(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var coreSystemMessageSchema = z$1.object({
-  role: z$1.literal("system"),
-  content: z$1.string(),
+var coreSystemMessageSchema = z.object({
+  role: z.literal("system"),
+  content: z.string(),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var coreUserMessageSchema = z$1.object({
-  role: z$1.literal("user"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(z$1.union([textPartSchema, imagePartSchema, filePartSchema]))
+var coreUserMessageSchema = z.object({
+  role: z.literal("user"),
+  content: z.union([
+    z.string(),
+    z.array(z.union([textPartSchema, imagePartSchema, filePartSchema]))
   ]),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var coreAssistantMessageSchema = z$1.object({
-  role: z$1.literal("assistant"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(
-      z$1.union([
+var coreAssistantMessageSchema = z.object({
+  role: z.literal("assistant"),
+  content: z.union([
+    z.string(),
+    z.array(
+      z.union([
         textPartSchema,
         filePartSchema,
         reasoningPartSchema,
@@ -16557,13 +17289,13 @@ var coreAssistantMessageSchema = z$1.object({
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-var coreToolMessageSchema = z$1.object({
-  role: z$1.literal("tool"),
-  content: z$1.array(toolResultPartSchema),
+var coreToolMessageSchema = z.object({
+  role: z.literal("tool"),
+  content: z.array(toolResultPartSchema),
   providerOptions: providerMetadataSchema.optional(),
   experimental_providerMetadata: providerMetadataSchema.optional()
 });
-z$1.union([
+z.union([
   coreSystemMessageSchema,
   coreUserMessageSchema,
   coreAssistantMessageSchema,
@@ -16773,125 +17505,125 @@ createIdGenerator({
   prefix: "msg",
   size: 24
 });
-var ClientOrServerImplementationSchema = z$1.object({
-  name: z$1.string(),
-  version: z$1.string()
+var ClientOrServerImplementationSchema = z.object({
+  name: z.string(),
+  version: z.string()
 }).passthrough();
-var BaseParamsSchema = z$1.object({
-  _meta: z$1.optional(z$1.object({}).passthrough())
+var BaseParamsSchema = z.object({
+  _meta: z.optional(z.object({}).passthrough())
 }).passthrough();
 var ResultSchema = BaseParamsSchema;
-var RequestSchema = z$1.object({
-  method: z$1.string(),
-  params: z$1.optional(BaseParamsSchema)
+var RequestSchema = z.object({
+  method: z.string(),
+  params: z.optional(BaseParamsSchema)
 });
-var ServerCapabilitiesSchema = z$1.object({
-  experimental: z$1.optional(z$1.object({}).passthrough()),
-  logging: z$1.optional(z$1.object({}).passthrough()),
-  prompts: z$1.optional(
-    z$1.object({
-      listChanged: z$1.optional(z$1.boolean())
+var ServerCapabilitiesSchema = z.object({
+  experimental: z.optional(z.object({}).passthrough()),
+  logging: z.optional(z.object({}).passthrough()),
+  prompts: z.optional(
+    z.object({
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   ),
-  resources: z$1.optional(
-    z$1.object({
-      subscribe: z$1.optional(z$1.boolean()),
-      listChanged: z$1.optional(z$1.boolean())
+  resources: z.optional(
+    z.object({
+      subscribe: z.optional(z.boolean()),
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   ),
-  tools: z$1.optional(
-    z$1.object({
-      listChanged: z$1.optional(z$1.boolean())
+  tools: z.optional(
+    z.object({
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   )
 }).passthrough();
 ResultSchema.extend({
-  protocolVersion: z$1.string(),
+  protocolVersion: z.string(),
   capabilities: ServerCapabilitiesSchema,
   serverInfo: ClientOrServerImplementationSchema,
-  instructions: z$1.optional(z$1.string())
+  instructions: z.optional(z.string())
 });
 var PaginatedResultSchema = ResultSchema.extend({
-  nextCursor: z$1.optional(z$1.string())
+  nextCursor: z.optional(z.string())
 });
-var ToolSchema = z$1.object({
-  name: z$1.string(),
-  description: z$1.optional(z$1.string()),
-  inputSchema: z$1.object({
-    type: z$1.literal("object"),
-    properties: z$1.optional(z$1.object({}).passthrough())
+var ToolSchema = z.object({
+  name: z.string(),
+  description: z.optional(z.string()),
+  inputSchema: z.object({
+    type: z.literal("object"),
+    properties: z.optional(z.object({}).passthrough())
   }).passthrough()
 }).passthrough();
 PaginatedResultSchema.extend({
-  tools: z$1.array(ToolSchema)
+  tools: z.array(ToolSchema)
 });
-var TextContentSchema = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string()
+var TextContentSchema = z.object({
+  type: z.literal("text"),
+  text: z.string()
 }).passthrough();
-var ImageContentSchema = z$1.object({
-  type: z$1.literal("image"),
-  data: z$1.string().base64(),
-  mimeType: z$1.string()
+var ImageContentSchema = z.object({
+  type: z.literal("image"),
+  data: z.string().base64(),
+  mimeType: z.string()
 }).passthrough();
-var ResourceContentsSchema = z$1.object({
+var ResourceContentsSchema = z.object({
   /**
    * The URI of this resource.
    */
-  uri: z$1.string(),
+  uri: z.string(),
   /**
    * The MIME type of this resource, if known.
    */
-  mimeType: z$1.optional(z$1.string())
+  mimeType: z.optional(z.string())
 }).passthrough();
 var TextResourceContentsSchema = ResourceContentsSchema.extend({
-  text: z$1.string()
+  text: z.string()
 });
 var BlobResourceContentsSchema = ResourceContentsSchema.extend({
-  blob: z$1.string().base64()
+  blob: z.string().base64()
 });
-var EmbeddedResourceSchema = z$1.object({
-  type: z$1.literal("resource"),
-  resource: z$1.union([TextResourceContentsSchema, BlobResourceContentsSchema])
+var EmbeddedResourceSchema = z.object({
+  type: z.literal("resource"),
+  resource: z.union([TextResourceContentsSchema, BlobResourceContentsSchema])
 }).passthrough();
 ResultSchema.extend({
-  content: z$1.array(
-    z$1.union([TextContentSchema, ImageContentSchema, EmbeddedResourceSchema])
+  content: z.array(
+    z.union([TextContentSchema, ImageContentSchema, EmbeddedResourceSchema])
   ),
-  isError: z$1.boolean().default(false).optional()
+  isError: z.boolean().default(false).optional()
 }).or(
   ResultSchema.extend({
-    toolResult: z$1.unknown()
+    toolResult: z.unknown()
   })
 );
 var JSONRPC_VERSION = "2.0";
-var JSONRPCRequestSchema = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION),
-  id: z$1.union([z$1.string(), z$1.number().int()])
+var JSONRPCRequestSchema = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION),
+  id: z.union([z.string(), z.number().int()])
 }).merge(RequestSchema).strict();
-var JSONRPCResponseSchema = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
+var JSONRPCResponseSchema = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION),
+  id: z.union([z.string(), z.number().int()]),
   result: ResultSchema
 }).strict();
-var JSONRPCErrorSchema = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
-  error: z$1.object({
-    code: z$1.number().int(),
-    message: z$1.string(),
-    data: z$1.optional(z$1.unknown())
+var JSONRPCErrorSchema = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION),
+  id: z.union([z.string(), z.number().int()]),
+  error: z.object({
+    code: z.number().int(),
+    message: z.string(),
+    data: z.optional(z.unknown())
   })
 }).strict();
-var JSONRPCNotificationSchema = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION)
+var JSONRPCNotificationSchema = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION)
 }).merge(
-  z$1.object({
-    method: z$1.string(),
-    params: z$1.optional(BaseParamsSchema)
+  z.object({
+    method: z.string(),
+    params: z.optional(BaseParamsSchema)
   })
 ).strict();
-z$1.union([
+z.union([
   JSONRPCRequestSchema,
   JSONRPCNotificationSchema,
   JSONRPCResponseSchema,
@@ -17063,7 +17795,7 @@ function convertSchemaToZod(schema) {
   } else {
     const jsonSchemaToConvert = "jsonSchema" in schema ? schema.jsonSchema : schema;
     try {
-      if ("toJSONSchema" in z$1) {
+      if ("toJSONSchema" in z) {
         return convertJsonSchemaToZod(jsonSchemaToConvert);
       } else {
         return convertJsonSchemaToZod2(jsonSchemaToConvert);
@@ -17437,7 +18169,7 @@ function getErrorMessage22(error) {
 function isAbortError(error) {
   return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
 }
-var validatorSymbol2 = Symbol.for("vercel.ai.validator");
+var validatorSymbol2 = /* @__PURE__ */ Symbol.for("vercel.ai.validator");
 function validator2(validate) {
   return { [validatorSymbol2]: true, validate };
 }
@@ -17495,7 +18227,7 @@ function safeParseJSON2({
     };
   }
 }
-var ignoreOverride3 = Symbol("Let zodToJsonSchema decide on which parser to use");
+var ignoreOverride3 = /* @__PURE__ */ Symbol("Let zodToJsonSchema decide on which parser to use");
 var defaultOptions3 = {
   name: void 0,
   $refStrategy: "root",
@@ -19303,7 +20035,7 @@ function zodSchema2(zodSchema222, options) {
     }
   );
 }
-var schemaSymbol2 = Symbol.for("vercel.ai.schema");
+var schemaSymbol2 = /* @__PURE__ */ Symbol.for("vercel.ai.schema");
 function jsonSchema2(jsonSchema222, {
   validate
 } = {}) {
@@ -19390,7 +20122,7 @@ function _makeCompatibilityCheck2(ownVersion) {
 }
 var isCompatible2 = _makeCompatibilityCheck2(VERSION2);
 var major2 = VERSION2.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY2 = Symbol.for("opentelemetry.js.api." + major2);
+var GLOBAL_OPENTELEMETRY_API_KEY2 = /* @__PURE__ */ Symbol.for("opentelemetry.js.api." + major2);
 var _global2 = _globalThis2;
 function registerGlobal2(type, instance, diag, allowOverride) {
   var _a172;
@@ -20554,11 +21286,11 @@ var NoObjectGeneratedError2 = class extends AISDKError2 {
   }
 };
 _a422 = symbol422;
-var dataContentSchema2 = z$1.union([
-  z$1.string(),
-  z$1.instanceof(Uint8Array),
-  z$1.instanceof(ArrayBuffer),
-  z$1.custom(
+var dataContentSchema2 = z.union([
+  z.string(),
+  z.instanceof(Uint8Array),
+  z.instanceof(ArrayBuffer),
+  z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
       var _a172, _b17;
@@ -20567,102 +21299,102 @@ var dataContentSchema2 = z$1.union([
     { message: "Must be a Buffer" }
   )
 ]);
-var jsonValueSchema2 = z$1.lazy(
-  () => z$1.union([
-    z$1.null(),
-    z$1.string(),
-    z$1.number(),
-    z$1.boolean(),
-    z$1.record(z$1.string(), jsonValueSchema2),
-    z$1.array(jsonValueSchema2)
+var jsonValueSchema2 = z.lazy(
+  () => z.union([
+    z.null(),
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.record(z.string(), jsonValueSchema2),
+    z.array(jsonValueSchema2)
   ])
 );
-var providerMetadataSchema2 = z$1.record(
-  z$1.string(),
-  z$1.record(z$1.string(), jsonValueSchema2)
+var providerMetadataSchema2 = z.record(
+  z.string(),
+  z.record(z.string(), jsonValueSchema2)
 );
-var toolResultContentSchema2 = z$1.array(
-  z$1.union([
-    z$1.object({ type: z$1.literal("text"), text: z$1.string() }),
-    z$1.object({
-      type: z$1.literal("image"),
-      data: z$1.string(),
-      mimeType: z$1.string().optional()
+var toolResultContentSchema2 = z.array(
+  z.union([
+    z.object({ type: z.literal("text"), text: z.string() }),
+    z.object({
+      type: z.literal("image"),
+      data: z.string(),
+      mimeType: z.string().optional()
     })
   ])
 );
-var textPartSchema2 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string(),
+var textPartSchema2 = z.object({
+  type: z.literal("text"),
+  text: z.string(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var imagePartSchema2 = z$1.object({
-  type: z$1.literal("image"),
-  image: z$1.union([dataContentSchema2, z$1.instanceof(URL)]),
-  mimeType: z$1.string().optional(),
+var imagePartSchema2 = z.object({
+  type: z.literal("image"),
+  image: z.union([dataContentSchema2, z.instanceof(URL)]),
+  mimeType: z.string().optional(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var filePartSchema2 = z$1.object({
-  type: z$1.literal("file"),
-  data: z$1.union([dataContentSchema2, z$1.instanceof(URL)]),
-  filename: z$1.string().optional(),
-  mimeType: z$1.string(),
+var filePartSchema2 = z.object({
+  type: z.literal("file"),
+  data: z.union([dataContentSchema2, z.instanceof(URL)]),
+  filename: z.string().optional(),
+  mimeType: z.string(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var reasoningPartSchema2 = z$1.object({
-  type: z$1.literal("reasoning"),
-  text: z$1.string(),
+var reasoningPartSchema2 = z.object({
+  type: z.literal("reasoning"),
+  text: z.string(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var redactedReasoningPartSchema2 = z$1.object({
-  type: z$1.literal("redacted-reasoning"),
-  data: z$1.string(),
+var redactedReasoningPartSchema2 = z.object({
+  type: z.literal("redacted-reasoning"),
+  data: z.string(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var toolCallPartSchema2 = z$1.object({
-  type: z$1.literal("tool-call"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  args: z$1.unknown(),
+var toolCallPartSchema2 = z.object({
+  type: z.literal("tool-call"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  args: z.unknown(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var toolResultPartSchema2 = z$1.object({
-  type: z$1.literal("tool-result"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  result: z$1.unknown(),
+var toolResultPartSchema2 = z.object({
+  type: z.literal("tool-result"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  result: z.unknown(),
   content: toolResultContentSchema2.optional(),
-  isError: z$1.boolean().optional(),
+  isError: z.boolean().optional(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var coreSystemMessageSchema2 = z$1.object({
-  role: z$1.literal("system"),
-  content: z$1.string(),
+var coreSystemMessageSchema2 = z.object({
+  role: z.literal("system"),
+  content: z.string(),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var coreUserMessageSchema2 = z$1.object({
-  role: z$1.literal("user"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(z$1.union([textPartSchema2, imagePartSchema2, filePartSchema2]))
+var coreUserMessageSchema2 = z.object({
+  role: z.literal("user"),
+  content: z.union([
+    z.string(),
+    z.array(z.union([textPartSchema2, imagePartSchema2, filePartSchema2]))
   ]),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var coreAssistantMessageSchema2 = z$1.object({
-  role: z$1.literal("assistant"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(
-      z$1.union([
+var coreAssistantMessageSchema2 = z.object({
+  role: z.literal("assistant"),
+  content: z.union([
+    z.string(),
+    z.array(
+      z.union([
         textPartSchema2,
         filePartSchema2,
         reasoningPartSchema2,
@@ -20674,13 +21406,13 @@ var coreAssistantMessageSchema2 = z$1.object({
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-var coreToolMessageSchema2 = z$1.object({
-  role: z$1.literal("tool"),
-  content: z$1.array(toolResultPartSchema2),
+var coreToolMessageSchema2 = z.object({
+  role: z.literal("tool"),
+  content: z.array(toolResultPartSchema2),
   providerOptions: providerMetadataSchema2.optional(),
   experimental_providerMetadata: providerMetadataSchema2.optional()
 });
-z$1.union([
+z.union([
   coreSystemMessageSchema2,
   coreUserMessageSchema2,
   coreAssistantMessageSchema2,
@@ -20890,125 +21622,125 @@ createIdGenerator2({
   prefix: "msg",
   size: 24
 });
-var ClientOrServerImplementationSchema2 = z$1.object({
-  name: z$1.string(),
-  version: z$1.string()
+var ClientOrServerImplementationSchema2 = z.object({
+  name: z.string(),
+  version: z.string()
 }).passthrough();
-var BaseParamsSchema2 = z$1.object({
-  _meta: z$1.optional(z$1.object({}).passthrough())
+var BaseParamsSchema2 = z.object({
+  _meta: z.optional(z.object({}).passthrough())
 }).passthrough();
 var ResultSchema2 = BaseParamsSchema2;
-var RequestSchema2 = z$1.object({
-  method: z$1.string(),
-  params: z$1.optional(BaseParamsSchema2)
+var RequestSchema2 = z.object({
+  method: z.string(),
+  params: z.optional(BaseParamsSchema2)
 });
-var ServerCapabilitiesSchema2 = z$1.object({
-  experimental: z$1.optional(z$1.object({}).passthrough()),
-  logging: z$1.optional(z$1.object({}).passthrough()),
-  prompts: z$1.optional(
-    z$1.object({
-      listChanged: z$1.optional(z$1.boolean())
+var ServerCapabilitiesSchema2 = z.object({
+  experimental: z.optional(z.object({}).passthrough()),
+  logging: z.optional(z.object({}).passthrough()),
+  prompts: z.optional(
+    z.object({
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   ),
-  resources: z$1.optional(
-    z$1.object({
-      subscribe: z$1.optional(z$1.boolean()),
-      listChanged: z$1.optional(z$1.boolean())
+  resources: z.optional(
+    z.object({
+      subscribe: z.optional(z.boolean()),
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   ),
-  tools: z$1.optional(
-    z$1.object({
-      listChanged: z$1.optional(z$1.boolean())
+  tools: z.optional(
+    z.object({
+      listChanged: z.optional(z.boolean())
     }).passthrough()
   )
 }).passthrough();
 ResultSchema2.extend({
-  protocolVersion: z$1.string(),
+  protocolVersion: z.string(),
   capabilities: ServerCapabilitiesSchema2,
   serverInfo: ClientOrServerImplementationSchema2,
-  instructions: z$1.optional(z$1.string())
+  instructions: z.optional(z.string())
 });
 var PaginatedResultSchema2 = ResultSchema2.extend({
-  nextCursor: z$1.optional(z$1.string())
+  nextCursor: z.optional(z.string())
 });
-var ToolSchema2 = z$1.object({
-  name: z$1.string(),
-  description: z$1.optional(z$1.string()),
-  inputSchema: z$1.object({
-    type: z$1.literal("object"),
-    properties: z$1.optional(z$1.object({}).passthrough())
+var ToolSchema2 = z.object({
+  name: z.string(),
+  description: z.optional(z.string()),
+  inputSchema: z.object({
+    type: z.literal("object"),
+    properties: z.optional(z.object({}).passthrough())
   }).passthrough()
 }).passthrough();
 PaginatedResultSchema2.extend({
-  tools: z$1.array(ToolSchema2)
+  tools: z.array(ToolSchema2)
 });
-var TextContentSchema2 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string()
+var TextContentSchema2 = z.object({
+  type: z.literal("text"),
+  text: z.string()
 }).passthrough();
-var ImageContentSchema2 = z$1.object({
-  type: z$1.literal("image"),
-  data: z$1.string().base64(),
-  mimeType: z$1.string()
+var ImageContentSchema2 = z.object({
+  type: z.literal("image"),
+  data: z.string().base64(),
+  mimeType: z.string()
 }).passthrough();
-var ResourceContentsSchema2 = z$1.object({
+var ResourceContentsSchema2 = z.object({
   /**
    * The URI of this resource.
    */
-  uri: z$1.string(),
+  uri: z.string(),
   /**
    * The MIME type of this resource, if known.
    */
-  mimeType: z$1.optional(z$1.string())
+  mimeType: z.optional(z.string())
 }).passthrough();
 var TextResourceContentsSchema2 = ResourceContentsSchema2.extend({
-  text: z$1.string()
+  text: z.string()
 });
 var BlobResourceContentsSchema2 = ResourceContentsSchema2.extend({
-  blob: z$1.string().base64()
+  blob: z.string().base64()
 });
-var EmbeddedResourceSchema2 = z$1.object({
-  type: z$1.literal("resource"),
-  resource: z$1.union([TextResourceContentsSchema2, BlobResourceContentsSchema2])
+var EmbeddedResourceSchema2 = z.object({
+  type: z.literal("resource"),
+  resource: z.union([TextResourceContentsSchema2, BlobResourceContentsSchema2])
 }).passthrough();
 ResultSchema2.extend({
-  content: z$1.array(
-    z$1.union([TextContentSchema2, ImageContentSchema2, EmbeddedResourceSchema2])
+  content: z.array(
+    z.union([TextContentSchema2, ImageContentSchema2, EmbeddedResourceSchema2])
   ),
-  isError: z$1.boolean().default(false).optional()
+  isError: z.boolean().default(false).optional()
 }).or(
   ResultSchema2.extend({
-    toolResult: z$1.unknown()
+    toolResult: z.unknown()
   })
 );
 var JSONRPC_VERSION2 = "2.0";
-var JSONRPCRequestSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()])
+var JSONRPCRequestSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()])
 }).merge(RequestSchema2).strict();
-var JSONRPCResponseSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
+var JSONRPCResponseSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()]),
   result: ResultSchema2
 }).strict();
-var JSONRPCErrorSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
-  error: z$1.object({
-    code: z$1.number().int(),
-    message: z$1.string(),
-    data: z$1.optional(z$1.unknown())
+var JSONRPCErrorSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()]),
+  error: z.object({
+    code: z.number().int(),
+    message: z.string(),
+    data: z.optional(z.unknown())
   })
 }).strict();
-var JSONRPCNotificationSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2)
+var JSONRPCNotificationSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2)
 }).merge(
-  z$1.object({
-    method: z$1.string(),
-    params: z$1.optional(BaseParamsSchema2)
+  z.object({
+    method: z.string(),
+    params: z.optional(BaseParamsSchema2)
   })
 ).strict();
-z$1.union([
+z.union([
   JSONRPCRequestSchema2,
   JSONRPCNotificationSchema2,
   JSONRPCResponseSchema2,
@@ -21753,7 +22485,7 @@ function secureJsonParse(text42) {
     Error.stackTraceLimit = stackTraceLimit;
   }
 }
-var validatorSymbol22 = Symbol.for("vercel.ai.validator");
+var validatorSymbol22 = /* @__PURE__ */ Symbol.for("vercel.ai.validator");
 function validator22(validate) {
   return { [validatorSymbol22]: true, validate };
 }
@@ -22067,7 +22799,7 @@ var getRelativePath22 = (pathA, pathB) => {
   }
   return [(pathA.length - i).toString(), ...pathB.slice(i)].join("/");
 };
-var ignoreOverride22 = Symbol(
+var ignoreOverride22 = /* @__PURE__ */ Symbol(
   "Let zodToJsonSchema decide on which parser to use"
 );
 var defaultOptions22 = {
@@ -23187,7 +23919,7 @@ function zodSchema22(zodSchema222, options) {
     return zod3Schema(zodSchema222);
   }
 }
-var schemaSymbol22 = Symbol.for("vercel.ai.schema");
+var schemaSymbol22 = /* @__PURE__ */ Symbol.for("vercel.ai.schema");
 function jsonSchema22(jsonSchema222, {
   validate
 } = {}) {
@@ -23242,7 +23974,7 @@ var require_get_context = __commonJS({
       getContext: () => getContext3
     });
     module.exports = __toCommonJS(get_context_exports);
-    var SYMBOL_FOR_REQ_CONTEXT = Symbol.for("@vercel/request-context");
+    var SYMBOL_FOR_REQ_CONTEXT = /* @__PURE__ */ Symbol.for("@vercel/request-context");
     function getContext3() {
       const fromSymbol = globalThis;
       return fromSymbol[SYMBOL_FOR_REQ_CONTEXT]?.get?.() ?? {};
@@ -24271,7 +25003,7 @@ function _makeCompatibilityCheck22(ownVersion) {
 }
 var isCompatible22 = _makeCompatibilityCheck22(VERSION222);
 var major22 = VERSION222.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY22 = Symbol.for("opentelemetry.js.api." + major22);
+var GLOBAL_OPENTELEMETRY_API_KEY22 = /* @__PURE__ */ Symbol.for("opentelemetry.js.api." + major22);
 var _global22 = _globalThis22;
 function registerGlobal22(type, instance, diag, allowOverride) {
   var _a162;
@@ -26717,7 +27449,7 @@ function addAdditionalPropertiesToJsonSchema(jsonSchema222) {
   }
   return jsonSchema222;
 }
-var ignoreOverride32 = Symbol(
+var ignoreOverride32 = /* @__PURE__ */ Symbol(
   "Let zodToJsonSchema decide on which parser to use"
 );
 var defaultOptions32 = {
@@ -27799,7 +28531,7 @@ var zod3ToJsonSchema = (schema, options) => {
   combined.$schema = "http://json-schema.org/draft-07/schema#";
   return combined;
 };
-var schemaSymbol3 = Symbol.for("vercel.ai.schema");
+var schemaSymbol3 = /* @__PURE__ */ Symbol.for("vercel.ai.schema");
 function lazySchema(createSchema) {
   let schema;
   return () => {
@@ -28200,7 +28932,7 @@ var require_get_context2 = __commonJS$2({
       getContext: () => getContext3
     });
     module.exports = __toCommonJS(get_context_exports);
-    var SYMBOL_FOR_REQ_CONTEXT = Symbol.for("@vercel/request-context");
+    var SYMBOL_FOR_REQ_CONTEXT = /* @__PURE__ */ Symbol.for("@vercel/request-context");
     function getContext3() {
       const fromSymbol = globalThis;
       return fromSymbol[SYMBOL_FOR_REQ_CONTEXT]?.get?.() ?? {};
@@ -29233,7 +29965,7 @@ function _makeCompatibilityCheck3(ownVersion) {
 }
 var isCompatible3 = _makeCompatibilityCheck3(VERSION23);
 var major3 = VERSION23.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY3 = Symbol.for("opentelemetry.js.api." + major3);
+var GLOBAL_OPENTELEMETRY_API_KEY3 = /* @__PURE__ */ Symbol.for("opentelemetry.js.api." + major3);
 var _global3 = _globalThis3;
 function registerGlobal3(type, instance, diag, allowOverride) {
   var _a146;
@@ -31468,6 +32200,9 @@ var DefaultEmbedManyResult3 = class {
 createIdGenerator3({ prefix: "aiobj", size: 24 });
 createIdGenerator3({ prefix: "aiobj", size: 24 });
 function deepMergeWorkingMemory(existing, update) {
+  if (!update || typeof update !== "object" || Object.keys(update).length === 0) {
+    return existing && typeof existing === "object" ? { ...existing } : {};
+  }
   if (!existing || typeof existing !== "object") {
     return update;
   }
@@ -31492,11 +32227,11 @@ function deepMergeWorkingMemory(existing, update) {
 }
 var updateWorkingMemoryTool = (memoryConfig) => {
   const schema = memoryConfig?.workingMemory?.schema;
-  let inputSchema = z$1.object({
-    memory: z$1.string().describe(`The Markdown formatted working memory content to store. This MUST be a string. Never pass an object.`)
+  let inputSchema = z.object({
+    memory: z.string().describe(`The Markdown formatted working memory content to store. This MUST be a string. Never pass an object.`)
   });
   if (schema) {
-    inputSchema = z$1.object({
+    inputSchema = z.object({
       memory: schema instanceof ZodObject ? schema : convertSchemaToZod({ jsonSchema: schema }).describe(
         `The JSON formatted working memory content to store.`
       )
@@ -31541,6 +32276,9 @@ var updateWorkingMemoryTool = (memoryConfig) => {
             existingData = null;
           }
         }
+        if (inputData.memory === void 0 || inputData.memory === null) {
+          return { success: true, message: "No memory data provided, existing memory unchanged." };
+        }
         let newData;
         if (typeof inputData.memory === "string") {
           try {
@@ -31573,14 +32311,14 @@ var __experimental_updateWorkingMemoryToolVNext = (config) => {
   return createTool({
     id: "update-working-memory",
     description: "Update the working memory with new information.",
-    inputSchema: z$1.object({
-      newMemory: z$1.string().optional().describe(
+    inputSchema: z.object({
+      newMemory: z.string().optional().describe(
         `The ${config.workingMemory?.schema ? "JSON" : "Markdown"} formatted working memory content to store`
       ),
-      searchString: z$1.string().optional().describe(
+      searchString: z.string().optional().describe(
         "The working memory string to find. Will be replaced with the newMemory string. If this is omitted or doesn't exist, the newMemory string will be appended to the end of your working memory. Replacing single lines at a time is encouraged for greater accuracy. If updateReason is not 'append-new-memory', this search string must be provided or the tool call will be rejected."
       ),
-      updateReason: z$1.enum(["append-new-memory", "clarify-existing-memory", "replace-irrelevant-memory"]).optional().describe(
+      updateReason: z.enum(["append-new-memory", "clarify-existing-memory", "replace-irrelevant-memory"]).optional().describe(
         "The reason you're updating working memory. Passing any value other than 'append-new-memory' requires a searchString to be provided. Defaults to append-new-memory"
       )
     }),
@@ -32283,15 +33021,102 @@ ${template.content !== this.defaultWorkingMemoryTemplate ? `- Only store informa
     return {};
   }
   /**
-   * Updates the metadata of a list of messages
-   * @param messages - The list of messages to update
+   * Updates a list of messages and syncs the vector database for semantic recall.
+   * When message content is updated, the corresponding vector embeddings are also updated
+   * to ensure semantic recall stays in sync with the message content.
+   *
+   * @param messages - The list of messages to update (must include id, can include partial content)
+   * @param memoryConfig - Optional memory configuration to determine if semantic recall is enabled
    * @returns The list of updated messages
    */
   async updateMessages({
-    messages
+    messages,
+    memoryConfig
   }) {
     if (messages.length === 0) return [];
     const memoryStore = await this.getMemoryStore();
+    const config = this.getMergedThreadConfig(memoryConfig);
+    if (this.vector && config.semanticRecall) {
+      const messagesWithContent = messages.filter((m) => m.content !== void 0);
+      if (messagesWithContent.length > 0) {
+        const existingMessagesResult = await memoryStore.listMessagesById({
+          messageIds: messagesWithContent.map((m) => m.id)
+        });
+        const existingMessagesMap = new Map(existingMessagesResult.messages.map((m) => [m.id, m]));
+        const embeddingData = [];
+        let dimension;
+        const messageIdsWithNewEmbeddings = /* @__PURE__ */ new Set();
+        const messageIdsWithClearedContent = /* @__PURE__ */ new Set();
+        await Promise.all(
+          messagesWithContent.map(async (message) => {
+            const existingMessage = existingMessagesMap.get(message.id);
+            if (!existingMessage) return;
+            let textForEmbedding = null;
+            const content = message.content;
+            if (content) {
+              if ("content" in content && content.content && typeof content.content === "string" && content.content.trim() !== "") {
+                textForEmbedding = content.content;
+              } else if ("parts" in content && content.parts && Array.isArray(content.parts) && content.parts.length > 0) {
+                const joined = content.parts.filter((part) => part?.type === "text").map((part) => part.text).join(" ").trim();
+                if (joined) textForEmbedding = joined;
+              }
+            }
+            if (textForEmbedding) {
+              const result = await this.embedMessageContent(textForEmbedding);
+              dimension = result.dimension;
+              embeddingData.push({
+                embeddings: result.embeddings,
+                metadata: result.chunks.map(() => ({
+                  message_id: message.id,
+                  thread_id: existingMessage.threadId,
+                  resource_id: existingMessage.resourceId
+                }))
+              });
+              messageIdsWithNewEmbeddings.add(message.id);
+            } else {
+              messageIdsWithClearedContent.add(message.id);
+            }
+          })
+        );
+        const messageIdsNeedingDeletion = /* @__PURE__ */ new Set([...messageIdsWithClearedContent, ...messageIdsWithNewEmbeddings]);
+        if (messageIdsNeedingDeletion.size > 0) {
+          try {
+            const indexes = await this.vector.listIndexes();
+            const memoryIndexes = indexes.filter((name21) => name21.startsWith("memory_messages"));
+            for (const indexName of memoryIndexes) {
+              for (const messageId of messageIdsNeedingDeletion) {
+                try {
+                  await this.vector.deleteVectors({
+                    indexName,
+                    filter: { message_id: messageId }
+                  });
+                } catch {
+                  this.logger.debug(
+                    `No existing vectors found for message ${messageId} in ${indexName}, skipping delete`
+                  );
+                }
+              }
+            }
+          } catch {
+            this.logger.debug(`No memory indexes found to delete from`);
+          }
+        }
+        if (embeddingData.length > 0 && dimension !== void 0) {
+          const { indexName } = await this.createEmbeddingIndex(dimension, config);
+          const allVectors = [];
+          const allMetadata = [];
+          for (const data of embeddingData) {
+            allVectors.push(...data.embeddings);
+            allMetadata.push(...data.metadata);
+          }
+          await this.vector.upsert({
+            indexName,
+            vectors: allVectors,
+            metadata: allMetadata
+          });
+        }
+      }
+    }
     return memoryStore.updateMessages({ messages });
   }
   /**
@@ -32325,197 +33150,424 @@ ${template.content !== this.defaultWorkingMemoryTemplate ? `- Only store informa
     const memoryStore = await this.getMemoryStore();
     await memoryStore.deleteMessages(messageIds);
   }
+  /**
+   * Clone a thread and its messages to create a new independent thread.
+   * The cloned thread will have metadata tracking its source.
+   *
+   * If semantic recall is enabled, the cloned messages will also be embedded
+   * and added to the vector store for semantic search.
+   *
+   * @param args - Clone configuration options
+   * @param args.sourceThreadId - ID of the thread to clone
+   * @param args.newThreadId - ID for the new cloned thread (if not provided, a random UUID will be generated)
+   * @param args.resourceId - Resource ID for the new thread (defaults to source thread's resourceId)
+   * @param args.title - Title for the new cloned thread
+   * @param args.metadata - Additional metadata to merge with clone metadata
+   * @param args.options - Options for filtering which messages to include
+   * @param args.options.messageLimit - Maximum number of messages to copy (from most recent)
+   * @param args.options.messageFilter - Filter messages by date range or specific IDs
+   * @param memoryConfig - Optional memory configuration override
+   * @returns The newly created thread and the cloned messages
+   *
+   * @example
+   * ```typescript
+   * // Clone entire thread
+   * const { thread, clonedMessages } = await memory.cloneThread({
+   *   sourceThreadId: 'thread-123',
+   * });
+   *
+   * // Clone with custom ID
+   * const { thread, clonedMessages } = await memory.cloneThread({
+   *   sourceThreadId: 'thread-123',
+   *   newThreadId: 'my-custom-thread-id',
+   * });
+   *
+   * // Clone with message limit
+   * const { thread, clonedMessages } = await memory.cloneThread({
+   *   sourceThreadId: 'thread-123',
+   *   title: 'My cloned conversation',
+   *   options: {
+   *     messageLimit: 10, // Only clone last 10 messages
+   *   },
+   * });
+   *
+   * // Clone with date filter
+   * const { thread, clonedMessages } = await memory.cloneThread({
+   *   sourceThreadId: 'thread-123',
+   *   options: {
+   *     messageFilter: {
+   *       startDate: new Date('2024-01-01'),
+   *       endDate: new Date('2024-06-01'),
+   *     },
+   *   },
+   * });
+   * ```
+   */
+  async cloneThread(args, memoryConfig) {
+    const memoryStore = await this.getMemoryStore();
+    const result = await memoryStore.cloneThread(args);
+    const config = this.getMergedThreadConfig(memoryConfig);
+    if (this.vector && config.semanticRecall && result.clonedMessages.length > 0) {
+      await this.embedClonedMessages(result.clonedMessages, config);
+    }
+    return result;
+  }
+  /**
+   * Embed cloned messages for semantic recall.
+   * This is similar to the embedding logic in saveMessages but operates on already-saved messages.
+   */
+  async embedClonedMessages(messages, config) {
+    if (!this.vector || !this.embedder) {
+      return;
+    }
+    const embeddingData = [];
+    let dimension;
+    await Promise.all(
+      messages.map(async (message) => {
+        let textForEmbedding = null;
+        if (message.content?.content && typeof message.content.content === "string" && message.content.content.trim() !== "") {
+          textForEmbedding = message.content.content;
+        } else if (message.content?.parts && message.content.parts.length > 0) {
+          const joined = message.content.parts.filter((part) => part.type === "text").map((part) => part.text).join(" ").trim();
+          if (joined) textForEmbedding = joined;
+        }
+        if (!textForEmbedding) return;
+        const result = await this.embedMessageContent(textForEmbedding);
+        dimension = result.dimension;
+        embeddingData.push({
+          embeddings: result.embeddings,
+          metadata: result.chunks.map(() => ({
+            message_id: message.id,
+            thread_id: message.threadId,
+            resource_id: message.resourceId
+          }))
+        });
+      })
+    );
+    if (embeddingData.length > 0 && dimension !== void 0) {
+      const { indexName } = await this.createEmbeddingIndex(dimension, config);
+      const allVectors = [];
+      const allMetadata = [];
+      for (const data of embeddingData) {
+        allVectors.push(...data.embeddings);
+        allMetadata.push(...data.metadata);
+      }
+      await this.vector.upsert({
+        indexName,
+        vectors: allVectors,
+        metadata: allMetadata
+      });
+    }
+  }
+  /**
+   * Get the clone metadata from a thread if it was cloned from another thread.
+   *
+   * @param thread - The thread to check
+   * @returns The clone metadata if the thread is a clone, null otherwise
+   *
+   * @example
+   * ```typescript
+   * const thread = await memory.getThreadById({ threadId: 'thread-123' });
+   * const cloneInfo = memory.getCloneMetadata(thread);
+   * if (cloneInfo) {
+   *   console.log(`This thread was cloned from ${cloneInfo.sourceThreadId}`);
+   * }
+   * ```
+   */
+  getCloneMetadata(thread) {
+    if (!thread?.metadata?.clone) {
+      return null;
+    }
+    return thread.metadata.clone;
+  }
+  /**
+   * Check if a thread is a clone of another thread.
+   *
+   * @param thread - The thread to check
+   * @returns True if the thread is a clone, false otherwise
+   *
+   * @example
+   * ```typescript
+   * const thread = await memory.getThreadById({ threadId: 'thread-123' });
+   * if (memory.isClone(thread)) {
+   *   console.log('This is a cloned thread');
+   * }
+   * ```
+   */
+  isClone(thread) {
+    return this.getCloneMetadata(thread) !== null;
+  }
+  /**
+   * Get the source thread that a cloned thread was created from.
+   *
+   * @param threadId - ID of the cloned thread
+   * @returns The source thread if found, null if the thread is not a clone or source doesn't exist
+   *
+   * @example
+   * ```typescript
+   * const sourceThread = await memory.getSourceThread('cloned-thread-123');
+   * if (sourceThread) {
+   *   console.log(`Original thread: ${sourceThread.title}`);
+   * }
+   * ```
+   */
+  async getSourceThread(threadId) {
+    const thread = await this.getThreadById({ threadId });
+    const cloneMetadata = this.getCloneMetadata(thread);
+    if (!cloneMetadata) {
+      return null;
+    }
+    return this.getThreadById({ threadId: cloneMetadata.sourceThreadId });
+  }
+  /**
+   * List all threads that were cloned from a specific source thread.
+   *
+   * @param sourceThreadId - ID of the source thread
+   * @param resourceId - Optional resource ID to filter by
+   * @returns Array of threads that are clones of the source thread
+   *
+   * @example
+   * ```typescript
+   * const clones = await memory.listClones('original-thread-123', 'user-456');
+   * console.log(`Found ${clones.length} clones of this thread`);
+   * ```
+   */
+  async listClones(sourceThreadId, resourceId) {
+    let targetResourceId = resourceId;
+    if (!targetResourceId) {
+      const sourceThread = await this.getThreadById({ threadId: sourceThreadId });
+      if (!sourceThread) {
+        return [];
+      }
+      targetResourceId = sourceThread.resourceId;
+    }
+    const { threads } = await this.listThreadsByResourceId({
+      resourceId: targetResourceId,
+      perPage: false
+      // Get all threads
+    });
+    return threads.filter((thread) => {
+      const cloneMetadata = this.getCloneMetadata(thread);
+      return cloneMetadata?.sourceThreadId === sourceThreadId;
+    });
+  }
+  /**
+   * Get the clone history chain for a thread (all ancestors back to the original).
+   *
+   * @param threadId - ID of the thread to get history for
+   * @returns Array of threads from oldest ancestor to the given thread (inclusive)
+   *
+   * @example
+   * ```typescript
+   * const history = await memory.getCloneHistory('deeply-cloned-thread');
+   * // Returns: [originalThread, firstClone, secondClone, deeplyClonedThread]
+   * ```
+   */
+  async getCloneHistory(threadId) {
+    const history = [];
+    let currentThreadId = threadId;
+    while (currentThreadId) {
+      const thread = await this.getThreadById({ threadId: currentThreadId });
+      if (!thread) {
+        break;
+      }
+      history.unshift(thread);
+      const cloneMetadata = this.getCloneMetadata(thread);
+      currentThreadId = cloneMetadata?.sourceThreadId ?? null;
+    }
+    return history;
+  }
 };
 
 // ../agent-builder/dist/index.js
 var import_ignore = __toESM$3(require_ignore());
 var UNIT_KINDS = ["mcp-server", "tool", "workflow", "agent", "integration", "network", "other"];
-var TemplateUnitSchema = z$1.object({
-  kind: z$1.enum(UNIT_KINDS),
-  id: z$1.string(),
-  file: z$1.string()
+var TemplateUnitSchema = z.object({
+  kind: z.enum(UNIT_KINDS),
+  id: z.string(),
+  file: z.string()
 });
-z$1.object({
-  slug: z$1.string(),
-  ref: z$1.string().optional(),
-  description: z$1.string().optional(),
-  units: z$1.array(TemplateUnitSchema)
+z.object({
+  slug: z.string(),
+  ref: z.string().optional(),
+  description: z.string().optional(),
+  units: z.array(TemplateUnitSchema)
 });
-var AgentBuilderInputSchema = z$1.object({
-  repo: z$1.string().describe("Git URL or local path of the template repo"),
-  ref: z$1.string().optional().describe("Tag/branch/commit to checkout (defaults to main/master)"),
-  slug: z$1.string().optional().describe("Slug for branch/scripts; defaults to inferred from repo"),
-  targetPath: z$1.string().optional().describe("Project path to merge into; defaults to current directory"),
-  variables: z$1.record(z$1.string()).optional().describe("Environment variables to set in .env file")
+var AgentBuilderInputSchema = z.object({
+  repo: z.string().describe("Git URL or local path of the template repo"),
+  ref: z.string().optional().describe("Tag/branch/commit to checkout (defaults to main/master)"),
+  slug: z.string().optional().describe("Slug for branch/scripts; defaults to inferred from repo"),
+  targetPath: z.string().optional().describe("Project path to merge into; defaults to current directory"),
+  variables: z.record(z.string()).optional().describe("Environment variables to set in .env file")
 });
-z$1.object({
-  slug: z$1.string(),
-  commitSha: z$1.string(),
-  templateDir: z$1.string(),
-  units: z$1.array(TemplateUnitSchema)
+z.object({
+  slug: z.string(),
+  commitSha: z.string(),
+  templateDir: z.string(),
+  units: z.array(TemplateUnitSchema)
 });
-var CopiedFileSchema = z$1.object({
-  source: z$1.string(),
-  destination: z$1.string(),
-  unit: z$1.object({
-    kind: z$1.enum(UNIT_KINDS),
-    id: z$1.string()
+var CopiedFileSchema = z.object({
+  source: z.string(),
+  destination: z.string(),
+  unit: z.object({
+    kind: z.enum(UNIT_KINDS),
+    id: z.string()
   })
 });
-var ConflictSchema = z$1.object({
-  unit: z$1.object({
-    kind: z$1.enum(UNIT_KINDS),
-    id: z$1.string()
+var ConflictSchema = z.object({
+  unit: z.object({
+    kind: z.enum(UNIT_KINDS),
+    id: z.string()
   }),
-  issue: z$1.string(),
-  sourceFile: z$1.string(),
-  targetFile: z$1.string()
+  issue: z.string(),
+  sourceFile: z.string(),
+  targetFile: z.string()
 });
-var FileCopyInputSchema = z$1.object({
-  orderedUnits: z$1.array(TemplateUnitSchema),
-  templateDir: z$1.string(),
-  commitSha: z$1.string(),
-  slug: z$1.string(),
-  targetPath: z$1.string().optional(),
-  variables: z$1.record(z$1.string()).optional()
+var FileCopyInputSchema = z.object({
+  orderedUnits: z.array(TemplateUnitSchema),
+  templateDir: z.string(),
+  commitSha: z.string(),
+  slug: z.string(),
+  targetPath: z.string().optional(),
+  variables: z.record(z.string()).optional()
 });
-var FileCopyResultSchema = z$1.object({
-  success: z$1.boolean(),
-  copiedFiles: z$1.array(CopiedFileSchema),
-  conflicts: z$1.array(ConflictSchema),
-  message: z$1.string(),
-  error: z$1.string().optional()
+var FileCopyResultSchema = z.object({
+  success: z.boolean(),
+  copiedFiles: z.array(CopiedFileSchema),
+  conflicts: z.array(ConflictSchema),
+  message: z.string(),
+  error: z.string().optional()
 });
-var ConflictResolutionSchema = z$1.object({
-  unit: z$1.object({
-    kind: z$1.enum(UNIT_KINDS),
-    id: z$1.string()
+var ConflictResolutionSchema = z.object({
+  unit: z.object({
+    kind: z.enum(UNIT_KINDS),
+    id: z.string()
   }),
-  issue: z$1.string(),
-  resolution: z$1.string()
+  issue: z.string(),
+  resolution: z.string()
 });
-var IntelligentMergeInputSchema = z$1.object({
-  conflicts: z$1.array(ConflictSchema),
-  copiedFiles: z$1.array(CopiedFileSchema),
-  templateDir: z$1.string(),
-  commitSha: z$1.string(),
-  slug: z$1.string(),
-  targetPath: z$1.string().optional(),
-  branchName: z$1.string().optional()
+var IntelligentMergeInputSchema = z.object({
+  conflicts: z.array(ConflictSchema),
+  copiedFiles: z.array(CopiedFileSchema),
+  templateDir: z.string(),
+  commitSha: z.string(),
+  slug: z.string(),
+  targetPath: z.string().optional(),
+  branchName: z.string().optional()
 });
-var IntelligentMergeResultSchema = z$1.object({
-  success: z$1.boolean(),
-  applied: z$1.boolean(),
-  message: z$1.string(),
-  conflictsResolved: z$1.array(ConflictResolutionSchema),
-  error: z$1.string().optional()
+var IntelligentMergeResultSchema = z.object({
+  success: z.boolean(),
+  applied: z.boolean(),
+  message: z.string(),
+  conflictsResolved: z.array(ConflictResolutionSchema),
+  error: z.string().optional()
 });
-var ValidationResultsSchema = z$1.object({
-  valid: z$1.boolean(),
-  errorsFixed: z$1.number(),
-  remainingErrors: z$1.number(),
-  errors: z$1.array(z$1.any()).optional()
+var ValidationResultsSchema = z.object({
+  valid: z.boolean(),
+  errorsFixed: z.number(),
+  remainingErrors: z.number(),
+  errors: z.array(z.any()).optional()
   // Include specific validation errors
 });
-var ValidationFixInputSchema = z$1.object({
-  commitSha: z$1.string(),
-  slug: z$1.string(),
-  targetPath: z$1.string().optional(),
-  templateDir: z$1.string(),
-  orderedUnits: z$1.array(TemplateUnitSchema),
-  copiedFiles: z$1.array(CopiedFileSchema),
-  conflictsResolved: z$1.array(ConflictResolutionSchema).optional(),
-  maxIterations: z$1.number().optional().default(5)
+var ValidationFixInputSchema = z.object({
+  commitSha: z.string(),
+  slug: z.string(),
+  targetPath: z.string().optional(),
+  templateDir: z.string(),
+  orderedUnits: z.array(TemplateUnitSchema),
+  copiedFiles: z.array(CopiedFileSchema),
+  conflictsResolved: z.array(ConflictResolutionSchema).optional(),
+  maxIterations: z.number().optional().default(5)
 });
-var ValidationFixResultSchema = z$1.object({
-  success: z$1.boolean(),
-  applied: z$1.boolean(),
-  message: z$1.string(),
+var ValidationFixResultSchema = z.object({
+  success: z.boolean(),
+  applied: z.boolean(),
+  message: z.string(),
   validationResults: ValidationResultsSchema,
-  error: z$1.string().optional()
+  error: z.string().optional()
 });
-var ApplyResultSchema = z$1.object({
-  success: z$1.boolean(),
-  applied: z$1.boolean(),
-  branchName: z$1.string().optional(),
-  message: z$1.string(),
+var ApplyResultSchema = z.object({
+  success: z.boolean(),
+  applied: z.boolean(),
+  branchName: z.string().optional(),
+  message: z.string(),
   validationResults: ValidationResultsSchema.optional(),
-  error: z$1.string().optional(),
-  errors: z$1.array(z$1.string()).optional(),
-  stepResults: z$1.object({
-    cloneSuccess: z$1.boolean().optional(),
-    analyzeSuccess: z$1.boolean().optional(),
-    discoverSuccess: z$1.boolean().optional(),
-    orderSuccess: z$1.boolean().optional(),
-    prepareBranchSuccess: z$1.boolean().optional(),
-    packageMergeSuccess: z$1.boolean().optional(),
-    installSuccess: z$1.boolean().optional(),
-    copySuccess: z$1.boolean().optional(),
-    mergeSuccess: z$1.boolean().optional(),
-    validationSuccess: z$1.boolean().optional(),
-    filesCopied: z$1.number(),
-    conflictsSkipped: z$1.number(),
-    conflictsResolved: z$1.number()
+  error: z.string().optional(),
+  errors: z.array(z.string()).optional(),
+  stepResults: z.object({
+    cloneSuccess: z.boolean().optional(),
+    analyzeSuccess: z.boolean().optional(),
+    discoverSuccess: z.boolean().optional(),
+    orderSuccess: z.boolean().optional(),
+    prepareBranchSuccess: z.boolean().optional(),
+    packageMergeSuccess: z.boolean().optional(),
+    installSuccess: z.boolean().optional(),
+    copySuccess: z.boolean().optional(),
+    mergeSuccess: z.boolean().optional(),
+    validationSuccess: z.boolean().optional(),
+    filesCopied: z.number(),
+    conflictsSkipped: z.number(),
+    conflictsResolved: z.number()
   }).optional()
 });
-var CloneTemplateResultSchema = z$1.object({
-  templateDir: z$1.string(),
-  commitSha: z$1.string(),
-  slug: z$1.string(),
-  success: z$1.boolean().optional(),
-  error: z$1.string().optional(),
-  targetPath: z$1.string().optional()
+var CloneTemplateResultSchema = z.object({
+  templateDir: z.string(),
+  commitSha: z.string(),
+  slug: z.string(),
+  success: z.boolean().optional(),
+  error: z.string().optional(),
+  targetPath: z.string().optional()
 });
-var PackageAnalysisSchema = z$1.object({
-  name: z$1.string().optional(),
-  version: z$1.string().optional(),
-  description: z$1.string().optional(),
-  dependencies: z$1.record(z$1.string()).optional(),
-  devDependencies: z$1.record(z$1.string()).optional(),
-  peerDependencies: z$1.record(z$1.string()).optional(),
-  scripts: z$1.record(z$1.string()).optional(),
-  success: z$1.boolean().optional(),
-  error: z$1.string().optional()
+var PackageAnalysisSchema = z.object({
+  name: z.string().optional(),
+  version: z.string().optional(),
+  description: z.string().optional(),
+  dependencies: z.record(z.string()).optional(),
+  devDependencies: z.record(z.string()).optional(),
+  peerDependencies: z.record(z.string()).optional(),
+  scripts: z.record(z.string()).optional(),
+  success: z.boolean().optional(),
+  error: z.string().optional()
 });
-var DiscoveryResultSchema = z$1.object({
-  units: z$1.array(TemplateUnitSchema),
-  success: z$1.boolean().optional(),
-  error: z$1.string().optional()
+var DiscoveryResultSchema = z.object({
+  units: z.array(TemplateUnitSchema),
+  success: z.boolean().optional(),
+  error: z.string().optional()
 });
-var OrderedUnitsSchema = z$1.object({
-  orderedUnits: z$1.array(TemplateUnitSchema),
-  success: z$1.boolean().optional(),
-  error: z$1.string().optional()
+var OrderedUnitsSchema = z.object({
+  orderedUnits: z.array(TemplateUnitSchema),
+  success: z.boolean().optional(),
+  error: z.string().optional()
 });
-var PackageMergeInputSchema = z$1.object({
-  commitSha: z$1.string(),
-  slug: z$1.string(),
-  targetPath: z$1.string().optional(),
+var PackageMergeInputSchema = z.object({
+  commitSha: z.string(),
+  slug: z.string(),
+  targetPath: z.string().optional(),
   packageInfo: PackageAnalysisSchema
 });
-var PackageMergeResultSchema = z$1.object({
-  success: z$1.boolean(),
-  applied: z$1.boolean(),
-  message: z$1.string(),
-  error: z$1.string().optional()
+var PackageMergeResultSchema = z.object({
+  success: z.boolean(),
+  applied: z.boolean(),
+  message: z.string(),
+  error: z.string().optional()
 });
-var InstallInputSchema = z$1.object({
-  targetPath: z$1.string().optional().describe("Path to the project to install packages in")
+var InstallInputSchema = z.object({
+  targetPath: z.string().optional().describe("Path to the project to install packages in")
 });
-var InstallResultSchema = z$1.object({
-  success: z$1.boolean(),
-  error: z$1.string().optional()
+var InstallResultSchema = z.object({
+  success: z.boolean(),
+  error: z.string().optional()
 });
-var PrepareBranchInputSchema = z$1.object({
-  slug: z$1.string(),
-  commitSha: z$1.string().optional(),
+var PrepareBranchInputSchema = z.object({
+  slug: z.string(),
+  commitSha: z.string().optional(),
   // from clone-template if relevant
-  targetPath: z$1.string().optional()
+  targetPath: z.string().optional()
 });
-var PrepareBranchResultSchema = z$1.object({
-  branchName: z$1.string(),
-  success: z$1.boolean().optional(),
-  error: z$1.string().optional()
+var PrepareBranchResultSchema = z.object({
+  branchName: z.string(),
+  success: z.boolean().optional(),
+  error: z.string().optional()
 });
 var exec = promisify(exec$1);
 var execFile = promisify(execFile$1);
@@ -32931,23 +33983,23 @@ var createModelInstance = async (provider, modelId, version = "v2") => {
     const providerMap = {
       v1: {
         openai: async () => {
-          const { openai: openai2 } = await Promise.resolve().then(function () { return distMEN73GGI; });
+          const { openai: openai2 } = await Promise.resolve().then(function () { return distEDO7GEGI; });
           return openai2(modelId);
         },
         anthropic: async () => {
-          const { anthropic } = await import('./dist-4CMHRWC4.mjs');
+          const { anthropic } = await import('./dist-B5GMANA6.mjs');
           return anthropic(modelId);
         },
         groq: async () => {
-          const { groq } = await import('./dist-TE7XRSWH.mjs');
+          const { groq } = await import('./dist-THPMW5QR.mjs');
           return groq(modelId);
         },
         xai: async () => {
-          const { xai } = await import('./dist-VPYZNWNG.mjs');
+          const { xai } = await import('./dist-ZOZ6MHJH.mjs');
           return xai(modelId);
         },
         google: async () => {
-          const { google } = await import('./dist-AEJONJSS.mjs');
+          const { google } = await import('./dist-SMBO5KVB.mjs');
           return google(modelId);
         }
       }
@@ -33398,23 +34450,23 @@ export const mastra = new Mastra({
       readFile: createTool({
         id: "read-file",
         description: "Read contents of a file with optional line range selection.",
-        inputSchema: z$1.object({
-          filePath: z$1.string().describe("Path to the file to read"),
-          startLine: z$1.number().optional().describe("Starting line number (1-indexed)"),
-          endLine: z$1.number().optional().describe("Ending line number (1-indexed, inclusive)"),
-          encoding: z$1.string().default("utf-8").describe("File encoding")
+        inputSchema: z.object({
+          filePath: z.string().describe("Path to the file to read"),
+          startLine: z.number().optional().describe("Starting line number (1-indexed)"),
+          endLine: z.number().optional().describe("Ending line number (1-indexed, inclusive)"),
+          encoding: z.string().default("utf-8").describe("File encoding")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          content: z$1.string().optional(),
-          lines: z$1.array(z$1.string()).optional(),
-          metadata: z$1.object({
-            size: z$1.number(),
-            totalLines: z$1.number(),
-            encoding: z$1.string(),
-            lastModified: z$1.string()
+        outputSchema: z.object({
+          success: z.boolean(),
+          content: z.string().optional(),
+          lines: z.array(z.string()).optional(),
+          metadata: z.object({
+            size: z.number(),
+            totalLines: z.number(),
+            encoding: z.string(),
+            lastModified: z.string()
           }).optional(),
-          errorMessage: z$1.string().optional()
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.readFile({ ...inputData, projectPath });
@@ -33423,18 +34475,18 @@ export const mastra = new Mastra({
       writeFile: createTool({
         id: "write-file",
         description: "Write content to a file, with options for creating directories.",
-        inputSchema: z$1.object({
-          filePath: z$1.string().describe("Path to the file to write"),
-          content: z$1.string().describe("Content to write to the file"),
-          createDirs: z$1.boolean().default(true).describe("Create parent directories if they don't exist"),
-          encoding: z$1.string().default("utf-8").describe("File encoding")
+        inputSchema: z.object({
+          filePath: z.string().describe("Path to the file to write"),
+          content: z.string().describe("Content to write to the file"),
+          createDirs: z.boolean().default(true).describe("Create parent directories if they don't exist"),
+          encoding: z.string().default("utf-8").describe("File encoding")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          filePath: z$1.string(),
-          bytesWritten: z$1.number().optional(),
-          message: z$1.string(),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          filePath: z.string(),
+          bytesWritten: z.number().optional(),
+          message: z.string(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.writeFile({ ...inputData, projectPath });
@@ -33443,30 +34495,30 @@ export const mastra = new Mastra({
       listDirectory: createTool({
         id: "list-directory",
         description: "List contents of a directory with filtering and metadata options.",
-        inputSchema: z$1.object({
-          path: z$1.string().describe("Directory path to list"),
-          recursive: z$1.boolean().default(false).describe("List subdirectories recursively"),
-          includeHidden: z$1.boolean().default(false).describe("Include hidden files and directories"),
-          pattern: z$1.string().default("*").describe("Glob pattern to filter files"),
-          maxDepth: z$1.number().default(10).describe("Maximum recursion depth"),
-          includeMetadata: z$1.boolean().default(true).describe("Include file metadata")
+        inputSchema: z.object({
+          path: z.string().describe("Directory path to list"),
+          recursive: z.boolean().default(false).describe("List subdirectories recursively"),
+          includeHidden: z.boolean().default(false).describe("Include hidden files and directories"),
+          pattern: z.string().default("*").describe("Glob pattern to filter files"),
+          maxDepth: z.number().default(10).describe("Maximum recursion depth"),
+          includeMetadata: z.boolean().default(true).describe("Include file metadata")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          items: z$1.array(
-            z$1.object({
-              name: z$1.string(),
-              path: z$1.string(),
-              type: z$1.enum(["file", "directory", "symlink"]),
-              size: z$1.number().optional(),
-              lastModified: z$1.string().optional(),
-              permissions: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          items: z.array(
+            z.object({
+              name: z.string(),
+              path: z.string(),
+              type: z.enum(["file", "directory", "symlink"]),
+              size: z.number().optional(),
+              lastModified: z.string().optional(),
+              permissions: z.string().optional()
             })
           ),
-          totalItems: z$1.number(),
-          path: z$1.string(),
-          message: z$1.string(),
-          errorMessage: z$1.string().optional()
+          totalItems: z.number(),
+          path: z.string(),
+          message: z.string(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.listDirectory({ ...inputData, projectPath });
@@ -33475,23 +34527,23 @@ export const mastra = new Mastra({
       executeCommand: createTool({
         id: "execute-command",
         description: "Execute shell commands with proper error handling and output capture.",
-        inputSchema: z$1.object({
-          command: z$1.string().describe("Shell command to execute"),
-          workingDirectory: z$1.string().optional().describe("Working directory for command execution"),
-          timeout: z$1.number().default(3e4).describe("Timeout in milliseconds"),
-          captureOutput: z$1.boolean().default(true).describe("Capture command output"),
-          shell: z$1.string().optional().describe("Shell to use (defaults to system shell)"),
-          env: z$1.record(z$1.string()).optional().describe("Environment variables")
+        inputSchema: z.object({
+          command: z.string().describe("Shell command to execute"),
+          workingDirectory: z.string().optional().describe("Working directory for command execution"),
+          timeout: z.number().default(3e4).describe("Timeout in milliseconds"),
+          captureOutput: z.boolean().default(true).describe("Capture command output"),
+          shell: z.string().optional().describe("Shell to use (defaults to system shell)"),
+          env: z.record(z.string()).optional().describe("Environment variables")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          exitCode: z$1.number().optional(),
-          stdout: z$1.string().optional(),
-          stderr: z$1.string().optional(),
-          command: z$1.string(),
-          workingDirectory: z$1.string().optional(),
-          executionTime: z$1.number().optional(),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          exitCode: z.number().optional(),
+          stdout: z.string().optional(),
+          stderr: z.string().optional(),
+          command: z.string(),
+          workingDirectory: z.string().optional(),
+          executionTime: z.number().optional(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.executeCommand({
@@ -33504,35 +34556,35 @@ export const mastra = new Mastra({
       taskManager: createTool({
         id: "task-manager",
         description: "Create and manage structured task lists for coding sessions. Use this for complex multi-step tasks to track progress and ensure thoroughness.",
-        inputSchema: z$1.object({
-          action: z$1.enum(["create", "update", "list", "complete", "remove"]).describe("Task management action"),
-          tasks: z$1.array(
-            z$1.object({
-              id: z$1.string().describe("Unique task identifier"),
-              content: z$1.string().describe("Task description, optional if just updating the status").optional(),
-              status: z$1.enum(["pending", "in_progress", "completed", "blocked"]).describe("Task status"),
-              priority: z$1.enum(["high", "medium", "low"]).default("medium").describe("Task priority"),
-              dependencies: z$1.array(z$1.string()).optional().describe("IDs of tasks this depends on"),
-              notes: z$1.string().optional().describe("Additional notes or context")
+        inputSchema: z.object({
+          action: z.enum(["create", "update", "list", "complete", "remove"]).describe("Task management action"),
+          tasks: z.array(
+            z.object({
+              id: z.string().describe("Unique task identifier"),
+              content: z.string().describe("Task description, optional if just updating the status").optional(),
+              status: z.enum(["pending", "in_progress", "completed", "blocked"]).describe("Task status"),
+              priority: z.enum(["high", "medium", "low"]).default("medium").describe("Task priority"),
+              dependencies: z.array(z.string()).optional().describe("IDs of tasks this depends on"),
+              notes: z.string().optional().describe("Additional notes or context")
             })
           ).optional().describe("Tasks to create or update"),
-          taskId: z$1.string().optional().describe("Specific task ID for single task operations")
+          taskId: z.string().optional().describe("Specific task ID for single task operations")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          tasks: z$1.array(
-            z$1.object({
-              id: z$1.string(),
-              content: z$1.string(),
-              status: z$1.string(),
-              priority: z$1.string(),
-              dependencies: z$1.array(z$1.string()).optional(),
-              notes: z$1.string().optional(),
-              createdAt: z$1.string(),
-              updatedAt: z$1.string()
+        outputSchema: z.object({
+          success: z.boolean(),
+          tasks: z.array(
+            z.object({
+              id: z.string(),
+              content: z.string(),
+              status: z.string(),
+              priority: z.string(),
+              dependencies: z.array(z.string()).optional(),
+              notes: z.string().optional(),
+              createdAt: z.string(),
+              updatedAt: z.string()
             })
           ),
-          message: z$1.string()
+          message: z.string()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.manageTaskList(inputData);
@@ -33542,32 +34594,32 @@ export const mastra = new Mastra({
       multiEdit: createTool({
         id: "multi-edit",
         description: "Perform multiple search-replace operations on one or more files in a single atomic operation.",
-        inputSchema: z$1.object({
-          operations: z$1.array(
-            z$1.object({
-              filePath: z$1.string().describe("Path to the file to edit"),
-              edits: z$1.array(
-                z$1.object({
-                  oldString: z$1.string().describe("Exact text to replace"),
-                  newString: z$1.string().describe("Replacement text"),
-                  replaceAll: z$1.boolean().default(false).describe("Replace all occurrences")
+        inputSchema: z.object({
+          operations: z.array(
+            z.object({
+              filePath: z.string().describe("Path to the file to edit"),
+              edits: z.array(
+                z.object({
+                  oldString: z.string().describe("Exact text to replace"),
+                  newString: z.string().describe("Replacement text"),
+                  replaceAll: z.boolean().default(false).describe("Replace all occurrences")
                 })
               ).describe("List of edit operations for this file")
             })
           ).describe("File edit operations to perform"),
-          createBackup: z$1.boolean().default(false).describe("Create backup files before editing")
+          createBackup: z.boolean().default(false).describe("Create backup files before editing")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          results: z$1.array(
-            z$1.object({
-              filePath: z$1.string(),
-              editsApplied: z$1.number(),
-              errors: z$1.array(z$1.string()),
-              backup: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          results: z.array(
+            z.object({
+              filePath: z.string(),
+              editsApplied: z.number(),
+              errors: z.array(z.string()),
+              backup: z.string().optional()
             })
           ),
-          message: z$1.string()
+          message: z.string()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.performMultiEdit({ ...inputData, projectPath });
@@ -33576,23 +34628,23 @@ export const mastra = new Mastra({
       replaceLines: createTool({
         id: "replace-lines",
         description: "Replace specific line ranges in files with new content. IMPORTANT: This tool replaces ENTIRE lines, not partial content within lines. Lines are 1-indexed.",
-        inputSchema: z$1.object({
-          filePath: z$1.string().describe("Path to the file to edit"),
-          startLine: z$1.number().describe("Starting line number to replace (1-indexed, inclusive). Count from the first line = 1"),
-          endLine: z$1.number().describe(
+        inputSchema: z.object({
+          filePath: z.string().describe("Path to the file to edit"),
+          startLine: z.number().describe("Starting line number to replace (1-indexed, inclusive). Count from the first line = 1"),
+          endLine: z.number().describe(
             "Ending line number to replace (1-indexed, inclusive). To replace single line, use same number as startLine"
           ),
-          newContent: z$1.string().describe(
+          newContent: z.string().describe(
             'New content to replace the lines with. Use empty string "" to delete lines completely. For multiline content, include \\n characters'
           ),
-          createBackup: z$1.boolean().default(false).describe("Create backup file before editing")
+          createBackup: z.boolean().default(false).describe("Create backup file before editing")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          message: z$1.string(),
-          linesReplaced: z$1.number().optional(),
-          backup: z$1.string().optional(),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          message: z.string(),
+          linesReplaced: z.number().optional(),
+          backup: z.string().optional(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.replaceLines({ ...inputData, projectPath });
@@ -33602,26 +34654,26 @@ export const mastra = new Mastra({
       showFileLines: createTool({
         id: "show-file-lines",
         description: "Show specific lines from a file with line numbers. Useful for debugging before using replaceLines.",
-        inputSchema: z$1.object({
-          filePath: z$1.string().describe("Path to the file to examine"),
-          startLine: z$1.number().optional().describe("Starting line number to show (1-indexed). If not provided, shows all lines"),
-          endLine: z$1.number().optional().describe(
+        inputSchema: z.object({
+          filePath: z.string().describe("Path to the file to examine"),
+          startLine: z.number().optional().describe("Starting line number to show (1-indexed). If not provided, shows all lines"),
+          endLine: z.number().optional().describe(
             "Ending line number to show (1-indexed, inclusive). If not provided but startLine is, shows only that line"
           ),
-          context: z$1.number().default(2).describe("Number of context lines to show before and after the range")
+          context: z.number().default(2).describe("Number of context lines to show before and after the range")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          lines: z$1.array(
-            z$1.object({
-              lineNumber: z$1.number(),
-              content: z$1.string(),
-              isTarget: z$1.boolean().describe("Whether this line is in the target range")
+        outputSchema: z.object({
+          success: z.boolean(),
+          lines: z.array(
+            z.object({
+              lineNumber: z.number(),
+              content: z.string(),
+              isTarget: z.boolean().describe("Whether this line is in the target range")
             })
           ),
-          totalLines: z$1.number(),
-          message: z$1.string(),
-          errorMessage: z$1.string().optional()
+          totalLines: z.number(),
+          message: z.string(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.showFileLines({ ...inputData, projectPath });
@@ -33631,40 +34683,40 @@ export const mastra = new Mastra({
       smartSearch: createTool({
         id: "smart-search",
         description: "Intelligent search across codebase with context awareness and pattern matching.",
-        inputSchema: z$1.object({
-          query: z$1.string().describe("Search query or pattern"),
-          type: z$1.enum(["text", "regex", "fuzzy", "semantic"]).default("text").describe("Type of search to perform"),
-          scope: z$1.object({
-            paths: z$1.array(z$1.string()).optional().describe("Specific paths to search"),
-            fileTypes: z$1.array(z$1.string()).optional().describe("File extensions to include"),
-            excludePaths: z$1.array(z$1.string()).optional().describe("Paths to exclude"),
-            maxResults: z$1.number().default(50).describe("Maximum number of results")
+        inputSchema: z.object({
+          query: z.string().describe("Search query or pattern"),
+          type: z.enum(["text", "regex", "fuzzy", "semantic"]).default("text").describe("Type of search to perform"),
+          scope: z.object({
+            paths: z.array(z.string()).optional().describe("Specific paths to search"),
+            fileTypes: z.array(z.string()).optional().describe("File extensions to include"),
+            excludePaths: z.array(z.string()).optional().describe("Paths to exclude"),
+            maxResults: z.number().default(50).describe("Maximum number of results")
           }).optional(),
-          context: z$1.object({
-            beforeLines: z$1.number().default(2).describe("Lines of context before match"),
-            afterLines: z$1.number().default(2).describe("Lines of context after match"),
-            includeDefinitions: z$1.boolean().default(false).describe("Include function/class definitions")
+          context: z.object({
+            beforeLines: z.number().default(2).describe("Lines of context before match"),
+            afterLines: z.number().default(2).describe("Lines of context after match"),
+            includeDefinitions: z.boolean().default(false).describe("Include function/class definitions")
           }).optional()
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          matches: z$1.array(
-            z$1.object({
-              file: z$1.string(),
-              line: z$1.number(),
-              column: z$1.number().optional(),
-              match: z$1.string(),
-              context: z$1.object({
-                before: z$1.array(z$1.string()),
-                after: z$1.array(z$1.string())
+        outputSchema: z.object({
+          success: z.boolean(),
+          matches: z.array(
+            z.object({
+              file: z.string(),
+              line: z.number(),
+              column: z.number().optional(),
+              match: z.string(),
+              context: z.object({
+                before: z.array(z.string()),
+                after: z.array(z.string())
               }),
-              relevance: z$1.number().optional()
+              relevance: z.number().optional()
             })
           ),
-          summary: z$1.object({
-            totalMatches: z$1.number(),
-            filesSearched: z$1.number(),
-            patterns: z$1.array(z$1.string())
+          summary: z.object({
+            totalMatches: z.number(),
+            filesSearched: z.number(),
+            patterns: z.array(z.string())
           })
         }),
         execute: async (inputData) => {
@@ -33674,31 +34726,31 @@ export const mastra = new Mastra({
       validateCode: createTool({
         id: "validate-code",
         description: "Validates code using a fast hybrid approach: syntax \u2192 semantic \u2192 lint. RECOMMENDED: Always provide specific files for optimal performance and accuracy.",
-        inputSchema: z$1.object({
-          projectPath: z$1.string().optional().describe("Path to the project to validate (defaults to current project)"),
-          validationType: z$1.array(z$1.enum(["types", "lint", "schemas", "tests", "build"])).describe('Types of validation to perform. Recommended: ["types", "lint"] for code quality'),
-          files: z$1.array(z$1.string()).optional().describe(
+        inputSchema: z.object({
+          projectPath: z.string().optional().describe("Path to the project to validate (defaults to current project)"),
+          validationType: z.array(z.enum(["types", "lint", "schemas", "tests", "build"])).describe('Types of validation to perform. Recommended: ["types", "lint"] for code quality'),
+          files: z.array(z.string()).optional().describe(
             "RECOMMENDED: Specific files to validate (e.g., files you created/modified). Uses hybrid validation: fast syntax check \u2192 semantic types \u2192 ESLint. Without files, falls back to slower CLI validation."
           )
         }),
-        outputSchema: z$1.object({
-          valid: z$1.boolean(),
-          errors: z$1.array(
-            z$1.object({
-              type: z$1.enum(["typescript", "eslint", "schema", "test", "build"]),
-              severity: z$1.enum(["error", "warning", "info"]),
-              message: z$1.string(),
-              file: z$1.string().optional(),
-              line: z$1.number().optional(),
-              column: z$1.number().optional(),
-              code: z$1.string().optional()
+        outputSchema: z.object({
+          valid: z.boolean(),
+          errors: z.array(
+            z.object({
+              type: z.enum(["typescript", "eslint", "schema", "test", "build"]),
+              severity: z.enum(["error", "warning", "info"]),
+              message: z.string(),
+              file: z.string().optional(),
+              line: z.number().optional(),
+              column: z.number().optional(),
+              code: z.string().optional()
             })
           ),
-          summary: z$1.object({
-            totalErrors: z$1.number(),
-            totalWarnings: z$1.number(),
-            validationsPassed: z$1.array(z$1.string()),
-            validationsFailed: z$1.array(z$1.string())
+          summary: z.object({
+            totalErrors: z.number(),
+            totalWarnings: z.number(),
+            validationsPassed: z.array(z.string()),
+            validationsFailed: z.array(z.string())
           })
         }),
         execute: async (inputData) => {
@@ -33715,31 +34767,31 @@ export const mastra = new Mastra({
       webSearch: createTool({
         id: "web-search",
         description: "Search the web for current information and return structured results.",
-        inputSchema: z$1.object({
-          query: z$1.string().describe("Search query"),
-          maxResults: z$1.number().default(10).describe("Maximum number of results to return"),
-          region: z$1.string().default("us").describe("Search region/country code"),
-          language: z$1.string().default("en").describe("Search language"),
-          includeImages: z$1.boolean().default(false).describe("Include image results"),
-          dateRange: z$1.enum(["day", "week", "month", "year", "all"]).default("all").describe("Date range filter")
+        inputSchema: z.object({
+          query: z.string().describe("Search query"),
+          maxResults: z.number().default(10).describe("Maximum number of results to return"),
+          region: z.string().default("us").describe("Search region/country code"),
+          language: z.string().default("en").describe("Search language"),
+          includeImages: z.boolean().default(false).describe("Include image results"),
+          dateRange: z.enum(["day", "week", "month", "year", "all"]).default("all").describe("Date range filter")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          query: z$1.string(),
-          results: z$1.array(
-            z$1.object({
-              title: z$1.string(),
-              url: z$1.string(),
-              snippet: z$1.string(),
-              domain: z$1.string(),
-              publishDate: z$1.string().optional(),
-              relevanceScore: z$1.number().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          query: z.string(),
+          results: z.array(
+            z.object({
+              title: z.string(),
+              url: z.string(),
+              snippet: z.string(),
+              domain: z.string(),
+              publishDate: z.string().optional(),
+              relevanceScore: z.number().optional()
             })
           ),
-          totalResults: z$1.number(),
-          searchTime: z$1.number(),
-          suggestions: z$1.array(z$1.string()).optional(),
-          errorMessage: z$1.string().optional()
+          totalResults: z.number(),
+          searchTime: z.number(),
+          suggestions: z.array(z.string()).optional(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.webSearch(inputData);
@@ -33749,27 +34801,27 @@ export const mastra = new Mastra({
       attemptCompletion: createTool({
         id: "attempt-completion",
         description: "Signal that you believe the requested task has been completed and provide a summary.",
-        inputSchema: z$1.object({
-          summary: z$1.string().describe("Summary of what was accomplished"),
-          changes: z$1.array(
-            z$1.object({
-              type: z$1.enum(["file_created", "file_modified", "file_deleted", "command_executed", "dependency_added"]),
-              description: z$1.string(),
-              path: z$1.string().optional()
+        inputSchema: z.object({
+          summary: z.string().describe("Summary of what was accomplished"),
+          changes: z.array(
+            z.object({
+              type: z.enum(["file_created", "file_modified", "file_deleted", "command_executed", "dependency_added"]),
+              description: z.string(),
+              path: z.string().optional()
             })
           ).describe("List of changes made"),
-          validation: z$1.object({
-            testsRun: z$1.boolean().default(false),
-            buildsSuccessfully: z$1.boolean().default(false),
-            manualTestingRequired: z$1.boolean().default(false)
+          validation: z.object({
+            testsRun: z.boolean().default(false),
+            buildsSuccessfully: z.boolean().default(false),
+            manualTestingRequired: z.boolean().default(false)
           }).describe("Validation status"),
-          nextSteps: z$1.array(z$1.string()).optional().describe("Suggested next steps or follow-up actions")
+          nextSteps: z.array(z.string()).optional().describe("Suggested next steps or follow-up actions")
         }),
-        outputSchema: z$1.object({
-          completionId: z$1.string(),
-          status: z$1.enum(["completed", "needs_review", "needs_testing"]),
-          summary: z$1.string(),
-          confidence: z$1.number().min(0).max(100)
+        outputSchema: z.object({
+          completionId: z.string(),
+          status: z.enum(["completed", "needs_review", "needs_testing"]),
+          summary: z.string(),
+          confidence: z.number().min(0).max(100)
         }),
         execute: async (inputData) => {
           return await _AgentBuilderDefaults.signalCompletion(inputData);
@@ -33778,24 +34830,24 @@ export const mastra = new Mastra({
       manageProject: createTool({
         id: "manage-project",
         description: "Handles project management including creating project structures, managing dependencies, and package operations.",
-        inputSchema: z$1.object({
-          action: z$1.enum(["create", "install", "upgrade"]).describe("The action to perform"),
-          features: z$1.array(z$1.string()).optional().describe('Mastra features to include (e.g., ["agents", "memory", "workflows"])'),
-          packages: z$1.array(
-            z$1.object({
-              name: z$1.string(),
-              version: z$1.string().optional()
+        inputSchema: z.object({
+          action: z.enum(["create", "install", "upgrade"]).describe("The action to perform"),
+          features: z.array(z.string()).optional().describe('Mastra features to include (e.g., ["agents", "memory", "workflows"])'),
+          packages: z.array(
+            z.object({
+              name: z.string(),
+              version: z.string().optional()
             })
           ).optional().describe("Packages to install/upgrade")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          installed: z$1.array(z$1.string()).optional(),
-          upgraded: z$1.array(z$1.string()).optional(),
-          warnings: z$1.array(z$1.string()).optional(),
-          message: z$1.string().optional(),
-          details: z$1.string().optional(),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          installed: z.array(z.string()).optional(),
+          upgraded: z.array(z.string()).optional(),
+          warnings: z.array(z.string()).optional(),
+          message: z.string().optional(),
+          details: z.string().optional(),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           const { action, features, packages } = inputData;
@@ -33845,19 +34897,19 @@ export const mastra = new Mastra({
       manageServer: createTool({
         id: "manage-server",
         description: "Manages the Mastra server - start, stop, restart, and check status, use the terminal tool to make curl requests to the server. There is an openapi spec for the server at http://localhost:{port}/openapi.json",
-        inputSchema: z$1.object({
-          action: z$1.enum(["start", "stop", "restart", "status"]).describe("Server management action"),
-          port: z$1.number().optional().default(4200).describe("Port to run the server on")
+        inputSchema: z.object({
+          action: z.enum(["start", "stop", "restart", "status"]).describe("Server management action"),
+          port: z.number().optional().default(4200).describe("Port to run the server on")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          status: z$1.enum(["running", "stopped", "starting", "stopping", "unknown"]),
-          pid: z$1.number().optional(),
-          port: z$1.number().optional(),
-          url: z$1.string().optional(),
-          message: z$1.string().optional(),
-          stdout: z$1.array(z$1.string()).optional().describe("Server output lines captured during startup"),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          status: z.enum(["running", "stopped", "starting", "stopping", "unknown"]),
+          pid: z.number().optional(),
+          port: z.number().optional(),
+          url: z.string().optional(),
+          message: z.string().optional(),
+          stdout: z.array(z.string()).optional().describe("Server output lines captured during startup"),
+          errorMessage: z.string().optional()
         }),
         execute: async (inputData) => {
           const { action, port } = inputData;
@@ -33927,23 +34979,23 @@ export const mastra = new Mastra({
       httpRequest: createTool({
         id: "http-request",
         description: "Makes HTTP requests to the Mastra server or external APIs for testing and integration",
-        inputSchema: z$1.object({
-          method: z$1.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).describe("HTTP method"),
-          url: z$1.string().describe("Full URL or path (if baseUrl provided)"),
-          baseUrl: z$1.string().optional().describe("Base URL for the server (e.g., http://localhost:4200)"),
-          headers: z$1.record(z$1.string()).optional().describe("HTTP headers"),
-          body: z$1.any().optional().describe("Request body (will be JSON stringified if object)"),
-          timeout: z$1.number().optional().default(3e4).describe("Request timeout in milliseconds")
+        inputSchema: z.object({
+          method: z.enum(["GET", "POST", "PUT", "DELETE", "PATCH"]).describe("HTTP method"),
+          url: z.string().describe("Full URL or path (if baseUrl provided)"),
+          baseUrl: z.string().optional().describe("Base URL for the server (e.g., http://localhost:4200)"),
+          headers: z.record(z.string()).optional().describe("HTTP headers"),
+          body: z.any().optional().describe("Request body (will be JSON stringified if object)"),
+          timeout: z.number().optional().default(3e4).describe("Request timeout in milliseconds")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          status: z$1.number().optional(),
-          statusText: z$1.string().optional(),
-          headers: z$1.record(z$1.string()).optional(),
-          data: z$1.any().optional(),
-          errorMessage: z$1.string().optional(),
-          url: z$1.string(),
-          method: z$1.string()
+        outputSchema: z.object({
+          success: z.boolean(),
+          status: z.number().optional(),
+          statusText: z.string().optional(),
+          headers: z.record(z.string()).optional(),
+          data: z.any().optional(),
+          errorMessage: z.string().optional(),
+          url: z.string(),
+          method: z.string()
         }),
         execute: async (inputData) => {
           const { method, url, baseUrl, headers, body, timeout } = inputData;
@@ -35581,10 +36633,6 @@ ${additionalInstructions}`;
     });
     return super.streamLegacy(messages, enhancedOptions);
   };
-  /**
-   * Enhanced stream method with AgentBuilder-specific configuration
-   * Overrides the base Agent stream method to provide additional project context
-   */
   async stream(messages, streamOptions) {
     const { ...baseOptions } = streamOptions || {};
     const originalInstructions = await this.getInstructions({ requestContext: streamOptions?.requestContext });
@@ -35778,13 +36826,13 @@ Return the actual exported names of the units, as well as the file names.`,
       - If a directory doesn't exist or has no files, return an empty array
 
       Return the analysis in the exact format specified in the output schema.`;
-      const output = z$1.object({
-        agents: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional(),
-        workflows: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional(),
-        tools: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional(),
-        mcp: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional(),
-        networks: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional(),
-        other: z$1.array(z$1.object({ name: z$1.string(), file: z$1.string() })).optional()
+      const output = z.object({
+        agents: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+        workflows: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+        tools: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+        mcp: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+        networks: z.array(z.object({ name: z.string(), file: z.string() })).optional(),
+        other: z.array(z.object({ name: z.string(), file: z.string() })).optional()
       });
       const result = isSupported ? await tryGenerateWithJsonFallback(agent, prompt, {
         structuredOutput: {
@@ -36356,14 +37404,14 @@ var intelligentMergeStep = createStep({
       const copyFileTool = createTool({
         id: "copy-file",
         description: "Copy a file from template to target project (use only for edge cases - most files are already copied programmatically).",
-        inputSchema: z$1.object({
-          sourcePath: z$1.string().describe("Path to the source file relative to template directory"),
-          destinationPath: z$1.string().describe("Path to the destination file relative to target project")
+        inputSchema: z.object({
+          sourcePath: z.string().describe("Path to the source file relative to template directory"),
+          destinationPath: z.string().describe("Path to the destination file relative to target project")
         }),
-        outputSchema: z$1.object({
-          success: z$1.boolean(),
-          message: z$1.string(),
-          errorMessage: z$1.string().optional()
+        outputSchema: z.object({
+          success: z.boolean(),
+          message: z.string(),
+          errorMessage: z.string().optional()
         }),
         execute: async (input) => {
           try {
@@ -36781,7 +37829,7 @@ Start by running validateCode with all validation types to get a complete pictur
 Previous iterations may have fixed some issues, so start by re-running validateCode to see the current state, then fix any remaining issues.`;
         const resolvedModel = await validationAgent.getModel();
         const isSupported = isSupportedLanguageModel(resolvedModel);
-        const output = z$1.object({ success: z$1.boolean() });
+        const output = z.object({ success: z.boolean() });
         const result = isSupported ? await tryStreamWithJsonFallback(validationAgent, iterationPrompt, {
           structuredOutput: {
             schema: output
@@ -37593,7 +38641,7 @@ function secureJsonParse3(text23) {
     Error.stackTraceLimit = stackTraceLimit;
   }
 }
-var validatorSymbol3 = Symbol.for("vercel.ai.validator");
+var validatorSymbol3 = /* @__PURE__ */ Symbol.for("vercel.ai.validator");
 function validator3(validate) {
   return { [validatorSymbol3]: true, validate };
 }
@@ -37907,7 +38955,7 @@ var getRelativePath4 = (pathA, pathB) => {
   }
   return [(pathA.length - i).toString(), ...pathB.slice(i)].join("/");
 };
-var ignoreOverride4 = Symbol(
+var ignoreOverride4 = /* @__PURE__ */ Symbol(
   "Let zodToJsonSchema decide on which parser to use"
 );
 var defaultOptions4 = {
@@ -39027,7 +40075,7 @@ function zodSchema4(zodSchema23, options) {
     return zod3Schema3(zodSchema23);
   }
 }
-var schemaSymbol4 = Symbol.for("vercel.ai.schema");
+var schemaSymbol4 = /* @__PURE__ */ Symbol.for("vercel.ai.schema");
 function jsonSchema4(jsonSchema23, {
   validate
 } = {}) {
@@ -39082,7 +40130,7 @@ var require_get_context3 = __commonJS$1({
       getContext: () => getContext3
     });
     module.exports = __toCommonJS(get_context_exports);
-    var SYMBOL_FOR_REQ_CONTEXT = Symbol.for("@vercel/request-context");
+    var SYMBOL_FOR_REQ_CONTEXT = /* @__PURE__ */ Symbol.for("@vercel/request-context");
     function getContext3() {
       const fromSymbol = globalThis;
       return fromSymbol[SYMBOL_FOR_REQ_CONTEXT]?.get?.() ?? {};
@@ -40111,7 +41159,7 @@ function _makeCompatibilityCheck4(ownVersion) {
 }
 var isCompatible4 = _makeCompatibilityCheck4(VERSION223);
 var major4 = VERSION223.split(".")[0];
-var GLOBAL_OPENTELEMETRY_API_KEY4 = Symbol.for("opentelemetry.js.api." + major4);
+var GLOBAL_OPENTELEMETRY_API_KEY4 = /* @__PURE__ */ Symbol.for("opentelemetry.js.api." + major4);
 var _global4 = _globalThis4;
 function registerGlobal4(type, instance, diag, allowOverride) {
   var _a16;
@@ -41335,35 +42383,35 @@ var object4 = ({
     }
   };
 };
-var TaskSchema = z$1.array(
-  z$1.object({
-    id: z$1.string().describe("Unique task ID using kebab-case"),
-    content: z$1.string().describe("Specific, actionable task description"),
-    status: z$1.enum(["pending", "in_progress", "completed", "blocked"]).default("pending"),
-    priority: z$1.enum(["high", "medium", "low"]).describe("Task priority"),
-    dependencies: z$1.array(z$1.string()).optional().describe("IDs of tasks this depends on"),
-    notes: z$1.string().describe("Detailed implementation notes and specifics")
+var TaskSchema = z.array(
+  z.object({
+    id: z.string().describe("Unique task ID using kebab-case"),
+    content: z.string().describe("Specific, actionable task description"),
+    status: z.enum(["pending", "in_progress", "completed", "blocked"]).default("pending"),
+    priority: z.enum(["high", "medium", "low"]).describe("Task priority"),
+    dependencies: z.array(z.string()).optional().describe("IDs of tasks this depends on"),
+    notes: z.string().describe("Detailed implementation notes and specifics")
   })
 );
-var QuestionSchema = z$1.array(
-  z$1.object({
-    id: z$1.string().describe("Unique question ID"),
-    question: z$1.string().describe("Clear, specific question for the user"),
-    type: z$1.enum(["choice", "text", "boolean"]).describe("Type of answer expected"),
-    options: z$1.array(z$1.string()).optional().describe("Options for choice questions"),
-    context: z$1.string().optional().describe("Additional context or explanation")
+var QuestionSchema = z.array(
+  z.object({
+    id: z.string().describe("Unique question ID"),
+    question: z.string().describe("Clear, specific question for the user"),
+    type: z.enum(["choice", "text", "boolean"]).describe("Type of answer expected"),
+    options: z.array(z.string()).optional().describe("Options for choice questions"),
+    context: z.string().optional().describe("Additional context or explanation")
   })
 );
-var PlanningIterationResultSchema = z$1.object({
-  success: z$1.boolean(),
+var PlanningIterationResultSchema = z.object({
+  success: z.boolean(),
   tasks: TaskSchema,
   questions: QuestionSchema,
-  reasoning: z$1.string(),
-  planComplete: z$1.boolean(),
-  message: z$1.string(),
-  error: z$1.string().optional(),
-  allPreviousQuestions: z$1.array(z$1.any()).optional(),
-  allPreviousAnswers: z$1.record(z$1.string()).optional()
+  reasoning: z.string(),
+  planComplete: z.boolean(),
+  message: z.string(),
+  error: z.string().optional(),
+  allPreviousQuestions: z.array(z.any()).optional(),
+  allPreviousAnswers: z.record(z.string()).optional()
 });
 var taskPlanningPrompts = {
   planningAgent: {
@@ -41439,180 +42487,180 @@ Create specific tasks and identify any questions that need user clarification.`
     approvalMessage: (tasksCount) => `Please review and approve the ${tasksCount} task(s) for execution:`
   }
 };
-var WorkflowBuilderInputSchema = z$1.object({
-  workflowName: z$1.string().optional().describe("Name of the workflow to create or edit"),
-  action: z$1.enum(["create", "edit"]).describe("Action to perform: create new or edit existing workflow"),
-  description: z$1.string().optional().describe("Description of what the workflow should do"),
-  requirements: z$1.string().optional().describe("Detailed requirements for the workflow"),
-  projectPath: z$1.string().optional().describe("Path to the Mastra project (defaults to current directory)")
+var WorkflowBuilderInputSchema = z.object({
+  workflowName: z.string().optional().describe("Name of the workflow to create or edit"),
+  action: z.enum(["create", "edit"]).describe("Action to perform: create new or edit existing workflow"),
+  description: z.string().optional().describe("Description of what the workflow should do"),
+  requirements: z.string().optional().describe("Detailed requirements for the workflow"),
+  projectPath: z.string().optional().describe("Path to the Mastra project (defaults to current directory)")
 });
-var DiscoveredWorkflowSchema = z$1.object({
-  name: z$1.string(),
-  file: z$1.string(),
-  description: z$1.string().optional(),
-  inputSchema: z$1.any().optional(),
-  outputSchema: z$1.any().optional(),
-  steps: z$1.array(z$1.string()).optional()
+var DiscoveredWorkflowSchema = z.object({
+  name: z.string(),
+  file: z.string(),
+  description: z.string().optional(),
+  inputSchema: z.any().optional(),
+  outputSchema: z.any().optional(),
+  steps: z.array(z.string()).optional()
 });
-var WorkflowDiscoveryResultSchema = z$1.object({
-  success: z$1.boolean(),
-  workflows: z$1.array(DiscoveredWorkflowSchema),
-  mastraIndexExists: z$1.boolean(),
-  message: z$1.string(),
-  error: z$1.string().optional()
+var WorkflowDiscoveryResultSchema = z.object({
+  success: z.boolean(),
+  workflows: z.array(DiscoveredWorkflowSchema),
+  mastraIndexExists: z.boolean(),
+  message: z.string(),
+  error: z.string().optional()
 });
-var ProjectDiscoveryResultSchema = z$1.object({
-  success: z$1.boolean(),
-  structure: z$1.object({
-    hasWorkflowsDir: z$1.boolean(),
-    hasAgentsDir: z$1.boolean(),
-    hasToolsDir: z$1.boolean(),
-    hasMastraIndex: z$1.boolean(),
-    existingWorkflows: z$1.array(z$1.string()),
-    existingAgents: z$1.array(z$1.string()),
-    existingTools: z$1.array(z$1.string())
+var ProjectDiscoveryResultSchema = z.object({
+  success: z.boolean(),
+  structure: z.object({
+    hasWorkflowsDir: z.boolean(),
+    hasAgentsDir: z.boolean(),
+    hasToolsDir: z.boolean(),
+    hasMastraIndex: z.boolean(),
+    existingWorkflows: z.array(z.string()),
+    existingAgents: z.array(z.string()),
+    existingTools: z.array(z.string())
   }),
-  dependencies: z$1.record(z$1.string()),
-  message: z$1.string(),
-  error: z$1.string().optional()
+  dependencies: z.record(z.string()),
+  message: z.string(),
+  error: z.string().optional()
 });
-var WorkflowResearchResultSchema = z$1.object({
-  success: z$1.boolean(),
-  documentation: z$1.object({
-    workflowPatterns: z$1.array(z$1.string()),
-    stepExamples: z$1.array(z$1.string()),
-    bestPractices: z$1.array(z$1.string())
+var WorkflowResearchResultSchema = z.object({
+  success: z.boolean(),
+  documentation: z.object({
+    workflowPatterns: z.array(z.string()),
+    stepExamples: z.array(z.string()),
+    bestPractices: z.array(z.string())
   }),
-  webResources: z$1.array(
-    z$1.object({
-      title: z$1.string(),
-      url: z$1.string(),
-      snippet: z$1.string(),
-      relevance: z$1.number()
+  webResources: z.array(
+    z.object({
+      title: z.string(),
+      url: z.string(),
+      snippet: z.string(),
+      relevance: z.number()
     })
   ),
-  message: z$1.string(),
-  error: z$1.string().optional()
+  message: z.string(),
+  error: z.string().optional()
 });
-var TaskManagementResultSchema = z$1.object({
-  success: z$1.boolean(),
+var TaskManagementResultSchema = z.object({
+  success: z.boolean(),
   tasks: TaskSchema,
-  message: z$1.string(),
-  error: z$1.string().optional()
+  message: z.string(),
+  error: z.string().optional()
 });
-var TaskExecutionInputSchema = z$1.object({
-  action: z$1.enum(["create", "edit"]),
-  workflowName: z$1.string().optional(),
-  description: z$1.string().optional(),
-  requirements: z$1.string().optional(),
+var TaskExecutionInputSchema = z.object({
+  action: z.enum(["create", "edit"]),
+  workflowName: z.string().optional(),
+  description: z.string().optional(),
+  requirements: z.string().optional(),
   tasks: TaskSchema,
-  discoveredWorkflows: z$1.array(z$1.any()),
-  projectStructure: z$1.any(),
-  research: z$1.any(),
-  projectPath: z$1.string().optional()
+  discoveredWorkflows: z.array(z.any()),
+  projectStructure: z.any(),
+  research: z.any(),
+  projectPath: z.string().optional()
 });
-var TaskExecutionSuspendSchema = z$1.object({
+var TaskExecutionSuspendSchema = z.object({
   questions: QuestionSchema,
-  currentProgress: z$1.string(),
-  completedTasks: z$1.array(z$1.string()),
-  message: z$1.string()
+  currentProgress: z.string(),
+  completedTasks: z.array(z.string()),
+  message: z.string()
 });
-var TaskExecutionResumeSchema = z$1.object({
-  answers: z$1.array(
-    z$1.object({
-      questionId: z$1.string(),
-      answer: z$1.string()
+var TaskExecutionResumeSchema = z.object({
+  answers: z.array(
+    z.object({
+      questionId: z.string(),
+      answer: z.string()
     })
   )
 });
-var TaskExecutionResultSchema = z$1.object({
-  success: z$1.boolean(),
-  filesModified: z$1.array(z$1.string()),
-  validationResults: z$1.object({
-    passed: z$1.boolean(),
-    errors: z$1.array(z$1.string()),
-    warnings: z$1.array(z$1.string())
+var TaskExecutionResultSchema = z.object({
+  success: z.boolean(),
+  filesModified: z.array(z.string()),
+  validationResults: z.object({
+    passed: z.boolean(),
+    errors: z.array(z.string()),
+    warnings: z.array(z.string())
   }),
-  completedTasks: z$1.array(z$1.string()),
-  message: z$1.string(),
-  error: z$1.string().optional()
+  completedTasks: z.array(z.string()),
+  message: z.string(),
+  error: z.string().optional()
 });
-z$1.object({
+z.object({
   questions: QuestionSchema
 });
-z$1.object({
-  answers: z$1.record(z$1.string()),
-  hasAnswers: z$1.boolean()
+z.object({
+  answers: z.record(z.string()),
+  hasAnswers: z.boolean()
 });
-var WorkflowBuilderResultSchema = z$1.object({
-  success: z$1.boolean(),
-  action: z$1.enum(["create", "edit"]),
-  workflowName: z$1.string().optional(),
-  workflowFile: z$1.string().optional(),
+var WorkflowBuilderResultSchema = z.object({
+  success: z.boolean(),
+  action: z.enum(["create", "edit"]),
+  workflowName: z.string().optional(),
+  workflowFile: z.string().optional(),
   discovery: WorkflowDiscoveryResultSchema.optional(),
   projectStructure: ProjectDiscoveryResultSchema.optional(),
   research: WorkflowResearchResultSchema.optional(),
   planning: PlanningIterationResultSchema.optional(),
   taskManagement: TaskManagementResultSchema.optional(),
   execution: TaskExecutionResultSchema.optional(),
-  needsUserInput: z$1.boolean().optional(),
+  needsUserInput: z.boolean().optional(),
   questions: QuestionSchema.optional(),
-  message: z$1.string(),
-  nextSteps: z$1.array(z$1.string()).optional(),
-  error: z$1.string().optional()
+  message: z.string(),
+  nextSteps: z.array(z.string()).optional(),
+  error: z.string().optional()
 });
-var TaskExecutionIterationInputSchema = (taskLength) => z$1.object({
-  status: z$1.enum(["in_progress", "completed", "needs_clarification"]).describe('Status - only use "completed" when ALL remaining tasks are finished'),
-  progress: z$1.string().describe("Current progress description"),
-  completedTasks: z$1.array(z$1.string()).describe("List of ALL completed task IDs (including previously completed ones)"),
-  totalTasksRequired: z$1.number().describe(`Total number of tasks that must be completed (should be ${taskLength})`),
-  tasksRemaining: z$1.array(z$1.string()).describe("List of task IDs that still need to be completed"),
-  filesModified: z$1.array(z$1.string()).describe("List of files that were created or modified - use these exact paths for validateCode tool"),
+var TaskExecutionIterationInputSchema = (taskLength) => z.object({
+  status: z.enum(["in_progress", "completed", "needs_clarification"]).describe('Status - only use "completed" when ALL remaining tasks are finished'),
+  progress: z.string().describe("Current progress description"),
+  completedTasks: z.array(z.string()).describe("List of ALL completed task IDs (including previously completed ones)"),
+  totalTasksRequired: z.number().describe(`Total number of tasks that must be completed (should be ${taskLength})`),
+  tasksRemaining: z.array(z.string()).describe("List of task IDs that still need to be completed"),
+  filesModified: z.array(z.string()).describe("List of files that were created or modified - use these exact paths for validateCode tool"),
   questions: QuestionSchema.optional().describe("Questions for user if clarification is needed"),
-  message: z$1.string().describe("Summary of work completed or current status"),
-  error: z$1.string().optional().describe("Any errors encountered")
+  message: z.string().describe("Summary of work completed or current status"),
+  error: z.string().optional().describe("Any errors encountered")
 });
-var PlanningIterationInputSchema = z$1.object({
-  action: z$1.enum(["create", "edit"]),
-  workflowName: z$1.string().optional(),
-  description: z$1.string().optional(),
-  requirements: z$1.string().optional(),
-  discoveredWorkflows: z$1.array(DiscoveredWorkflowSchema),
+var PlanningIterationInputSchema = z.object({
+  action: z.enum(["create", "edit"]),
+  workflowName: z.string().optional(),
+  description: z.string().optional(),
+  requirements: z.string().optional(),
+  discoveredWorkflows: z.array(DiscoveredWorkflowSchema),
   projectStructure: ProjectDiscoveryResultSchema,
   research: WorkflowResearchResultSchema,
-  userAnswers: z$1.record(z$1.string()).optional()
+  userAnswers: z.record(z.string()).optional()
 });
-var PlanningIterationSuspendSchema = z$1.object({
+var PlanningIterationSuspendSchema = z.object({
   questions: QuestionSchema,
-  message: z$1.string(),
-  currentPlan: z$1.object({
+  message: z.string(),
+  currentPlan: z.object({
     tasks: TaskSchema,
-    reasoning: z$1.string()
+    reasoning: z.string()
   })
 });
-var PlanningIterationResumeSchema = z$1.object({
-  answers: z$1.record(z$1.string())
+var PlanningIterationResumeSchema = z.object({
+  answers: z.record(z.string())
 });
-var PlanningAgentOutputSchema = z$1.object({
+var PlanningAgentOutputSchema = z.object({
   tasks: TaskSchema,
   questions: QuestionSchema.optional(),
-  reasoning: z$1.string().describe("Explanation of the plan and any questions"),
-  planComplete: z$1.boolean().describe("Whether the plan is ready for execution (no more questions)")
+  reasoning: z.string().describe("Explanation of the plan and any questions"),
+  planComplete: z.boolean().describe("Whether the plan is ready for execution (no more questions)")
 });
-var TaskApprovalOutputSchema = z$1.object({
-  approved: z$1.boolean(),
+var TaskApprovalOutputSchema = z.object({
+  approved: z.boolean(),
   tasks: TaskSchema,
-  message: z$1.string(),
-  userFeedback: z$1.string().optional()
+  message: z.string(),
+  userFeedback: z.string().optional()
 });
-var TaskApprovalSuspendSchema = z$1.object({
+var TaskApprovalSuspendSchema = z.object({
   taskList: TaskSchema,
-  summary: z$1.string(),
-  message: z$1.string()
+  summary: z.string(),
+  message: z.string()
 });
-var TaskApprovalResumeSchema = z$1.object({
-  approved: z$1.boolean(),
-  modifications: z$1.string().optional()
+var TaskApprovalResumeSchema = z.object({
+  approved: z.boolean(),
+  modifications: z.string().optional()
 });
 var planningIterationStep = createStep({
   id: "planning-iteration",
@@ -42206,35 +43254,35 @@ ${context.resumeData ? `USER PROVIDED ANSWERS: ${JSON.stringify(context.resumeDa
 var restrictedTaskManager = createTool({
   id: "task-manager",
   description: "View and update your pre-loaded task list. You can only mark tasks as in_progress or completed, not create new tasks.",
-  inputSchema: z$1.object({
-    action: z$1.enum(["list", "update", "complete"]).describe("List tasks, update status, or mark complete - tasks are pre-loaded"),
-    tasks: z$1.array(
-      z$1.object({
-        id: z$1.string().describe("Task ID - must match existing task"),
-        content: z$1.string().optional().describe("Task content (read-only)"),
-        status: z$1.enum(["pending", "in_progress", "completed", "blocked"]).describe("Task status"),
-        priority: z$1.enum(["high", "medium", "low"]).optional().describe("Task priority (read-only)"),
-        dependencies: z$1.array(z$1.string()).optional().describe("Task dependencies (read-only)"),
-        notes: z$1.string().optional().describe("Additional notes or progress updates")
+  inputSchema: z.object({
+    action: z.enum(["list", "update", "complete"]).describe("List tasks, update status, or mark complete - tasks are pre-loaded"),
+    tasks: z.array(
+      z.object({
+        id: z.string().describe("Task ID - must match existing task"),
+        content: z.string().optional().describe("Task content (read-only)"),
+        status: z.enum(["pending", "in_progress", "completed", "blocked"]).describe("Task status"),
+        priority: z.enum(["high", "medium", "low"]).optional().describe("Task priority (read-only)"),
+        dependencies: z.array(z.string()).optional().describe("Task dependencies (read-only)"),
+        notes: z.string().optional().describe("Additional notes or progress updates")
       })
     ).optional().describe("Tasks to update (status and notes only)"),
-    taskId: z$1.string().optional().describe("Specific task ID for single task operations")
+    taskId: z.string().optional().describe("Specific task ID for single task operations")
   }),
-  outputSchema: z$1.object({
-    success: z$1.boolean(),
-    tasks: z$1.array(
-      z$1.object({
-        id: z$1.string(),
-        content: z$1.string(),
-        status: z$1.string(),
-        priority: z$1.string(),
-        dependencies: z$1.array(z$1.string()).optional(),
-        notes: z$1.string().optional(),
-        createdAt: z$1.string(),
-        updatedAt: z$1.string()
+  outputSchema: z.object({
+    success: z.boolean(),
+    tasks: z.array(
+      z.object({
+        id: z.string(),
+        content: z.string(),
+        status: z.string(),
+        priority: z.string(),
+        dependencies: z.array(z.string()).optional(),
+        notes: z.string().optional(),
+        createdAt: z.string(),
+        updatedAt: z.string()
       })
     ),
-    message: z$1.string()
+    message: z.string()
   }),
   execute: async (input) => {
     const adaptedContext = {
@@ -42700,12 +43748,12 @@ var agentBuilderWorkflows = {
   "merge-template": agentBuilderTemplateWorkflow,
   "workflow-builder": workflowBuilderWorkflow
 };
-var actionIdPathParams = z.object({
-  actionId: z.string().describe("Unique identifier for the agent-builder action")
+var actionIdPathParams = z$1.object({
+  actionId: z$1.string().describe("Unique identifier for the agent-builder action")
 });
-var actionRunPathParams = z.object({
-  actionId: z.string().describe("Unique identifier for the agent-builder action"),
-  runId: z.string().describe("Unique identifier for the action run")
+var actionRunPathParams = z$1.object({
+  actionId: z$1.string().describe("Unique identifier for the agent-builder action"),
+  runId: z$1.string().describe("Unique identifier for the action run")
 });
 var streamAgentBuilderBodySchema = streamWorkflowBodySchema;
 var streamLegacyAgentBuilderBodySchema = streamLegacyWorkflowBodySchema;
@@ -42801,9 +43849,10 @@ var GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE = createRoute({
   path: "/api/agent-builder/:actionId/runs/:runId",
   responseType: "json",
   pathParamSchema: actionRunPathParams,
-  responseSchema: workflowRunResponseSchema,
+  queryParamSchema: workflowRunResultQuerySchema,
+  responseSchema: workflowRunResultSchema,
   summary: "Get action run by ID",
-  description: "Returns details for a specific action run",
+  description: "Returns details for a specific action run with metadata and processed execution state. Use the fields query parameter to reduce payload size.",
   tags: ["Agent Builder"],
   handler: async (ctx) => {
     const { mastra, actionId, runId } = ctx;
@@ -42821,36 +43870,6 @@ var GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE = createRoute({
     } catch (error) {
       logger.error("Error getting agent builder action run", { error, actionId, runId });
       return handleError$1(error, "Error getting agent builder action run");
-    } finally {
-      WorkflowRegistry.cleanup();
-    }
-  }
-});
-var GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE = createRoute({
-  method: "GET",
-  path: "/api/agent-builder/:actionId/runs/:runId/execution-result",
-  responseType: "json",
-  pathParamSchema: actionRunPathParams,
-  responseSchema: workflowExecutionResultSchema,
-  summary: "Get action execution result",
-  description: "Returns the final execution result of a completed action run",
-  tags: ["Agent Builder"],
-  handler: async (ctx) => {
-    const { mastra, actionId, runId } = ctx;
-    const logger = mastra.getLogger();
-    try {
-      WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
-      if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
-      }
-      logger.info("Getting agent builder action run execution result", { actionId, runId });
-      return await GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE.handler({
-        ...ctx,
-        workflowId: actionId
-      });
-    } catch (error) {
-      logger.error("Error getting execution result", { error, actionId, runId });
-      return handleError$1(error, "Error getting agent builder action execution result");
     } finally {
       WorkflowRegistry.cleanup();
     }
@@ -42914,39 +43933,6 @@ var STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
       });
     } catch (error) {
       logger.error("Error streaming agent builder action", { error, actionId });
-      return handleError$1(error, "Error streaming agent builder action");
-    } finally {
-      WorkflowRegistry.cleanup();
-    }
-  }
-});
-var STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agent-builder/:actionId/streamVNext",
-  responseType: "stream",
-  pathParamSchema: actionIdPathParams,
-  queryParamSchema: runIdSchema,
-  bodySchema: streamAgentBuilderBodySchema,
-  responseSchema: streamResponseSchema,
-  summary: "Stream action execution (v2)",
-  description: "Executes an action using the v2 streaming API and streams the results in real-time",
-  tags: ["Agent Builder"],
-  handler: async (ctx) => {
-    const { mastra, actionId, runId, requestContext } = ctx;
-    const logger = mastra.getLogger();
-    try {
-      WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
-      if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
-      }
-      logger.info("Streaming agent builder action (v2)", { actionId, runId });
-      return await STREAM_VNEXT_WORKFLOW_ROUTE.handler({
-        ...ctx,
-        workflowId: actionId,
-        requestContext
-      });
-    } catch (error) {
-      logger.error("Error streaming agent builder action (v2)", { error, actionId });
       return handleError$1(error, "Error streaming agent builder action");
     } finally {
       WorkflowRegistry.cleanup();
@@ -43044,37 +44030,6 @@ var OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE = createRoute({
       });
     } catch (error) {
       logger.error("Error observing agent builder action stream", { error, actionId });
-      return handleError$1(error, "Error observing agent builder action stream");
-    } finally {
-      WorkflowRegistry.cleanup();
-    }
-  }
-});
-var OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE = createRoute({
-  method: "POST",
-  path: "/api/agent-builder/:actionId/observe-streamVNext",
-  responseType: "stream",
-  pathParamSchema: actionIdPathParams,
-  queryParamSchema: runIdSchema,
-  responseSchema: streamResponseSchema,
-  summary: "Observe action stream (v2)",
-  description: "Observes and streams updates from an already running action execution using v2 streaming API",
-  tags: ["Agent Builder"],
-  handler: async (ctx) => {
-    const { mastra, actionId, runId } = ctx;
-    const logger = mastra.getLogger();
-    try {
-      WorkflowRegistry.registerTemporaryWorkflows(agentBuilderWorkflows, mastra);
-      if (actionId && !WorkflowRegistry.isAgentBuilderWorkflow(actionId)) {
-        throw new HTTPException$2(400, { message: `Invalid agent-builder action: ${actionId}` });
-      }
-      logger.info("Observing agent builder action stream (v2)", { actionId, runId });
-      return await OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE.handler({
-        ...ctx,
-        workflowId: actionId
-      });
-    } catch (error) {
-      logger.error("Error observing agent builder action stream (v2)", { error, actionId });
       return handleError$1(error, "Error observing agent builder action stream");
     } finally {
       WorkflowRegistry.cleanup();
@@ -43278,7 +44233,9 @@ var OBSERVE_STREAM_LEGACY_AGENT_BUILDER_ACTION_ROUTE = createRoute({
 // src/server/handlers/agents.ts
 var agents_exports = {};
 __export(agents_exports, {
+  APPROVE_NETWORK_TOOL_CALL_ROUTE: () => APPROVE_NETWORK_TOOL_CALL_ROUTE,
   APPROVE_TOOL_CALL_ROUTE: () => APPROVE_TOOL_CALL_ROUTE,
+  DECLINE_NETWORK_TOOL_CALL_ROUTE: () => DECLINE_NETWORK_TOOL_CALL_ROUTE,
   DECLINE_TOOL_CALL_ROUTE: () => DECLINE_TOOL_CALL_ROUTE,
   ENHANCE_INSTRUCTIONS_ROUTE: () => ENHANCE_INSTRUCTIONS_ROUTE,
   GENERATE_AGENT_ROUTE: () => GENERATE_AGENT_ROUTE,
@@ -43569,8 +44526,8 @@ var LIST_AGENTS_ROUTE = createRoute({
   method: "GET",
   path: "/api/agents",
   responseType: "json",
-  queryParamSchema: z$1.object({
-    partial: z$1.string().optional()
+  queryParamSchema: z.object({
+    partial: z.string().optional()
   }),
   responseSchema: listAgentsResponseSchema,
   summary: "List all agents",
@@ -43654,7 +44611,7 @@ var GENERATE_LEGACY_ROUTE = createRoute({
   path: "/api/agents/:agentId/generate-legacy",
   responseType: "json",
   pathParamSchema: agentIdPathParams,
-  bodySchema: agentExecutionBodySchema$1,
+  bodySchema: agentExecutionLegacyBodySchema,
   responseSchema: generateResponseSchema,
   summary: "[DEPRECATED] Generate with legacy format",
   description: "Legacy endpoint for generating agent responses. Use /api/agents/:agentId/generate instead.",
@@ -43686,7 +44643,7 @@ var STREAM_GENERATE_LEGACY_ROUTE = createRoute({
   path: "/api/agents/:agentId/stream-legacy",
   responseType: "datastream-response",
   pathParamSchema: agentIdPathParams,
-  bodySchema: agentExecutionBodySchema$1,
+  bodySchema: agentExecutionLegacyBodySchema,
   responseSchema: streamResponseSchema,
   summary: "[DEPRECATED] Stream with legacy format",
   description: "Legacy endpoint for streaming agent responses. Use /api/agents/:agentId/stream instead.",
@@ -43876,7 +44833,7 @@ var STREAM_NETWORK_ROUTE = createRoute({
   responseType: "stream",
   streamFormat: "sse",
   pathParamSchema: agentIdPathParams,
-  bodySchema: agentExecutionBodySchema$1.extend({ thread: z$1.string().optional() }),
+  bodySchema: agentExecutionBodySchema$1,
   responseSchema: streamResponseSchema,
   summary: "Stream agent network",
   description: "Executes an agent network with multiple agents and streams the response",
@@ -43887,16 +44844,65 @@ var STREAM_NETWORK_ROUTE = createRoute({
       sanitizeBody(params, ["tools"]);
       validateBody({ messages });
       const streamResult = await agent.network(messages, {
-        ...params,
-        memory: {
-          thread: params.thread ?? params.threadId ?? "",
-          resource: params.resourceId ?? "",
-          options: params.memory?.options ?? {}
-        }
+        ...params
       });
       return streamResult;
     } catch (error) {
       return handleError$1(error, "error streaming agent loop response");
+    }
+  }
+});
+var APPROVE_NETWORK_TOOL_CALL_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/approve-network-tool-call",
+  responseType: "stream",
+  streamFormat: "sse",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: approveNetworkToolCallBodySchema,
+  responseSchema: streamResponseSchema,
+  summary: "Approve network tool call",
+  description: "Approves a pending network tool call and continues network agent execution",
+  tags: ["Agents", "Tools"],
+  handler: async ({ mastra, agentId, ...params }) => {
+    try {
+      const agent = await getAgentFromSystem({ mastra, agentId });
+      if (!params.runId) {
+        throw new HTTPException$2(400, { message: "Run id is required" });
+      }
+      sanitizeBody(params, ["tools"]);
+      const streamResult = await agent.approveNetworkToolCall({
+        ...params
+      });
+      return streamResult;
+    } catch (error) {
+      return handleError$1(error, "error approving network tool call");
+    }
+  }
+});
+var DECLINE_NETWORK_TOOL_CALL_ROUTE = createRoute({
+  method: "POST",
+  path: "/api/agents/:agentId/decline-network-tool-call",
+  responseType: "stream",
+  streamFormat: "sse",
+  pathParamSchema: agentIdPathParams,
+  bodySchema: declineNetworkToolCallBodySchema,
+  responseSchema: streamResponseSchema,
+  summary: "Decline network tool call",
+  description: "Declines a pending network tool call and continues network agent execution without executing the tool",
+  tags: ["Agents", "Tools"],
+  handler: async ({ mastra, agentId, ...params }) => {
+    try {
+      const agent = await getAgentFromSystem({ mastra, agentId });
+      if (!params.runId) {
+        throw new HTTPException$2(400, { message: "Run id is required" });
+      }
+      sanitizeBody(params, ["tools"]);
+      const streamResult = await agent.declineNetworkToolCall({
+        ...params
+      });
+      return streamResult;
+    } catch (error) {
+      return handleError$1(error, "error declining network tool call");
     }
   }
 });
@@ -44171,14 +45177,11 @@ var AGENT_BUILDER_ROUTES = [
   GET_AGENT_BUILDER_ACTION_BY_ID_ROUTE,
   LIST_AGENT_BUILDER_ACTION_RUNS_ROUTE,
   GET_AGENT_BUILDER_ACTION_RUN_BY_ID_ROUTE,
-  GET_AGENT_BUILDER_ACTION_RUN_EXECUTION_RESULT_ROUTE,
   CREATE_AGENT_BUILDER_ACTION_RUN_ROUTE,
   STREAM_AGENT_BUILDER_ACTION_ROUTE,
-  STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE,
   START_ASYNC_AGENT_BUILDER_ACTION_ROUTE,
   START_AGENT_BUILDER_ACTION_RUN_ROUTE,
   OBSERVE_STREAM_AGENT_BUILDER_ACTION_ROUTE,
-  OBSERVE_STREAM_VNEXT_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_ASYNC_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_AGENT_BUILDER_ACTION_ROUTE,
   RESUME_STREAM_AGENT_BUILDER_ACTION_ROUTE,
@@ -44211,6 +45214,8 @@ var AGENTS_ROUTES = [
   EXECUTE_AGENT_TOOL_ROUTE,
   APPROVE_TOOL_CALL_ROUTE,
   DECLINE_TOOL_CALL_ROUTE,
+  APPROVE_NETWORK_TOOL_CALL_ROUTE,
+  DECLINE_NETWORK_TOOL_CALL_ROUTE,
   // ============================================================================
   // Network Routes
   // ============================================================================
@@ -44305,6 +45310,7 @@ var MEMORY_ROUTES = [
   CREATE_THREAD_ROUTE,
   UPDATE_THREAD_ROUTE,
   DELETE_THREAD_ROUTE,
+  CLONE_THREAD_ROUTE,
   UPDATE_WORKING_MEMORY_ROUTE,
   DELETE_MESSAGES_ROUTE,
   SEARCH_MEMORY_ROUTE,
@@ -44374,13 +45380,10 @@ var WORKFLOWS_ROUTES = [
   DELETE_WORKFLOW_RUN_BY_ID_ROUTE,
   CREATE_WORKFLOW_RUN_ROUTE,
   STREAM_WORKFLOW_ROUTE,
-  STREAM_VNEXT_WORKFLOW_ROUTE,
   RESUME_STREAM_WORKFLOW_ROUTE,
-  GET_WORKFLOW_RUN_EXECUTION_RESULT_ROUTE,
   START_ASYNC_WORKFLOW_ROUTE,
   START_WORKFLOW_RUN_ROUTE,
   OBSERVE_STREAM_WORKFLOW_ROUTE,
-  OBSERVE_STREAM_VNEXT_WORKFLOW_ROUTE,
   RESUME_ASYNC_WORKFLOW_ROUTE,
   RESUME_WORKFLOW_ROUTE,
   CANCEL_WORKFLOW_RUN_ROUTE,
@@ -44503,6 +45506,18 @@ function redactStreamChunk(chunk) {
 }
 
 // src/server/server-adapter/index.ts
+function normalizeQueryParams(rawQuery) {
+  const queryParams = {};
+  for (const [key, value] of Object.entries(rawQuery)) {
+    if (typeof value === "string") {
+      queryParams[key] = value;
+    } else if (Array.isArray(value)) {
+      const stringValues = value.filter((v) => typeof v === "string");
+      queryParams[key] = stringValues.length === 1 ? stringValues[0] : stringValues;
+    }
+  }
+  return queryParams;
+}
 var MastraServer$1 = class MastraServer extends MastraServerBase {
   mastra;
   bodyLimitOptions;
@@ -46982,7 +47997,7 @@ var newHeadersFromIncoming = (incoming) => {
   }
   return new Headers(headerRecord);
 };
-var wrapBodyStream = Symbol("wrapBodyStream");
+var wrapBodyStream = /* @__PURE__ */ Symbol("wrapBodyStream");
 var newRequestFromIncoming = (method, url, headers, incoming, abortController) => {
   const init = {
     method,
@@ -47030,13 +48045,13 @@ var newRequestFromIncoming = (method, url, headers, incoming, abortController) =
   }
   return new Request2(url, init);
 };
-var getRequestCache = Symbol("getRequestCache");
-var requestCache = Symbol("requestCache");
-var incomingKey = Symbol("incomingKey");
-var urlKey = Symbol("urlKey");
-var headersKey = Symbol("headersKey");
-var abortControllerKey = Symbol("abortControllerKey");
-var getAbortController = Symbol("getAbortController");
+var getRequestCache = /* @__PURE__ */ Symbol("getRequestCache");
+var requestCache = /* @__PURE__ */ Symbol("requestCache");
+var incomingKey = /* @__PURE__ */ Symbol("incomingKey");
+var urlKey = /* @__PURE__ */ Symbol("urlKey");
+var headersKey = /* @__PURE__ */ Symbol("headersKey");
+var abortControllerKey = /* @__PURE__ */ Symbol("abortControllerKey");
+var getAbortController = /* @__PURE__ */ Symbol("getAbortController");
 var requestPrototype = {
   get method() {
     return this[incomingKey].method || "GET";
@@ -47127,9 +48142,9 @@ var newRequest = (incoming, defaultHostname) => {
   req[urlKey] = url.href;
   return req;
 };
-var responseCache = Symbol("responseCache");
-var getResponseCache = Symbol("getResponseCache");
-var cacheKey = Symbol("cache");
+var responseCache = /* @__PURE__ */ Symbol("responseCache");
+var getResponseCache = /* @__PURE__ */ Symbol("getResponseCache");
+var cacheKey = /* @__PURE__ */ Symbol("cache");
 var GlobalResponse = global.Response;
 var Response2 = class _Response {
   #body;
@@ -47271,7 +48286,7 @@ global.fetch = (info, init) => {
   };
   return webFetch(info, init);
 };
-var outgoingEnded = Symbol("outgoingEnded");
+var outgoingEnded = /* @__PURE__ */ Symbol("outgoingEnded");
 var handleRequestError = () => new Response(null, {
   status: 400
 });
@@ -47925,12 +48940,12 @@ var ERR_STREAM_WRITE_AFTER_END = class extends Error {
 };
 
 // ../../node_modules/.pnpm/fetch-to-node@2.1.0/node_modules/fetch-to-node/dist/fetch-to-node/http-incoming.js
-var kHeaders = Symbol("kHeaders");
-var kHeadersDistinct = Symbol("kHeadersDistinct");
-var kHeadersCount = Symbol("kHeadersCount");
-var kTrailers = Symbol("kTrailers");
-var kTrailersDistinct = Symbol("kTrailersDistinct");
-var kTrailersCount = Symbol("kTrailersCount");
+var kHeaders = /* @__PURE__ */ Symbol("kHeaders");
+var kHeadersDistinct = /* @__PURE__ */ Symbol("kHeadersDistinct");
+var kHeadersCount = /* @__PURE__ */ Symbol("kHeadersCount");
+var kTrailers = /* @__PURE__ */ Symbol("kTrailers");
+var kTrailersDistinct = /* @__PURE__ */ Symbol("kTrailersDistinct");
+var kTrailersCount = /* @__PURE__ */ Symbol("kTrailersCount");
 var FetchIncomingMessage = class extends Readable {
   get socket() {
     return null;
@@ -48296,8 +49311,8 @@ function isUint8Array(value) {
 }
 
 // ../../node_modules/.pnpm/fetch-to-node@2.1.0/node_modules/fetch-to-node/dist/fetch-to-node/internal-http.js
-var kNeedDrain = Symbol("kNeedDrain");
-var kOutHeaders = Symbol("kOutHeaders");
+var kNeedDrain = /* @__PURE__ */ Symbol("kNeedDrain");
+var kOutHeaders = /* @__PURE__ */ Symbol("kOutHeaders");
 function utcDate() {
   return (/* @__PURE__ */ new Date()).toUTCString();
 }
@@ -48317,14 +49332,14 @@ function checkInvalidHeaderChar(val) {
   return headerCharRegex.test(val);
 }
 var chunkExpression = /(?:^|\W)chunked(?:$|\W)/i;
-var kCorked = Symbol("corked");
-var kChunkedBuffer = Symbol("kChunkedBuffer");
-var kChunkedLength = Symbol("kChunkedLength");
-var kUniqueHeaders = Symbol("kUniqueHeaders");
-var kBytesWritten = Symbol("kBytesWritten");
-var kErrored = Symbol("errored");
-var kHighWaterMark = Symbol("kHighWaterMark");
-var kRejectNonStandardBodyWrites = Symbol("kRejectNonStandardBodyWrites");
+var kCorked = /* @__PURE__ */ Symbol("corked");
+var kChunkedBuffer = /* @__PURE__ */ Symbol("kChunkedBuffer");
+var kChunkedLength = /* @__PURE__ */ Symbol("kChunkedLength");
+var kUniqueHeaders = /* @__PURE__ */ Symbol("kUniqueHeaders");
+var kBytesWritten = /* @__PURE__ */ Symbol("kBytesWritten");
+var kErrored = /* @__PURE__ */ Symbol("errored");
+var kHighWaterMark = /* @__PURE__ */ Symbol("kHighWaterMark");
+var kRejectNonStandardBodyWrites = /* @__PURE__ */ Symbol("kRejectNonStandardBodyWrites");
 var nop = () => {
 };
 var RE_CONN_CLOSE = /(?:^|\W)close(?:$|\W)/i;
@@ -49591,11 +50606,21 @@ function toFetchResponse(res) {
 var HTTPException = class extends Error {
   res;
   status;
+  /**
+   * Creates an instance of `HTTPException`.
+   * @param status - HTTP status code for the exception. Defaults to 500.
+   * @param options - Additional options for the exception.
+   */
   constructor(status = 500, options) {
     super(options?.message, { cause: options?.cause });
     this.res = options?.res;
     this.status = status;
   }
+  /**
+   * Returns the response object associated with the exception.
+   * If a response object is not provided, a new response is created with the error message and status code.
+   * @returns The response object.
+   */
   getResponse() {
     if (this.res) {
       const newResponse = new Response(this.res.body, {
@@ -49670,7 +50695,13 @@ var StreamingApi = class {
   writable;
   abortSubscribers = [];
   responseReadable;
+  /**
+   * Whether the stream has been aborted.
+   */
   aborted = false;
+  /**
+   * Whether the stream has been closed normally.
+   */
   closed = false;
   constructor(writable, _readable) {
     this.writable = writable;
@@ -49722,6 +50753,10 @@ var StreamingApi = class {
   onAbort(listener) {
     this.abortSubscribers.push(listener);
   }
+  /**
+   * Abort the stream.
+   * You can call this method when stream is aborted by external event.
+   */
   abort() {
     if (!this.aborted) {
       this.aborted = true;
@@ -50159,7 +51194,7 @@ var MastraServer = class extends MastraServer$1 {
   }
   async getParams(route, request) {
     const urlParams = request.param();
-    const queryParams = request.query();
+    const queryParams = normalizeQueryParams(request.queries());
     let body;
     if (route.method === "POST" || route.method === "PUT" || route.method === "PATCH") {
       const contentType = request.header("content-type") || "";
@@ -50347,8 +51382,8 @@ var MastraServer = class extends MastraServer$1 {
   }
 };
 
-// ../../node_modules/.pnpm/hono-openapi@1.1.1_@hono+standard-validator@0.2.0_@standard-schema+spec@1.1.0_hono@4.10_3f8cc66f50ae3bf55270617c233327e4/node_modules/hono-openapi/dist/index.js
-var uniqueSymbol = Symbol("openapi");
+// ../../node_modules/.pnpm/hono-openapi@1.1.1_@hono+standard-validator@0.2.1_@standard-schema+spec@1.1.0_hono@4.11_9131e3cfc9e6aabf665461e37801bbee/node_modules/hono-openapi/dist/index.js
+var uniqueSymbol = /* @__PURE__ */ Symbol("openapi");
 function describeRoute(spec) {
   const middleware2 = async (_c, next) => {
     await next();
@@ -50537,7 +51572,18 @@ var html2 = `
 `;
 
 // src/server/index.ts
-var getStudioPath = () => process.env.MASTRA_STUDIO_PATH || "./playground";
+var getStudioPath = () => {
+  if (process.env.MASTRA_STUDIO_PATH) {
+    return process.env.MASTRA_STUDIO_PATH;
+  }
+  let __dirname = ".";
+  if (import.meta.url) {
+    const __filename = fileURLToPath(import.meta.url);
+    __dirname = dirname(__filename);
+  }
+  const studioPath = process.env.MASTRA_STUDIO_PATH || join(__dirname, "studio");
+  return studioPath;
+};
 function getToolExports(tools) {
   try {
     return tools.reduce((acc, toolModule) => {
@@ -50591,7 +51637,7 @@ async function createHonoServer(mastra, options = {
     tools: options.tools,
     taskStore: a2aTaskStore,
     bodyLimitOptions,
-    openapiPath: "/openapi.json",
+    openapiPath: options?.isDev || server?.build?.openAPIDocs ? "/openapi.json" : void 0,
     customRouteAuthConfig
   });
   honoServerAdapter.registerContextMiddleware();
@@ -50654,18 +51700,11 @@ async function createHonoServer(mastra, options = {
         middlewares.push(describeRoute(route.openapi));
       }
       const handler = "handler" in route ? route.handler : await route.createHandler({ mastra });
-      if (route.method === "GET") {
-        app.get(route.path, ...middlewares, handler);
-      } else if (route.method === "POST") {
-        app.post(route.path, ...middlewares, handler);
-      } else if (route.method === "PUT") {
-        app.put(route.path, ...middlewares, handler);
-      } else if (route.method === "DELETE") {
-        app.delete(route.path, ...middlewares, handler);
-      } else if (route.method === "PATCH") {
-        app.patch(route.path, ...middlewares, handler);
-      } else if (route.method === "ALL") {
-        app.all(route.path, ...middlewares, handler);
+      const allHandlers = [...middlewares, handler];
+      if (route.method === "ALL") {
+        app.all(route.path, allHandlers[0], ...allHandlers.slice(1));
+      } else {
+        app.on(route.method, route.path, allHandlers[0], ...allHandlers.slice(1));
       }
     }
   }
@@ -50674,6 +51713,12 @@ async function createHonoServer(mastra, options = {
   }
   await honoServerAdapter.registerRoutes();
   if (options?.isDev || server?.build?.swaggerUI) {
+    if (!options?.isDev && server?.build?.swaggerUI && !server?.build?.openAPIDocs) {
+      const logger2 = mastra.getLogger();
+      logger2.warn(
+        "Swagger UI is enabled but OpenAPI documentation is disabled. The Swagger UI will not function properly without the OpenAPI endpoint. Please enable openAPIDocs in your server.build configuration:\n  server: { build: { swaggerUI: true, openAPIDocs: true } }"
+      );
+    }
     app.get(
       "/swagger-ui",
       describeRoute({
@@ -50693,7 +51738,7 @@ async function createHonoServer(mastra, options = {
   }
   const serverOptions = mastra.getServer();
   const studioBasePath = normalizeStudioBase(serverOptions?.studioBase ?? "/");
-  if (options?.playground) {
+  if (options?.studio) {
     app.get(
       `${studioBasePath}/refresh-events`,
       describeRoute({
@@ -50746,8 +51791,8 @@ async function createHonoServer(mastra, options = {
     if (requestPath.includes(".") && !requestPath.endsWith(".html")) {
       return await next();
     }
-    const isPlaygroundRoute = studioBasePath === "" || requestPath === studioBasePath || requestPath.startsWith(`${studioBasePath}/`);
-    if (options?.playground && isPlaygroundRoute) {
+    const isStudioRoute = studioBasePath === "" || requestPath === studioBasePath || requestPath.startsWith(`${studioBasePath}/`);
+    if (options?.studio && isStudioRoute) {
       const studioPath = getStudioPath();
       let indexHtml = await readFile(join(studioPath, "index.html"), "utf-8");
       const port = serverOptions?.port ?? (Number(process.env.PORT) || 4111);
@@ -50756,22 +51801,24 @@ async function createHonoServer(mastra, options = {
       const key = serverOptions?.https?.key ?? (process.env.MASTRA_HTTPS_KEY ? Buffer.from(process.env.MASTRA_HTTPS_KEY, "base64") : void 0);
       const cert = serverOptions?.https?.cert ?? (process.env.MASTRA_HTTPS_CERT ? Buffer.from(process.env.MASTRA_HTTPS_CERT, "base64") : void 0);
       const protocol = key && cert ? "https" : "http";
+      const cloudApiEndpoint = process.env.MASTRA_CLOUD_API_ENDPOINT || "";
       indexHtml = indexHtml.replace(`'%%MASTRA_SERVER_HOST%%'`, `'${host}'`);
       indexHtml = indexHtml.replace(`'%%MASTRA_SERVER_PORT%%'`, `'${port}'`);
       indexHtml = indexHtml.replace(`'%%MASTRA_HIDE_CLOUD_CTA%%'`, `'${hideCloudCta}'`);
       indexHtml = indexHtml.replace(`'%%MASTRA_SERVER_PROTOCOL%%'`, `'${protocol}'`);
+      indexHtml = indexHtml.replace(`'%%MASTRA_CLOUD_API_ENDPOINT%%'`, `'${cloudApiEndpoint}'`);
       indexHtml = indexHtml.replaceAll("%%MASTRA_STUDIO_BASE_PATH%%", studioBasePath);
       return c.newResponse(indexHtml, 200, { "Content-Type": "text/html" });
     }
     return c.newResponse(html2, 200, { "Content-Type": "text/html" });
   });
-  if (options?.playground) {
-    const studioPath = getStudioPath();
-    const playgroundPath = studioBasePath ? `${studioBasePath}/*` : "*";
+  if (options?.studio) {
+    const studioRootPath = getStudioPath();
+    const studioPath = studioBasePath ? `${studioBasePath}/*` : "*";
     app.use(
-      playgroundPath,
+      studioPath,
       serveStatic({
-        root: studioPath,
+        root: studioRootPath,
         rewriteRequestPath: (path) => {
           if (studioBasePath && path.startsWith(studioBasePath)) {
             return path.slice(studioBasePath.length);
@@ -50808,7 +51855,7 @@ async function createNodeServer(mastra, options = { tools: {} }) {
     () => {
       const logger2 = mastra.getLogger();
       logger2.info(` Mastra API running on ${protocol}://${host}:${port}/api`);
-      if (options?.playground) {
+      if (options?.studio) {
         const studioBasePath = normalizeStudioBase(serverOptions?.studioBase ?? "/");
         const studioUrl = `${protocol}://${host}:${port}${studioBasePath}`;
         logger2.info(`\u{1F468}\u200D\u{1F4BB} Studio available at ${studioUrl}`);
@@ -50829,7 +51876,7 @@ async function createNodeServer(mastra, options = { tools: {} }) {
 // @ts-ignore
 // @ts-ignore
 await createNodeServer(mastra, {
-  playground: true,
+  studio: true,
   isDev: true,
   tools: getToolExports(tools),
 });
@@ -50838,7 +51885,7 @@ if (mastra.getStorage()) {
   mastra.__registerInternalWorkflow(scoreTracesWorkflow);
 }
 
-var distMEN73GGI = /*#__PURE__*/Object.freeze({
+var distEDO7GEGI = /*#__PURE__*/Object.freeze({
   __proto__: null,
   createOpenAI: createOpenAI,
   openai: openai

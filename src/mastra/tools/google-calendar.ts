@@ -129,7 +129,9 @@ const parseDateInput = async (input: string): Promise<string> => {
       console.log("📊 [PARAMS] Parámetros recibidos del agente:", JSON.stringify(input, null, 2));
       
       const calendar = getGoogleCalendar();
+      console.log("🔐 [AUTH] getGoogleCalendar() ejecutado. Cliente autenticado OK.");
       const calendarId = CALENDAR_ID;
+      console.log(`📅 [CONFIG] Usando Calendar ID: ${calendarId}`);
       
       try {
         // 0. Smart Parsing con LLM (O bypass si es ISO válido)
@@ -164,15 +166,27 @@ const parseDateInput = async (input: string): Promise<string> => {
                 throw new Error(`No pude entender la fecha: ${parseResult.error || 'error desconocido'}`);
             }
             smartStart = parseResult.start;
+            smartStart = parseResult.start;
             smartEnd = parseResult.end!; 
         } 
+        
+        console.log(`🧠 [LLM PARSE RESULT] Start: ${smartStart}, End: ${smartEnd}`); 
 
         // Sanitización y conversión a hora local
         const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
+        
+        console.log(`🕒 [SANITIZED DATES] Start: ${start}, End: ${end} (Timezone: America/Argentina/Buenos_Aires)`);
 
         const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
         
         const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
+
+        console.log("🚀 [API REQUEST] Intentando crear evento con:", JSON.stringify({
+            summary: eventSummary,
+            start: start, 
+            end: end,
+            location: input.propertyAddress
+        }, null, 2));
 
         const response = await calendar.events.insert({
           calendarId: calendarId,
@@ -190,6 +204,9 @@ const parseDateInput = async (input: string): Promise<string> => {
             },
           },
         });
+        
+        console.log("✅ [API SUCCESS] Evento creado. ID:", response.data.id);
+        console.log("🔗 [API SUCCESS] Link:", response.data.htmlLink);
 
         return {
           success: true,
@@ -199,8 +216,19 @@ const parseDateInput = async (input: string): Promise<string> => {
           message: "Cita agendada correctamente con formato estandarizado."
         };
       } catch (error: any) {
-        console.error('Error creando evento en Google Calendar:', error);
-        return { success: false, error: error.message };
+        console.error('❌ [ERROR FATAL] Error creando evento en Google Calendar:', error);
+        
+        // Log extra details if it's a Google API error
+        if (error.response) {
+            console.error('📦 [GOOGLE API ERROR DATA]:', JSON.stringify(error.response.data, null, 2));
+        }
+
+        return { 
+            success: false, 
+            error: error.message,
+            details: error.response ? error.response.data : "Error desconocido",
+            rawError: JSON.stringify(error, Object.getOwnPropertyNames(error)) 
+        };
       }
     },
   });
@@ -289,6 +317,7 @@ const parseDateInput = async (input: string): Promise<string> => {
       start: z.string().optional().describe('Nueva fecha de inicio (ISO o Natural)'),
       end: z.string().optional().describe('Nueva fecha de fin (ISO o Natural)'),
       userEmail: z.string().optional().describe('Email del usuario para enviar notificaciones de actualización (opcional)'),
+      clientEmail: z.string().optional().describe('Email del cliente'),
 
       // Datos Estructurados para reconstrucción de formato
       clientName: z.string().optional().describe("Nombre y Apellido del cliente (para actualizar ficha)"),

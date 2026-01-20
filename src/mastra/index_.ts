@@ -13,7 +13,7 @@ import { realEstatePropertyFormatterTool } from "./tools/real-estate-property-fo
 import { storage, vectorStore, ThreadContextService } from './storage'; 
 
 // Prompts y Helpers
-import { dynamicInstructions } from '../prompts/fausti-prompts';
+//import { dynamicInstructions } from '../prompts/fausti-prompts';
 
 import { ClientData, OperacionTipo } from '../types';
 // Workflows
@@ -27,10 +27,10 @@ await storage.init();
 
 // Instancia base del agente para el sistema Mastra (registro interno)
 const realEstateAgent = await getRealEstateAgent('');
-
+const dynamicInstructions = 'Eres un experto administrador de bienes raíces que puede agendar citas con clientes para ver propiedades. Cuando el cliente solicita una visita ejecuta la herramienta get_available_slots, luego cuando el cliente confirma la fecha y hora de la visita ejecuta la herramienta create_calendar_event'
 // Instancias adicionales para Mastra Studio (Testing)
-//const alquiler = await getRealEstateAgent('test-user', '', 'ALQUILAR');
-const venta = await getRealEstateAgent('test-user', '', 'VENDER');
+const alquiler = await getRealEstateAgent('test-user', dynamicInstructions, 'ALQUILAR');
+//const venta = await getRealEstateAgent('test-user', '', 'VENDER');
 
 
 // Cache simple para deduplicar requests (TTL 15s)
@@ -44,6 +44,6 @@ const sessionPropiedadInfoMap = new Map<string, string>();
 export const mastra = new Mastra({
   storage,
   vectors: { vectorStore },
-  agents: { venta },
+  agents: { alquiler },
   
 });
