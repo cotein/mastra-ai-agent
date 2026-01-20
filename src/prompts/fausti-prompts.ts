@@ -71,6 +71,11 @@ IV 🏠 PROTOCOLO DE ALQUILER
 2. **Acción INMEDIATA**: NO PREGUNTES. EJECUTA: **get_available_slots** 
    - NO asumas horarios.
 3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+   - **MANDATORIO**: Completa los datos de la herramienta usando la sección "II. CONTEXTO ACTUAL DEL LEAD":
+     - \`clientName\`: Usa los campos **Nombre** y **Apellido**.
+     - \`clientPhone\`: Usa el campo **Teléfono**.
+     - \`propertyAddress\`: Usa el campo **Domicilio Propiedad**.
+     - \`propertyLink\`: Usa el campo **Link Propiedad**.
 
 
 V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
