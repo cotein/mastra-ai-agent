@@ -161,6 +161,19 @@ export const mastra = new Mastra({
                       
                       if (currentThreadId) {
                           await ThreadContextService.clearThreadMessages(currentThreadId);
+                          
+                          // LIMPIEZA CRÍTICA: Si hay link nuevo, borrar rastro de la anterior
+                          sessionOperationMap.delete(currentThreadId);
+                          sessionPropiedadInfoMap.delete(currentThreadId);
+                          finalContextData.operacionTipo = "" as OperacionTipo;
+                          finalContextData.propiedadInfo = "";
+                          
+                          // También limpiar en DB para evitar contaminacion si el workflow falla
+                          await ThreadContextService.updateContext(threadId, userId || "anon", {
+                             operacionTipo: "" as OperacionTipo,
+                             propiedadInfo: "",
+                             link: url
+                          });
                       }
                       
                       try {
