@@ -453,10 +453,18 @@ const parseDateInput = async (input: string): Promise<string> => {
       
       try {
         const calendar = getGoogleCalendar();
+        // Usamos UTC para iterar consistentemente
         const now = new Date();
       const daysToCheck = 5;
-      const workStartHour = 10;
-      const workEndHour = 16;
+      const workStartHour = 10; // 10:00 Argentina
+      const workEndHour = 16;   // 16:00 Argentina
+      
+      // Argentina es UTC-3 (Sin DST)
+      // Por ende, 10:00 AR = 13:00 UTC
+      // 16:00 AR = 19:00 UTC
+      // IMPORTANTE: Si Argentina cambia DST, esto debe actualizarse.
+      const timezoneOffsetHours = 3; 
+
       const slotDurationMinutes = 40; // Duración de visita
       const bufferMinutes = 30; // Tiempo de viaje/buffer
 
@@ -477,16 +485,18 @@ const parseDateInput = async (input: string): Promise<string> => {
         // Si llegamos hasta aquí, es un día hábil
         daysFound++;
 
-        // Definir rango del día laboral
+        // Definir rango del día laboral EN UTC
+        // setUTCHours(10 + 3, 0, 0, 0) -> 13:00:00Z
         const dayStart = new Date(currentDate);
-        dayStart.setHours(workStartHour, 0, 0, 0);
+        dayStart.setUTCHours(workStartHour + timezoneOffsetHours, 0, 0, 0); 
+        
         const dayEnd = new Date(currentDate);
-        dayEnd.setHours(workEndHour, 0, 0, 0);
+        dayEnd.setUTCHours(workEndHour + timezoneOffsetHours, 0, 0, 0);
 
         let timeCursor = new Date(dayStart);
 
         try {
-          // Obtener eventos de este día
+          // Obtener eventos de este día (Query usando ISO Strings que ya están en UTC correcta)
           const response = await calendar.events.list({
             calendarId: CALENDAR_ID,
             timeMin: dayStart.toISOString(),
@@ -504,7 +514,7 @@ const parseDateInput = async (input: string): Promise<string> => {
 
             // Verificar conflictos
             const hasConflict = events.some((event: any) => {
-                if (!event.start.dateTime || !event.end.dateTime) return false; // Eventos de día entero ignorados por ahora? Ojo
+                if (!event.start.dateTime || !event.end.dateTime) return false; 
                 
                 const eventStart = new Date(event.start.dateTime);
                 const eventEnd = new Date(event.end.dateTime);
@@ -522,9 +532,10 @@ const parseDateInput = async (input: string): Promise<string> => {
 
             if (!hasConflict) {
                  availableSlots.push({
-                    fecha: timeCursor.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric' }),
-                    hora: timeCursor.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }),
-                    iso: timeCursor.toISOString()
+                    // Mostrar fecha/hora formateada explícitamente en Argentina
+                    fecha: timeCursor.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', timeZone: 'America/Argentina/Buenos_Aires' }),
+                    hora: timeCursor.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' }),
+                    iso: timeCursor.toISOString() // UTC Timestamp (Ej: 13:00Z)
                 });
                 // Avanzar 1 hora para dar opciones espaciadas
                 timeCursor = new Date(timeCursor.getTime() + 60 * 60000);
