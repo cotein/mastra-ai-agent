@@ -121,7 +121,6 @@ const parseDateInput = async (input: string): Promise<string> => {
       end: z.string().optional().describe('Fecha y hora de fin. Puede ser formato ISO8601 O texto natural.'),
       clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
       clientPhone: z.string().optional().describe("Teléfono del cliente"),
-      clientEmail: z.string().optional().describe("Email del cliente"),
       propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
       propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
@@ -173,7 +172,7 @@ const parseDateInput = async (input: string): Promise<string> => {
 
         const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
         
-        const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - email: ${input.clientEmail || 'Sin email'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
+        const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
 
         const response = await calendar.events.insert({
           calendarId: calendarId,
@@ -294,7 +293,6 @@ const parseDateInput = async (input: string): Promise<string> => {
       // Datos Estructurados para reconstrucción de formato
       clientName: z.string().optional().describe("Nombre y Apellido del cliente (para actualizar ficha)"),
       clientPhone: z.string().optional().describe("Teléfono del cliente"),
-      clientEmail: z.string().optional().describe("Email del cliente"),
       propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
       propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
