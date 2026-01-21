@@ -190,7 +190,7 @@ export const mastra = new Mastra({
                                 propertyOperationType = outputLogica.operacionTipo;
                                 finalContextData.operacionTipo = outputLogica.operacionTipo;
                                 finalContextData.propertyAddress = outputLogica.address;
-                                finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripción disponible";
+                                finalContextData.propiedadInfo = outputLogica.propiedadInfo || "Sin descripción disponible";
                                 finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
 
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);

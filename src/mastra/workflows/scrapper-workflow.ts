@@ -128,13 +128,13 @@ const logicStep = createStep({
     formattedText: z.string(),
   }),
   outputSchema: z.object({
-    minimalDescription: z.string(),
+    propiedadInfo: z.string(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
     address: z.string(),
   }),
   execute: async ({ inputData }) => {
     return {
-      minimalDescription: inputData.formattedText,
+      propiedadInfo: inputData.formattedText,
       operacionTipo: inputData.operacionTipo,
       address: inputData.address
     };
@@ -148,7 +148,7 @@ export const propertyWorkflow = createWorkflow({
     url: z.string().url(),
   }),
   outputSchema: z.object({
-    minimalDescription: z.string(),
+    propiedadInfo: z.string(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
     address: z.string(),
   }),
