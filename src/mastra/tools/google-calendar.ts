@@ -441,10 +441,165 @@ const parseDateInput = async (input: string): Promise<string> => {
     },
   });
 
+
+export const getAvailableSlots = createTool({
+  id: 'get_available_slots',
+  description: 'Obtiene una selección estratégica de horarios disponibles (uno por la mañana y uno por la tarde) para los próximos 4 días hábiles, entre las 10:00 y las 16:00 hs.',
+  inputSchema: z.object({}),
+  execute: async () => {
+    console.log("🛠️ [TOOL START] get_available_slots iniciado - Estrategia: Balanceada (AM/PM)");
+
+    try {
+      const calendar = getGoogleCalendar();
+      const now = new Date();
+      
+      // CONFIGURACIÓN
+      const daysToCheck = 4;        // Requerimiento: Próximos 4 días hábiles
+      const workStartHour = 10;     // 10:00 AR
+      const workEndHour = 16;       // 16:00 AR
+      const splitHour = 13;         // Punto de corte para definir Mañana vs Tarde
+      
+      // Argentina UTC-3
+      const timezoneOffsetHours = 3; 
+      const slotDurationMinutes = 40; 
+      const bufferMinutes = 30; 
+
+      const proposedSlots = [];
+      let daysFound = 0;
+      let dayOffset = 1;
+
+      // Iteramos hasta encontrar los días hábiles requeridos
+      while (daysFound < daysToCheck) {
+        const currentDate = new Date(now);
+        currentDate.setDate(now.getDate() + dayOffset);
+        dayOffset++;
+
+        // Saltar fines de semana
+        const dayOfWeek = currentDate.getDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+        
+        daysFound++;
+
+        // Definir rango del día en UTC
+        const dayStart = new Date(currentDate);
+        dayStart.setUTCHours(workStartHour + timezoneOffsetHours, 0, 0, 0); 
+        
+        const dayEnd = new Date(currentDate);
+        dayEnd.setUTCHours(workEndHour + timezoneOffsetHours, 0, 0, 0);
+
+        // Definir límite de Mañana/Tarde para este día
+        const midDay = new Date(currentDate);
+        midDay.setUTCHours(splitHour + timezoneOffsetHours, 0, 0, 0);
+
+        try {
+          const response = await calendar.events.list({
+            calendarId: CALENDAR_ID,
+            timeMin: dayStart.toISOString(),
+            timeMax: dayEnd.toISOString(),
+            singleEvents: true,
+            orderBy: 'startTime',
+          });
+          const events = response.data.items || [];
+
+          // Flags para asegurar solo 1 de mañana y 1 de tarde por día
+          let morningSlotFound = false;
+          let afternoonSlotFound = false;
+
+          let timeCursor = new Date(dayStart);
+
+          // Iterar dentro del día
+          while (timeCursor < dayEnd) {
+            // Si ya tenemos uno de mañana y uno de tarde, saltamos al siguiente día
+            if (morningSlotFound && afternoonSlotFound) break;
+
+            const proposedEnd = new Date(timeCursor.getTime() + slotDurationMinutes * 60000);
+            if (proposedEnd > dayEnd) break;
+
+            // Determinar si el cursor actual es Mañana o Tarde
+            const isMorning = timeCursor < midDay;
+            
+            // Si es mañana y ya tenemos slot de mañana, avanzamos rápido
+            if (isMorning && morningSlotFound) {
+                 timeCursor = new Date(timeCursor.getTime() + 30 * 60000);
+                 continue;
+            }
+            // Si es tarde y ya tenemos slot de tarde, avanzamos (o break si no queremos más opciones)
+            if (!isMorning && afternoonSlotFound) {
+                 timeCursor = new Date(timeCursor.getTime() + 30 * 60000);
+                 continue;
+            }
+
+            // Verificar conflictos
+            const hasConflict = events.some((event: any) => {
+                if (!event.start.dateTime || !event.end.dateTime) return false; 
+                const eventStart = new Date(event.start.dateTime);
+                const eventEnd = new Date(event.end.dateTime);
+                
+                // Buffer logic
+                const busyStartWithBuffer = new Date(eventStart.getTime() - bufferMinutes * 60000);
+                const busyEndWithBuffer = new Date(eventEnd.getTime() + bufferMinutes * 60000);
+
+                return (
+                    (timeCursor >= busyStartWithBuffer && timeCursor < busyEndWithBuffer) ||
+                    (proposedEnd > busyStartWithBuffer && proposedEnd <= busyEndWithBuffer) ||
+                    (timeCursor <= busyStartWithBuffer && proposedEnd >= busyEndWithBuffer)
+                );
+            });
+
+            if (!hasConflict) {
+                // Guardamos el slot
+                proposedSlots.push({
+                    fecha: timeCursor.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', timeZone: 'America/Argentina/Buenos_Aires' }),
+                    hora: timeCursor.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' }),
+                    iso: timeCursor.toISOString(),
+                    momento: isMorning ? 'Mañana' : 'Tarde' // Metadato útil para el LLM
+                });
+
+                // Marcar flag y avanzar cursor significativamente para buscar la siguiente franja
+                if (isMorning) {
+                    morningSlotFound = true;
+                    // Intentar saltar hacia la tarde para eficiencia
+                    if (timeCursor < midDay) {
+                        timeCursor = new Date(midDay); 
+                        continue; 
+                    }
+                } else {
+                    afternoonSlotFound = true;
+                }
+                
+                // Avanzar cursor standard
+                timeCursor = new Date(timeCursor.getTime() + 60 * 60000);
+            } else {
+                // Conflicto: Mover 15 mins
+                timeCursor = new Date(timeCursor.getTime() + 15 * 60000);
+            }
+          }
+
+        } catch (error) {
+            console.error(`⚠️ Error fetching events for ${currentDate.toISOString()}:`, error);
+        }
+      }
+
+      console.log(`✅ [TOOL END] Slots seleccionados: ${proposedSlots.length}`);
+      
+      // Retornamos todo lo encontrado (máximo 8 slots: 4 días * 2 slots)
+      return proposedSlots; 
+
+    } catch (criticalError: any) {
+        console.error("❌ [CRITICAL ERROR]", criticalError);
+        return { 
+            success: false, 
+            error: criticalError.message, 
+            details: "Error interno verificando agenda." 
+        };
+    }
+  },
+});
+
   /**
    * Herramienta para obtener horarios disponibles
    */
-  export const getAvailableSlots = createTool({
+  /* export const getAvailableSlots = createTool({
     id: 'get_available_slots',
     description: 'Obtiene slots de horarios disponibles de 10:00 a 16:00 para los próximos 5 días, excluyendo fines de semana.',
     inputSchema: z.object({}),
@@ -561,7 +716,7 @@ const parseDateInput = async (input: string): Promise<string> => {
         };
     }
     },
-  });
+  }); */
 
   /**
    * Herramienta para buscar eventos usando lenguaje natural
@@ -671,3 +826,236 @@ const parseDateInput = async (input: string): Promise<string> => {
         }
     }
   });
+
+const CONFIG = {
+    TIMEZONE_OFFSET: 3, // UTC-3
+    WORK_START: 10,
+    WORK_END: 16,
+    SLOT_DURATION: 40,
+    BUFFER: 30,
+    LOCALE: 'es-AR',
+    TIMEZONE_STRING: 'America/Argentina/Buenos_Aires'
+};
+
+// Mapas de ayuda
+const DAY_MAP: Record<string, number> = { 'DOMINGO': 0, 'LUNES': 1, 'MARTES': 2, 'MIERCOLES': 3, 'JUEVES': 4, 'VIERNES': 5, 'SABADO': 6 };
+
+export const getAvailableSchedule = createTool({
+    id: 'get_available_schedule',
+    description: 'Busca disponibilidad en la agenda aplicando lógica de negocio basada en la intención del usuario (urgencia, día específico, rango, preferencia horaria).',
+    inputSchema: z.object({
+        intent: z.enum(['SPECIFIC_DAY', 'PART_OF_DAY', 'RANGE', 'URGENT', 'CONSTRAINT', 'GENERAL'])
+            .describe('La intención principal detectada en la solicitud del usuario (Casos A-F)'),
+        
+        targetDay: z.enum(['LUNES', 'MARTES', 'MIERCOLES', 'JUEVES', 'VIERNES', 'SABADO', 'DOMINGO']).optional()
+            .describe('Para caso SPECIFIC_DAY: El día de la semana solicitado.'),
+        
+        dayPart: z.enum(['MORNING', 'AFTERNOON', 'ANY']).optional()
+            .describe('Preferencia de momento del día. Morning < 13hs, Afternoon >= 13hs.'),
+        
+        dateRangeDays: z.number().optional()
+            .describe('Para caso RANGE: Cuántos días buscar hacia adelante.'),
+        
+        excludedDays: z.array(z.string()).optional()
+            .describe('Días a excluir (Ej: ["VIERNES"] para "menos los viernes").'),
+            
+        minHour: z.number().optional()
+            .describe('Restricción de hora mínima (Ej: 16 para "a partir de las 16:00").')
+    }),
+    execute: async ({ intent, targetDay, dayPart, dateRangeDays, excludedDays, minHour }) => {
+        // En Mastra, los argumentos vienen directos o dentro de context dependiendo de la versión/config
+        // Sin embargo, si context no existe en el tipo, debemos intentar leer directo.
+        // Si el usuario reportó error "Property 'context' does not exist", es porque el input
+        // NO tiene context. Así que lo sacamos directo.
+        
+        // Si por alguna razón 'context' viniera pero TS no lo sabe, podemos hacer un fallback.
+        // Pero lo más limpio para arreglar el error es confiar en el schema definido arriba.
+        
+        console.log(`🧠 [STRATEGY START] Intent: ${intent} | Day: ${targetDay || 'N/A'} | Part: ${dayPart || 'ANY'}`);
+
+        try {
+            const calendar = getGoogleCalendar(); // Tu función de cliente
+            const now = new Date();
+            
+            // 1. DEFINIR ESTRATEGIA DE BÚSQUEDA SEGÚN INTENT (Casos A-F)
+            let searchConfig = {
+                daysLookahead: 5,     // Días a escanear
+                maxSlotsPerDay: 2,    // Cuantos slots guardar por día
+                totalSlotsNeeded: 4,  // Cuantos slots totales queremos retornar
+                greedy: false,        // Si es true, toma el primero que encuentra (Urgente)
+                forceDay: -1,         // -1 cualquiera, 0-6 específico
+            };
+
+            switch (intent) {
+                case 'SPECIFIC_DAY': // Caso A
+                    searchConfig.daysLookahead = 7; // Buscar hasta encontrar el día
+                    searchConfig.maxSlotsPerDay = 4;
+                    searchConfig.totalSlotsNeeded = 4;
+                    if (targetDay) searchConfig.forceDay = DAY_MAP[targetDay];
+                    break;
+
+                case 'PART_OF_DAY': // Caso B
+                    searchConfig.daysLookahead = 4;
+                    searchConfig.maxSlotsPerDay = 2; // Repartidos
+                    searchConfig.totalSlotsNeeded = 2; // Solo piden un par de opciones
+                    break;
+
+                case 'RANGE': // Caso C
+                    searchConfig.daysLookahead = dateRangeDays || 3;
+                    searchConfig.maxSlotsPerDay = 3;
+                    searchConfig.totalSlotsNeeded = 9; // Más opciones
+                    break;
+
+                case 'URGENT': // Caso D
+                    searchConfig.daysLookahead = 2; // Hoy y mañana
+                    searchConfig.greedy = true; 
+                    searchConfig.totalSlotsNeeded = 3;
+                    break;
+
+                case 'CONSTRAINT': // Caso E
+                    searchConfig.daysLookahead = 7;
+                    searchConfig.maxSlotsPerDay = 2;
+                    searchConfig.totalSlotsNeeded = 3;
+                    break;
+
+                case 'GENERAL': // Caso F
+                default:
+                    searchConfig.daysLookahead = 3;
+                    searchConfig.maxSlotsPerDay = 4; // 2 AM + 2 PM idealmente
+                    searchConfig.totalSlotsNeeded = 4;
+                    break;
+            }
+
+            const foundSlots = [];
+            let daysChecked = 0;
+            let currentOffset = 0; // Empezamos hoy (0) o mañana (1)
+
+            // Loop principal de días
+            while (daysChecked < searchConfig.daysLookahead && foundSlots.length < searchConfig.totalSlotsNeeded) {
+                const checkDate = new Date(now);
+                checkDate.setDate(now.getDate() + currentOffset);
+                currentOffset++;
+
+                const weekDay = checkDate.getDay();
+
+                // Filtros Globales (Fin de semana y Exclusiones)
+                // Nota: Tu requerimiento decía excluir fines de semana, salvo que pidan "Sábado".
+                // Aquí asumimos L-V por defecto salvo lógica específica.
+                const isWeekend = (weekDay === 0 || weekDay === 6);
+                
+                // Si piden un día específico, ignoramos el resto
+                if (searchConfig.forceDay !== -1 && weekDay !== searchConfig.forceDay) continue;
+
+                // Si es fin de semana y no pidieron explícitamente fin de semana (lógica simple)
+                if (isWeekend && intent !== 'CONSTRAINT' && intent !== 'SPECIFIC_DAY') continue;
+
+                // Filtro de exclusión (Caso E: "Menos viernes")
+                if (excludedDays && excludedDays.some(d => DAY_MAP[d] === weekDay)) continue;
+
+                daysChecked++;
+
+                // Configurar Rango Horario del Día (UTC)
+                const startH = (minHour && minHour > CONFIG.WORK_START) ? minHour : CONFIG.WORK_START;
+                
+                const dayStart = new Date(checkDate);
+                dayStart.setUTCHours(startH + CONFIG.TIMEZONE_OFFSET, 0, 0, 0);
+                
+                const dayEnd = new Date(checkDate);
+                dayEnd.setUTCHours(CONFIG.WORK_END + CONFIG.TIMEZONE_OFFSET, 0, 0, 0);
+
+                // Si estamos buscando "Hoy" (offset 0) y ya pasó la hora, saltar
+                if (dayStart < now) {
+                    // Ajustar inicio a "ahora" si es urgente, o saltar día si ya terminó turno
+                     if (now > dayEnd) continue;
+                     if (now > dayStart) dayStart.setTime(now.getTime() + (30 * 60000)); // Empezar en 30 mins
+                }
+
+                // Fetch Calendar
+                const events = await fetchEventsForDay(calendar, dayStart, dayEnd);
+                
+                let slotsInThisDay = 0;
+                let timeCursor = new Date(dayStart);
+
+                // Loop de Slots dentro del día
+                while (timeCursor < dayEnd && slotsInThisDay < searchConfig.maxSlotsPerDay) {
+                     // Chequeo Limite Global
+                     if (foundSlots.length >= searchConfig.totalSlotsNeeded) break;
+
+                    const proposedEnd = new Date(timeCursor.getTime() + CONFIG.SLOT_DURATION * 60000);
+                    if (proposedEnd > dayEnd) break;
+
+                    // Lógica Mañana/Tarde
+                    // 13:00 AR = 16:00 UTC (aprox, simplificado por offset constante)
+                    const hourAR = timeCursor.getUTCHours() - CONFIG.TIMEZONE_OFFSET;
+                    const isMorning = hourAR < 13;
+                    const isAfternoon = hourAR >= 13;
+
+                    // Filtro de Parte del Día (Caso B)
+                    if (dayPart === 'MORNING' && !isMorning) {
+                        timeCursor = new Date(timeCursor.getTime() + 30 * 60000); continue;
+                    }
+                    if (dayPart === 'AFTERNOON' && !isAfternoon) {
+                         timeCursor = new Date(timeCursor.getTime() + 30 * 60000); continue;
+                    }
+
+                    // Chequeo de Conflictos
+                    if (!checkConflict(timeCursor, proposedEnd, events)) {
+                        
+                        foundSlots.push({
+                            fecha: timeCursor.toLocaleDateString(CONFIG.LOCALE, { weekday: 'long', day: 'numeric', month: 'numeric', timeZone: CONFIG.TIMEZONE_STRING }),
+                            hora: timeCursor.toLocaleTimeString(CONFIG.LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: CONFIG.TIMEZONE_STRING }),
+                            franja: isMorning ? 'Mañana' : 'Tarde',
+                            iso: timeCursor.toISOString()
+                        });
+                        slotsInThisDay++;
+
+                        // Salto estratégico
+                        if (searchConfig.greedy) {
+                            // Si es urgente, devolver inmediatamente, no buscar espaciado
+                        } else {
+                            // Espaciar opciones 60 mins para variedad
+                            timeCursor = new Date(timeCursor.getTime() + 60 * 60000);
+                            continue; 
+                        }
+                    } 
+                    
+                    // Si hubo conflicto o no elegimos ese slot, avanzar cursor pequeño
+                    timeCursor = new Date(timeCursor.getTime() + 15 * 60000);
+                }
+            }
+            
+            // Generar respuesta narrativa para el contexto del LLM
+            return {
+                summary: `Se encontraron ${foundSlots.length} opciones bajo la estrategia '${intent}'.`,
+                slots: foundSlots,
+                strategy_used: intent
+            };
+
+        } catch (error) {
+            console.error("❌ Error en get_available_slots:", error);
+            throw new Error("Fallo en el servicio de calendario.");
+        }
+    }
+});
+
+// Helpers (Simplificados para el ejemplo)
+async function fetchEventsForDay(calendar: any, start: Date, end: Date) {
+    // Implementación estándar de Google Calendar API list
+    const res = await calendar.events.list({
+        calendarId: 'primary',
+        timeMin: start.toISOString(),
+        timeMax: end.toISOString(),
+        singleEvents: true
+    });
+    return res.data.items || [];
+}
+
+function checkConflict(start: Date, end: Date, events: any[]) {
+    // Lógica de colisión con buffer
+    return events.some((event: any) => {
+        const eStart = new Date(event.start.dateTime);
+        const eEnd = new Date(event.end.dateTime);
+        const buffer = CONFIG.BUFFER * 60000;
+        return (start < new Date(eEnd.getTime() + buffer)) && (end > new Date(eStart.getTime() - buffer));
+    });
+}

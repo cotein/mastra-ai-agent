@@ -11,7 +11,8 @@ import {
   updateCalendarEvent, 
   deleteCalendarEvent, 
   getAvailableSlots,
-  findEventByNaturalDate
+  findEventByNaturalDate,
+  getAvailableSchedule,
 } from '../tools/google-calendar';
 import { potentialSaleEmailTool } from '../tools/index';
 
@@ -54,7 +55,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
 
   const op = (operacionTipo || '').trim().toUpperCase();
   const selectedTools: any = op === 'ALQUILAR' 
-    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent }
+    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule }
     : op === 'VENDER'
     ? { potential_sale_email: potentialSaleEmailTool }
     : { };
