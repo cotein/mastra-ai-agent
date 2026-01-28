@@ -14,7 +14,7 @@ export const realEstateCleaningAgent = new Agent({
     El tono debe ser profesional y persuasivo, destacando los beneficios.
 
     Interpretar:
-    - Requisitos completos.
+    - Requisitos completos (NO resumir, copiar literal).
     - Información de mascotas (solo si está explícita).
 
     Reglas:

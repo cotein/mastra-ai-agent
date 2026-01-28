@@ -28,7 +28,7 @@ export const realEstatePropertyFormatterTool = createTool({
     2. **Domicilio**: Localidad y Domicilio (Ej: "CABA, Av. del Libertador 1234" o "Monte Grande, Fray Luis Beltrán 1234"). Limpia nombres de inmobiliarias y centrate en conseguir el domicilio.
     3. **Superficie**: Prioriza Metros Totales y Cubiertos (Ej: "800m² Totales / 200m² Cubiertos").
     4. **Ambientes**: Cantidad de ambientes y dormitorios.
-    5. **Requisitos**: Busca menciones sobre garantías (Ej: "Garantía Propietaria", "Seguro Caución", "Recibo de sueldo"). Si no hay info explícita, pon "Consultar".
+    5. **Requisitos**: Extrae TODOS los requisitos completos y literales. Incluye garantías (Propietaria, Caución), recibos de sueldo, depósitos, mes de adelanto y gastos. No resumas. Si no hay info explícita, pon "Consultar".
     6. **Mascotas**: Busca "Acepta mascotas", "No acepta mascotas" o íconos. Si no dice nada, pon "A confirmar".
     7. **Precio**: Moneda y Valor (Ej: "USD 2.100").
     8. **Expensas**: Si figuran.
