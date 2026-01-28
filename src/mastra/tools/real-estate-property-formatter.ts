@@ -100,7 +100,6 @@ export const realEstatePropertyFormatterTool = createTool({
     Requisitos no especificados - CONSULTAR con la inmobiliaria.
 
     Política de mascotas: A confirmar.
-
     `;
 
     const userPrompt = `Procesa este texto raw: "${keywordsZonaProp}"`;

@@ -13,14 +13,7 @@ export const realEstateCleaningAgent = new Agent({
     No añades comentarios adicionales, solo devuelves el listado solicitado.  
     El tono debe ser profesional y persuasivo, destacando los beneficios.
 
-    Interpretar:
-    - Requisitos completos (NO resumir, copiar literal).
-    - Información de mascotas (solo si está explícita).
-
-    Reglas:
-    - Si no hay info de mascotas, no mencionarlas.
-    - Si no hay requisitos: "Los requisitos son: garantía propietaria o seguro de caución, recibos que tripliquen el alquiler, mes de adelanto, depósito y gastos de informes."
-    - No decir "en el aviso no figura".
+    siempre usa la herramienta realEstatePropertyFormatterTool para extraer la información.
   `,
   model: 'openai/gpt-4.1-mini'
 });
