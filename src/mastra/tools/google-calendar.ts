@@ -108,11 +108,106 @@ const parseDateInput = async (input: string): Promise<string> => {
   return result.isoDate;
 };
 
+
+export const createCalendarEvent = createTool({
+    id: 'create_calendar_event',
+    description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Úsala cuando el cliente confirma un horario. Si hubo dudas que no pudiste responder, inclúyelas en pendingQuestions.',
+    inputSchema: z.object({
+      title: z.string().optional().describe('Título descriptivo del evento'),
+      start: z.string().describe('Fecha y hora de inicio (ISO u lenguaje natural)'),
+      end: z.string().optional().describe('Fecha y hora de fin'),
+      clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
+      clientPhone: z.string().optional().describe("Teléfono del cliente"),
+      propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
+      propertyLink: z.string().optional().describe("Link de la propiedad"),
+      pendingQuestions: z.array(z.string()).optional().describe("Lista de preguntas que el cliente hizo y no pudiste responder según la base de datos"),
+    }),
+    execute: async (input) => {
+      console.log("🛠️ [TOOL START] create_calendar_event con preguntas pendientes");
+      
+      const calendar = getGoogleCalendar();
+      const calendarId = CALENDAR_ID;
+      
+      try {
+        let smartStart: string;
+        let smartEnd: string;
+
+        // Lógica de parsing de fechas (se mantiene igual a tu implementación)
+        const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes('T');
+        if (isIsoStart) {
+            smartStart = input.start;
+            if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes('T')) {
+                smartEnd = input.end;
+            } else {
+                 const startDate = new Date(smartStart);
+                 startDate.setHours(startDate.getHours() + 1);
+                 smartEnd = startDate.toISOString();
+            }
+        } else {
+            const dateDescription = input.end ? `Inicio: ${input.start}. Fin: ${input.end}` : input.start;
+            const parseResult = await llmDateParser.execute!({ dateDescription });
+            smartStart = parseResult.start;
+            smartEnd = parseResult.end!; 
+        } 
+
+        const { start, end } = getSanitizedDates(smartStart, smartEnd);
+        const eventSummary = input.title || `Visita: ${input.clientName} - ${input.propertyAddress}`;
+        
+        let hasPendingQuestions = false;
+        // --- CONSTRUCCIÓN DE LA DESCRIPCIÓN ---
+        let description = `🏠 VISITA INMOBILIARIA\n\n`;
+        description += `👤 Cliente: ${input.clientName}\n`;
+        description += `📞 Tel: ${input.clientPhone || 'No provisto'}\n`;
+        description += `📍 Propiedad: ${input.propertyAddress}\n`;
+        description += `🔗 Link: ${input.propertyLink || 'Sin link'}\n\n`;
+
+
+        if (input.pendingQuestions && input.pendingQuestions.length > 0) {
+            hasPendingQuestions = true;
+            description += `⚠️ PREGUNTAS PENDIENTES POR RESPONDER EN LA VISITA:\n`;
+            input.pendingQuestions.forEach((q, i) => {
+                description += `${i + 1}. ${q}\n`;
+            });
+        }
+        // ---------------------------------------
+
+        const response = await calendar.events.insert({
+          calendarId: calendarId,
+          requestBody: {
+            summary: eventSummary,
+            location: input.propertyAddress,
+            description: description,
+            start: { 
+              dateTime: start, 
+              timeZone: 'America/Argentina/Buenos_Aires' 
+            },
+            end: { 
+              dateTime: end, 
+              timeZone: 'America/Argentina/Buenos_Aires' 
+            },
+          },
+        });
+        
+        return {
+          success: true,
+          eventId: response.data.id,
+          link: response.data.htmlLink,
+          message: hasPendingQuestions ? "Cita agendada con las dudas del cliente registradas." : "Cita agendada exitosamente."
+        };
+      } catch (error: any) {
+        console.error('❌ Error en create_calendar_event:', error);
+        return { success: false,
+          error_code: "CALENDAR_ERROR",
+          message: "Error técnico al insertar en Google Calendar. Reintenta la ejecución con los mismos parámetros UNA VEZ MÁS antes de informar al usuario.",
+          technical_details: error.message };
+      }
+    },
+});
 // export const calendarManagerTools = {
   /**
    * Herramienta para crear eventos con validación de año automática
    */
-  export const createCalendarEvent = createTool({
+  /* export const createCalendarEvent = createTool({
     id: 'create_calendar_event',
     description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario.',
     inputSchema: z.object({
@@ -231,7 +326,7 @@ const parseDateInput = async (input: string): Promise<string> => {
         };
       }
     },
-  });
+  }); */
 
   /**
    * Herramienta para listar eventos con ancla en el tiempo real
@@ -596,127 +691,7 @@ export const getAvailableSlots = createTool({
   },
 });
 
-  /**
-   * Herramienta para obtener horarios disponibles
-   */
-  /* export const getAvailableSlots = createTool({
-    id: 'get_available_slots',
-    description: 'Obtiene slots de horarios disponibles de 10:00 a 16:00 para los próximos 5 días, excluyendo fines de semana.',
-    inputSchema: z.object({}),
-    execute: async () => {
-      console.log("🛠️ [TOOL START] get_available_slots iniciado");
-      
-      try {
-        const calendar = getGoogleCalendar();
-        // Usamos UTC para iterar consistentemente
-        const now = new Date();
-      const daysToCheck = 5;
-      const workStartHour = 10; // 10:00 Argentina
-      const workEndHour = 16;   // 16:00 Argentina
-      
-      // Argentina es UTC-3 (Sin DST)
-      // Por ende, 10:00 AR = 13:00 UTC
-      // 16:00 AR = 19:00 UTC
-      // IMPORTANTE: Si Argentina cambia DST, esto debe actualizarse.
-      const timezoneOffsetHours = 3; 
-
-      const slotDurationMinutes = 40; // Duración de visita
-      const bufferMinutes = 30; // Tiempo de viaje/buffer
-
-      const availableSlots = [];
-
-      let daysFound = 0;
-      let dayOffset = 1;
-
-      while (daysFound < daysToCheck) {
-        const currentDate = new Date(now);
-        currentDate.setDate(now.getDate() + dayOffset);
-        dayOffset++;
-
-        // Saltar fines de semana (0 = Domingo, 6 = Sábado)
-        const dayOfWeek = currentDate.getDay();
-        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
-        
-        // Si llegamos hasta aquí, es un día hábil
-        daysFound++;
-
-        // Definir rango del día laboral EN UTC
-        // setUTCHours(10 + 3, 0, 0, 0) -> 13:00:00Z
-        const dayStart = new Date(currentDate);
-        dayStart.setUTCHours(workStartHour + timezoneOffsetHours, 0, 0, 0); 
-        
-        const dayEnd = new Date(currentDate);
-        dayEnd.setUTCHours(workEndHour + timezoneOffsetHours, 0, 0, 0);
-
-        let timeCursor = new Date(dayStart);
-
-        try {
-          // Obtener eventos de este día (Query usando ISO Strings que ya están en UTC correcta)
-          const response = await calendar.events.list({
-            calendarId: CALENDAR_ID,
-            timeMin: dayStart.toISOString(),
-            timeMax: dayEnd.toISOString(),
-            singleEvents: true,
-            orderBy: 'startTime',
-          });
-          const events = response.data.items || [];
-
-          // Iterar slots candidatos
-          while (timeCursor < dayEnd) {
-            const proposedEnd = new Date(timeCursor.getTime() + slotDurationMinutes * 60000);
-
-            if (proposedEnd > dayEnd) break;
-
-            // Verificar conflictos
-            const hasConflict = events.some((event: any) => {
-                if (!event.start.dateTime || !event.end.dateTime) return false; 
-                
-                const eventStart = new Date(event.start.dateTime);
-                const eventEnd = new Date(event.end.dateTime);
-
-                // Agregar buffer a los eventos existentes
-                const busyStartWithBuffer = new Date(eventStart.getTime() - bufferMinutes * 60000);
-                const busyEndWithBuffer = new Date(eventEnd.getTime() + bufferMinutes * 60000);
-
-                return (
-                    (timeCursor >= busyStartWithBuffer && timeCursor < busyEndWithBuffer) ||
-                    (proposedEnd > busyStartWithBuffer && proposedEnd <= busyEndWithBuffer) ||
-                    (timeCursor <= busyStartWithBuffer && proposedEnd >= busyEndWithBuffer)
-                );
-            });
-
-            if (!hasConflict) {
-                 availableSlots.push({
-                    // Mostrar fecha/hora formateada explícitamente en Argentina
-                    fecha: timeCursor.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', timeZone: 'America/Argentina/Buenos_Aires' }),
-                    hora: timeCursor.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' }),
-                    iso: timeCursor.toISOString() // UTC Timestamp (Ej: 13:00Z)
-                });
-                // Avanzar 1 hora para dar opciones espaciadas
-                timeCursor = new Date(timeCursor.getTime() + 60 * 60000);
-            } else {
-                // Si hay conflicto, probar mover 15 mins
-                timeCursor = new Date(timeCursor.getTime() + 15 * 60000);
-            }
-          }
-
-        } catch (error) {
-            console.error(`⚠️ Error fetching events for ${currentDate.toISOString()}:`, error);
-        }
-      }
-
-      console.log(`✅ [TOOL END] get_available_slots finalizado. Slots encontrados: ${availableSlots.length}`);
-      return availableSlots.slice(0, 5); // Retornar top 5
-    } catch (criticalError: any) {
-        console.error("❌ [CRITICAL ERROR] get_available_slots falló fatalmente:", criticalError);
-        return { 
-            success: false, 
-            error: criticalError.message, 
-            details: "Hubo un error interno consultando disponibilidad. Por favor intenta más tarde." 
-        };
-    }
-    },
-  }); */
+ 
 
   /**
    * Herramienta para buscar eventos usando lenguaje natural
