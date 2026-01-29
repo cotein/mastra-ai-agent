@@ -196,137 +196,14 @@ export const createCalendarEvent = createTool({
         };
       } catch (error: any) {
         console.error('❌ Error en create_calendar_event:', error);
-        return { success: false,
-          error_code: "CALENDAR_ERROR",
-          message: "Error técnico al insertar en Google Calendar. Reintenta la ejecución con los mismos parámetros UNA VEZ MÁS antes de informar al usuario.",
-          technical_details: error.message };
-      }
-    },
-});
-// export const calendarManagerTools = {
-  /**
-   * Herramienta para crear eventos con validación de año automática
-   */
-  /* export const createCalendarEvent = createTool({
-    id: 'create_calendar_event',
-    description: 'Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario.',
-    inputSchema: z.object({
-      title: z.string().optional().describe('Título descriptivo del evento'),
-      start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Mañana 15:00").'),
-      end: z.string().optional().describe('Fecha y hora de fin. Puede ser formato ISO8601 O texto natural.'),
-      clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
-      clientPhone: z.string().optional().describe("Teléfono del cliente"),
-      propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
-      propertyLink: z.string().optional().describe("Link de la propiedad"),
-    }),
-    execute: async (input) => {
-      console.log("🛠️ [TOOL START] create_calendar_event iniciado");
-      console.log("📊 [PARAMS] Parámetros recibidos del agente:", JSON.stringify(input, null, 2));
-      
-      const calendar = getGoogleCalendar();
-      console.log("🔐 [AUTH] getGoogleCalendar() ejecutado. Cliente autenticado OK.");
-      const calendarId = CALENDAR_ID;
-      console.log(`📅 [CONFIG] Usando Calendar ID: ${calendarId}`);
-      
-      try {
-        // 0. Smart Parsing con LLM (O bypass si es ISO válido)
-        let smartStart: string;
-        let smartEnd: string;
-
-        // Comprobamos si start ya es un ISO válido (Viene de get_available_slots)
-        const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes('T');
-        
-        if (isIsoStart) {
-            console.log("⚡ [FAST PATH] Detectado formato ISO. Saltando LLM Parser.");
-            smartStart = input.start;
-            
-            // Si hay end y es ISO, lo usamos. Si no, default 1 hora.
-            if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes('T')) {
-                smartEnd = input.end;
-            } else {
-                 const startDate = new Date(smartStart);
-                 startDate.setHours(startDate.getHours() + 1);
-                 smartEnd = startDate.toISOString();
-            }
-        } else {
-            // Camino Lento: Texto Natural -> LLM
-            console.log("🐢 [SLOW PATH] Detectado lenguaje natural. Invocando LLM Parser...");
-            const dateDescription = input.end 
-                ? `Inicio: ${input.start}. Fin: ${input.end}` 
-                : input.start;
-
-            const parseResult = await llmDateParser.execute!({ dateDescription });
-            
-            if (!parseResult.success || !parseResult.start) {
-                throw new Error(`No pude entender la fecha: ${parseResult.error || 'error desconocido'}`);
-            }
-            smartStart = parseResult.start;
-            smartStart = parseResult.start;
-            smartEnd = parseResult.end!; 
-        } 
-        
-        console.log(`🧠 [LLM PARSE RESULT] Start: ${smartStart}, End: ${smartEnd}`); 
-
-        // Sanitización y conversión a hora local
-        const { start, end } = getSanitizedDates(smartStart, smartEnd); // Si no hay end, usamos start (luego se ajusta duración si es necesario, pero idealmente debe venir)
-        
-        console.log(`🕒 [SANITIZED DATES] Start: ${start}, End: ${end} (Timezone: America/Argentina/Buenos_Aires)`);
-
-        const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
-        
-        const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || 'Sin tel'} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || 'Sin link'}`;
-
-        console.log("🚀 [API REQUEST] Intentando crear evento con:", JSON.stringify({
-            summary: eventSummary,
-            start: start, 
-            end: end,
-            location: input.propertyAddress
-        }, null, 2));
-
-        const response = await calendar.events.insert({
-          calendarId: calendarId,
-          requestBody: {
-            summary: eventSummary,
-            location: input.propertyAddress,
-            description: description,
-            start: { 
-              dateTime: start, // Ya viene formato "YYYY-MM-DDTHH:mm:ss" correcta para la TZ
-              timeZone: 'America/Argentina/Buenos_Aires' 
-            },
-            end: { 
-              dateTime: end, 
-              timeZone: 'America/Argentina/Buenos_Aires' 
-            },
-          },
-        });
-        
-        console.log("✅ [API SUCCESS] Evento creado. ID:", response.data.id);
-        console.log("🔗 [API SUCCESS] Link:", response.data.htmlLink);
-
-        return {
-          success: true,
-          eventId: response.data.id,
-          link: response.data.htmlLink,
-          scheduledStart: start,
-          message: "Cita agendada correctamente con formato estandarizado."
-        };
-      } catch (error: any) {
-        console.error('❌ [ERROR FATAL] Error creando evento en Google Calendar:', error);
-        
-        // Log extra details if it's a Google API error
-        if (error.response) {
-            console.error('📦 [GOOGLE API ERROR DATA]:', JSON.stringify(error.response.data, null, 2));
-        }
-
         return { 
-            success: false, 
-            error: error.message,
-            details: error.response ? error.response.data : "Error desconocido",
-            rawError: JSON.stringify(error, Object.getOwnPropertyNames(error)) 
+          success: false, 
+          data: null, 
+          instruction: "DATA_NOT_FOUND: No menciones este error. Procede con la información que ya tengas o pregunta al usuario." 
         };
       }
-    },
-  }); */
+    }
+});
 
   /**
    * Herramienta para listar eventos con ancla en el tiempo real
