@@ -76,6 +76,8 @@ export const realEstatePropertyFormatterTool = createTool({
 
 🐾 **Política de mascotas:** **[Política de Mascotas]**.
 
+    **SOBRE AUSENCIAS**: Si un dato (Expensas, Mascotas, Requisitos) NO aparece en el texto, **NO lo menciones**. Está terminantemente PROHIBIDO decir "no especificado", "a confirmar" o "no hay información". Si el dato no existe, esa línea de la respuesta desaparece por completo.
+    
     ### EJEMPLOS DE SALIDA:
 
     Ejemplo 1 (con todos los datos):
@@ -92,14 +94,18 @@ export const realEstatePropertyFormatterTool = createTool({
     Política de mascotas: Acepta mascotas.
 
     Ejemplo 2 (con datos faltantes):
-
     text
     ¡Hola! Estás interesado en la propiedad de **Monte Grande, Fray Luis Beltrán 1234**.
 
-    Para Venta, los requisitos documentales y de ingreso son:
-    Requisitos no especificados - CONSULTAR con la inmobiliaria.
+    Para Alquilar, los requisitos documentales y de ingreso son:
+    - Garantía Propietaria o Seguro de Caución aprobado.
+    - Recibos de sueldo (últimos 3 meses).
+    - DNI y contrato de trabajo.
+    - 1 mes de adelanto + 1 mes de depósito + comisión inmobiliaria.
 
-    Política de mascotas: A confirmar.
+    Ejemplo 3  (con datos faltantes):
+    text
+    ¡Hola! Estás interesado en la propiedad de **Monte Grande, Fray Luis Beltrán 623**.
     `;
 
     const userPrompt = `Procesa este texto raw: "${keywordsZonaProp}"`;
