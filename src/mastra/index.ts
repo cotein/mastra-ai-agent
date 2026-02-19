@@ -187,9 +187,6 @@ export const mastra = new Mastra({
                           console.error(`❌ Workflow failed: ${result.status}`);
                         } else if (result.result) {
                             const outputLogica = result.result;
-                            console.log("📝 [Output Workflow recibido] ".repeat(20));
-                            console.log("📝 [Output Workflow recibido] Generando instrucciones con:", outputLogica);
-                            console.log("📝 [Output Workflow recibido] ".repeat(20));
                             // Validar que el output tenga la estructura esperada
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
@@ -220,15 +217,9 @@ export const mastra = new Mastra({
                     }
                     
                     // C. GENERACIÓN DEL PROMPT FINAL
-                    console.log("📝 [PROMPT] ".repeat(20));
-                    console.log("📝 [PROMPT] Generando instrucciones con:", finalContextData);
-                    console.log("📝 [PROMPT] ".repeat(20));
                     const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase() as OperacionTipo);
                     
                     // D. CREACIÓN DINÁMICA DEL AGENTE
-                    console.log("🛠️ [AGENTE] ".repeat(20));
-                    console.log("🛠️ [AGENTE] Generando agente con:", contextoAdicional);
-                    console.log("🛠️ [AGENTE] ".repeat(20));
                     const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
                     
                     const response = await agent.generate(message, {

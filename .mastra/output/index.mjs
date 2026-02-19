@@ -401,9 +401,10 @@ const dynamicInstructions = (datos2, op) => {
     Ahora que tienes el nombre, filtra al interesado.
     
     Datos de la Propiedad:
-    ${datos2.requisitos ? "- Requisitos: " + datos2.requisitos : ""}
-    ${datos2.mascotas ? "- Pol\xEDtica Mascotas: " + datos2.mascotas : ""}
-    
+    ${datos2.requisitos ? "** Primera Acci\xF3n Prioritaria muestra los requisitos de la propiedad:**" + datos2.requisitos : ""}
+    ${datos2.mascotas ? "** Segunda Acci\xF3n Prioritaria muestra la pol\xEDtica de mascotas:** " + datos2.mascotas : ""}
+    **Tercera Acci\xF3n Prioritaria no muestres nada m\xE1s, a menos que el usuario pregunte por algo espec\xEDfico:**
+
     Regla de Financiamiento: Si preguntan, responde: "los alquileres no se financian."
     ` : "";
     operationalProtocol = `
@@ -827,9 +828,6 @@ const mastra = new Mastra({
                     console.error(`\u274C Workflow failed: ${result.status}`);
                   } else if (result.result) {
                     const outputLogica = result.result;
-                    console.log("\u{1F4DD} [Output Workflow recibido] ".repeat(20));
-                    console.log("\u{1F4DD} [Output Workflow recibido] Generando instrucciones con:", outputLogica);
-                    console.log("\u{1F4DD} [Output Workflow recibido] ".repeat(20));
                     if (outputLogica.operacionTipo) {
                       propertyOperationType = outputLogica.operacionTipo;
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
@@ -851,13 +849,7 @@ const mastra = new Mastra({
                   console.error("\u274C Workflow error:", workflowErr);
                 }
               }
-              console.log("\u{1F4DD} [PROMPT] ".repeat(20));
-              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
-              console.log("\u{1F4DD} [PROMPT] ".repeat(20));
               const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
-              console.log("\u{1F6E0}\uFE0F [AGENTE] ".repeat(20));
-              console.log("\u{1F6E0}\uFE0F [AGENTE] Generando agente con:", contextoAdicional);
-              console.log("\u{1F6E0}\uFE0F [AGENTE] ".repeat(20));
               const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
               const response = await agent.generate(message, {
                 threadId: currentThreadId,

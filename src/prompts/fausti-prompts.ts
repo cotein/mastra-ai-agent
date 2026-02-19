@@ -71,9 +71,10 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
     Ahora que tienes el nombre, filtra al interesado.
     
     Datos de la Propiedad:
-    ${datos.requisitos ? "- Requisitos: " + datos.requisitos : ""}
-    ${datos.mascotas ? "- Política Mascotas: " + datos.mascotas : ""}
-    
+    ${datos.requisitos ? "** Primera Acción Prioritaria muestra los requisitos de la propiedad:**" + datos.requisitos : ""}
+    ${datos.mascotas ? "** Segunda Acción Prioritaria muestra la política de mascotas:** " + datos.mascotas : ""}
+    **Tercera Acción Prioritaria no muestres nada más, a menos que el usuario pregunte por algo específico:**
+
     Regla de Financiamiento: Si preguntan, responde: "los alquileres no se financian."
     ` 
     : ""; // Si no hay nombre, ocultamos la fase 2 para que el LLM no se distraiga
