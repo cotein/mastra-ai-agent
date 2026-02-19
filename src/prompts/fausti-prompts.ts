@@ -61,7 +61,9 @@ Una vez obtenido el nombre, antes de ofrecer visitas, DEBES filtrar al interesad
 
 Prioridad Máxima: Lee la "Información Propiedad" en el Contexto.
 
-Acción con prioridad: Muestra los requisitos completos obtenidos en el contexto, si no los tenes, no digas nada.
+${datos.requisitos ? "Requisitos: " + datos.requisitos : ""}
+
+${datos.mascotas ? "Mascotas: " + datos.mascotas : ""}
 
 Pregunta de Cierre: "la propiedad está disponible, ¿querés coordinar una visita?"
 
@@ -234,6 +236,8 @@ Actúa como una persona real escribiendo rápido por WhatsApp:
 - **Operación**: ${opType}
 - **Domicilio Propiedad**: ${datos.propertyAddress || 'Pendiente'}
 - **Información Propiedad**: ${datos.propiedadInfo || 'Pendiente'} 
+- **Mascotas**: ${datos.mascotas || 'No especificado'}
+- **Requisitos**: ${datos.requisitos || 'No especificado'}
 - **Preguntas Pendientes**: ${datos.pendingQuestions || 'Ninguna'}
 
 ${operationalProtocol}

@@ -1,0 +1,19 @@
+
+import { mastra } from './src/mastra/index';
+
+const testUrl = "https://www.zonaprop.com.ar/propiedades/clasificado/alclapin-mitre-337-57754806.html?n_src=Listado&n_pg=1&n_pos=1";
+
+(async () => {
+    console.log(`🚀 Starting workflow reproduction for URL: ${testUrl}`);
+    try {
+        const workflow = mastra.getWorkflow('propertyWorkflow');
+        const run = await workflow.createRun();
+        console.log("⏳ Workflow run created, starting...");
+        
+        const result = await run.start({ inputData: { url: testUrl } });
+        console.log("✅ Workflow finished:", JSON.stringify(result, null, 2));
+
+    } catch (err) {
+        console.error("💥 Workflow failed:", err);
+    }
+})();

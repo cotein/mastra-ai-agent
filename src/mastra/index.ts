@@ -7,17 +7,21 @@ import axios from "axios";
 // Agentes y Herramientas
 import { getRealEstateAgent } from "./agents/real-estate-agent"; 
 import { realEstateCleaningAgent } from "./agents/real-estate-cleaning-agent";
+import { addressExtractionAgent } from "./agents/address-extraction-agent";
 import { realEstatePropertyFormatterTool } from "./tools/real-estate-property-formatter";
 
 // Storage y Servicios
 import { storage, vectorStore, ThreadContextService } from './storage'; 
+import { tokkoPropertySearchTool } from "./tools/tokko-property-search";
+import { extractAddressFromUrlTool } from "./tools/extract-address-from-url";
+
+ 
 
 // Prompts y Helpers
 import { dynamicInstructions } from '../prompts/fausti-prompts';
 
 import { ClientData, OperacionTipo } from '../types';
-// Workflows
-import { propertyWorkflow } from "./workflows/scrapper-workflow";
+import { propertyWorkflow } from "./workflows/property-intelligence";
 import { sleep } from '../helpers/sleep';
 
 /**
@@ -39,8 +43,8 @@ const sessionPropiedadInfoMap = new Map<string, string>();
 export const mastra = new Mastra({
   storage,
   vectors: { vectorStore },
-  agents: { realEstateAgent, realEstateCleaningAgent },
-  tools: { realEstatePropertyFormatterTool },
+  agents: { realEstateAgent, realEstateCleaningAgent, addressExtractionAgent },
+  tools: { realEstatePropertyFormatterTool, tokkoPropertySearchTool, extractAddressFromUrlTool },
   workflows: { propertyWorkflow },
   server: {
     port: 4111,
@@ -70,7 +74,7 @@ export const mastra = new Mastra({
             const urlRegex = /(https?:\/\/[^\s]+)/g;
             const linksEncontrados = message?.match(urlRegex);
 
-            const requestHash = `${userId || 'anon'}_${message?.substring(0, 50)}`; 
+            const requestHash = `${userId || 'anon'}_${message?.substring(0, 300)}`; 
             
             if (activeProcessing.has(requestHash)) {
                  console.log(`⚠️ Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
@@ -186,12 +190,18 @@ export const mastra = new Mastra({
                         } else if (result.result) {
                             const outputLogica = result.result;
                             console.log("📦 Output Workflow recibido",   outputLogica);
+                            // Validar que el output tenga la estructura esperada
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
                                 finalContextData.operacionTipo = outputLogica.operacionTipo;
                                 finalContextData.propertyAddress = outputLogica.address;
                                 finalContextData.propiedadInfo = outputLogica.propiedadInfo || "Sin descripción disponible";
-                                finalContextData.operacionTipo = outputLogica.operacionTipo; // Asegurar consistencia con nombres
+                                
+                                // Nuevos campos del workflow property-intelligence
+                                // Asumiendo que ClientData puede recibir estos campos o se usan 
+                                // para enriquecer propiedadInfo o contextoAdicional
+                                finalContextData.mascotas = outputLogica.mascotas;
+                                finalContextData.requisitos = outputLogica.requisitos;
 
                                 sessionOperationMap.set(currentThreadId, propertyOperationType);
                                 sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);

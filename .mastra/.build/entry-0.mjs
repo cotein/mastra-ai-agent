@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import { Mastra } from '@mastra/core';
+import { registerApiRoute } from '@mastra/core/server';
+import axios from 'axios';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
-import { openai } from '@ai-sdk/openai';
+import { openai as openai$1 } from '@ai-sdk/openai';
 import { PostgresStore, PgVector } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
@@ -12,7 +14,8 @@ import { z } from 'zod';
 import { google } from 'googleapis';
 import { es } from 'chrono-node';
 import { isValid, addDays, startOfDay, setHours, setMinutes, setSeconds, setMilliseconds, formatISO } from 'date-fns';
-import axios from 'axios';
+import OpenAI from 'openai';
+import { createStep, createWorkflow } from '@mastra/core/workflows';
 
 "use strict";
 const connectionString = process.env.SUPABASE_POSTGRES_URL;
@@ -143,7 +146,7 @@ class WhatsAppStyleProcessor {
     if (!textToHumanize) return args.messages;
     try {
       const { text } = await generateText({
-        model: openai("gpt-4o-mini"),
+        model: openai$1("gpt-4o-mini"),
         system: `Eres un experto en comunicaci\xF3n por WhatsApp. 
                      Tu trabajo es reescribir el siguiente mensaje para que suene como un humano escribiendo r\xE1pido en WhatsApp.
                      Reglas:
@@ -549,7 +552,7 @@ const llmDateParser = createTool({
     `;
     try {
       const { object } = await generateObject({
-        model: openai("gpt-4o-mini"),
+        model: openai$1("gpt-4o-mini"),
         schema: z.object({
           start: z.string().describe("ISO 8601 start date-time with -03:00 offset"),
           end: z.string().describe("ISO 8601 end date-time with -03:00 offset"),
@@ -634,19 +637,19 @@ const parseDateInput = async (input) => {
 };
 const createCalendarEvent = createTool({
   id: "create_calendar_event",
-  description: "Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. Esta herramienta DEBE ser usada cuando el cliente confirma un horario.",
+  description: "Registra citas de visitas inmobiliarias en el calendario oficial de Fausti. \xDAsala cuando el cliente confirma un horario. Si hubo dudas que no pudiste responder, incl\xFAyelas en pendingQuestions.",
   inputSchema: z.object({
     title: z.string().optional().describe("T\xEDtulo descriptivo del evento"),
-    start: z.string().describe('Fecha y hora de inicio. Puede ser formato ISO8601 O texto natural (ej: "Lunes 20 a las 10hs", "Ma\xF1ana 15:00").'),
-    end: z.string().optional().describe("Fecha y hora de fin. Puede ser formato ISO8601 O texto natural."),
+    start: z.string().describe("Fecha y hora de inicio (ISO u lenguaje natural)"),
+    end: z.string().optional().describe("Fecha y hora de fin"),
     clientName: z.string().optional().describe("Nombre y Apellido del cliente"),
     clientPhone: z.string().optional().describe("Tel\xE9fono del cliente"),
     propertyAddress: z.string().optional().describe("Direcci\xF3n de la propiedad"),
-    propertyLink: z.string().optional().describe("Link de la propiedad")
+    propertyLink: z.string().optional().describe("Link de la propiedad"),
+    pendingQuestions: z.array(z.string()).optional().describe("Lista de preguntas que el cliente hizo y no pudiste responder seg\xFAn la base de datos")
   }),
   execute: async (input) => {
-    console.log("\u{1F6E0}\uFE0F [TOOL START] create_calendar_event iniciado");
-    console.log("\u{1F4CA} [PARAMS] Par\xE1metros recibidos del agente:", JSON.stringify(input, null, 2));
+    console.log("\u{1F6E0}\uFE0F [TOOL START] create_calendar_event con preguntas pendientes");
     const calendar = getGoogleCalendar();
     const calendarId = CALENDAR_ID;
     try {
@@ -654,7 +657,6 @@ const createCalendarEvent = createTool({
       let smartEnd;
       const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes("T");
       if (isIsoStart) {
-        console.log("\u26A1 [FAST PATH] Detectado formato ISO. Saltando LLM Parser.");
         smartStart = input.start;
         if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes("T")) {
           smartEnd = input.end;
@@ -664,18 +666,35 @@ const createCalendarEvent = createTool({
           smartEnd = startDate.toISOString();
         }
       } else {
-        console.log("\u{1F422} [SLOW PATH] Detectado lenguaje natural. Invocando LLM Parser...");
         const dateDescription = input.end ? `Inicio: ${input.start}. Fin: ${input.end}` : input.start;
         const parseResult = await llmDateParser.execute({ dateDescription });
-        if (!parseResult.success || !parseResult.start) {
-          throw new Error(`No pude entender la fecha: ${parseResult.error || "error desconocido"}`);
-        }
         smartStart = parseResult.start;
         smartEnd = parseResult.end;
       }
       const { start, end } = getSanitizedDates(smartStart, smartEnd);
-      const eventSummary = input.title || `Visita Propiedad - ${input.clientName}`;
-      const description = `visita propiedad - cliente: ${input.clientName} - tel: ${input.clientPhone || "Sin tel"} - Domicilio: ${input.propertyAddress} - Link: ${input.propertyLink || "Sin link"}`;
+      const eventSummary = input.title || `Visita: ${input.clientName} - ${input.propertyAddress}`;
+      let hasPendingQuestions = false;
+      let description = `\u{1F3E0} VISITA INMOBILIARIA
+
+`;
+      description += `\u{1F464} Cliente: ${input.clientName}
+`;
+      description += `\u{1F4DE} Tel: ${input.clientPhone || "No provisto"}
+`;
+      description += `\u{1F4CD} Propiedad: ${input.propertyAddress}
+`;
+      description += `\u{1F517} Link: ${input.propertyLink || "Sin link"}
+
+`;
+      if (input.pendingQuestions && input.pendingQuestions.length > 0) {
+        hasPendingQuestions = true;
+        description += `\u26A0\uFE0F PREGUNTAS PENDIENTES POR RESPONDER EN LA VISITA:
+`;
+        input.pendingQuestions.forEach((q, i) => {
+          description += `${i + 1}. ${q}
+`;
+        });
+      }
       const response = await calendar.events.insert({
         calendarId,
         requestBody: {
@@ -684,7 +703,6 @@ const createCalendarEvent = createTool({
           description,
           start: {
             dateTime: start,
-            // Ya viene formato "YYYY-MM-DDTHH:mm:ss" correcta para la TZ
             timeZone: "America/Argentina/Buenos_Aires"
           },
           end: {
@@ -697,19 +715,14 @@ const createCalendarEvent = createTool({
         success: true,
         eventId: response.data.id,
         link: response.data.htmlLink,
-        scheduledStart: start,
-        message: "Cita agendada correctamente con formato estandarizado."
+        message: hasPendingQuestions ? "Cita agendada con las dudas del cliente registradas." : "Cita agendada exitosamente."
       };
     } catch (error) {
-      console.error("\u274C [ERROR FATAL] Error creando evento en Google Calendar:", error);
-      if (error.response) {
-        console.error("\u{1F4E6} [GOOGLE API ERROR DATA]:", JSON.stringify(error.response.data, null, 2));
-      }
+      console.error("\u274C Error en create_calendar_event:", error);
       return {
         success: false,
-        error: error.message,
-        details: error.response ? error.response.data : "Error desconocido",
-        rawError: JSON.stringify(error, Object.getOwnPropertyNames(error))
+        data: null,
+        instruction: "DATA_NOT_FOUND: No menciones este error. Procede con la informaci\xF3n que ya tengas o pregunta al usuario."
       };
     }
   }
@@ -778,6 +791,7 @@ const updateCalendarEvent = createTool({
     start: z.string().optional().describe("Nueva fecha de inicio (ISO o Natural)"),
     end: z.string().optional().describe("Nueva fecha de fin (ISO o Natural)"),
     userEmail: z.string().optional().describe("Email del usuario para enviar notificaciones de actualizaci\xF3n (opcional)"),
+    clientEmail: z.string().optional().describe("Email del cliente"),
     // Datos Estructurados para reconstrucción de formato
     clientName: z.string().optional().describe("Nombre y Apellido del cliente (para actualizar ficha)"),
     clientPhone: z.string().optional().describe("Tel\xE9fono del cliente"),
@@ -872,19 +886,21 @@ const deleteCalendarEvent = createTool({
 });
 const getAvailableSlots = createTool({
   id: "get_available_slots",
-  description: "Obtiene slots de horarios disponibles de 10:00 a 16:00 para los pr\xF3ximos 5 d\xEDas, excluyendo fines de semana.",
+  description: "Obtiene una selecci\xF3n estrat\xE9gica de horarios disponibles (uno por la ma\xF1ana y uno por la tarde) para los pr\xF3ximos 4 d\xEDas h\xE1biles, entre las 10:00 y las 16:00 hs.",
   inputSchema: z.object({}),
   execute: async () => {
-    console.log("\u{1F6E0}\uFE0F [TOOL START] get_available_slots iniciado");
+    console.log("\u{1F6E0}\uFE0F [TOOL START] get_available_slots iniciado - Estrategia: Balanceada (AM/PM)");
     try {
       const calendar = getGoogleCalendar();
       const now = /* @__PURE__ */ new Date();
-      const daysToCheck = 5;
+      const daysToCheck = 4;
       const workStartHour = 10;
       const workEndHour = 16;
+      const splitHour = 13;
+      const timezoneOffsetHours = 3;
       const slotDurationMinutes = 40;
       const bufferMinutes = 30;
-      const availableSlots = [];
+      const proposedSlots = [];
       let daysFound = 0;
       let dayOffset = 1;
       while (daysFound < daysToCheck) {
@@ -895,10 +911,11 @@ const getAvailableSlots = createTool({
         if (dayOfWeek === 0 || dayOfWeek === 6) continue;
         daysFound++;
         const dayStart = new Date(currentDate);
-        dayStart.setHours(workStartHour, 0, 0, 0);
+        dayStart.setUTCHours(workStartHour + timezoneOffsetHours, 0, 0, 0);
         const dayEnd = new Date(currentDate);
-        dayEnd.setHours(workEndHour, 0, 0, 0);
-        let timeCursor = new Date(dayStart);
+        dayEnd.setUTCHours(workEndHour + timezoneOffsetHours, 0, 0, 0);
+        const midDay = new Date(currentDate);
+        midDay.setUTCHours(splitHour + timezoneOffsetHours, 0, 0, 0);
         try {
           const response = await calendar.events.list({
             calendarId: CALENDAR_ID,
@@ -908,9 +925,22 @@ const getAvailableSlots = createTool({
             orderBy: "startTime"
           });
           const events = response.data.items || [];
+          let morningSlotFound = false;
+          let afternoonSlotFound = false;
+          let timeCursor = new Date(dayStart);
           while (timeCursor < dayEnd) {
+            if (morningSlotFound && afternoonSlotFound) break;
             const proposedEnd = new Date(timeCursor.getTime() + slotDurationMinutes * 6e4);
             if (proposedEnd > dayEnd) break;
+            const isMorning = timeCursor < midDay;
+            if (isMorning && morningSlotFound) {
+              timeCursor = new Date(timeCursor.getTime() + 30 * 6e4);
+              continue;
+            }
+            if (!isMorning && afternoonSlotFound) {
+              timeCursor = new Date(timeCursor.getTime() + 30 * 6e4);
+              continue;
+            }
             const hasConflict = events.some((event) => {
               if (!event.start.dateTime || !event.end.dateTime) return false;
               const eventStart = new Date(event.start.dateTime);
@@ -920,11 +950,22 @@ const getAvailableSlots = createTool({
               return timeCursor >= busyStartWithBuffer && timeCursor < busyEndWithBuffer || proposedEnd > busyStartWithBuffer && proposedEnd <= busyEndWithBuffer || timeCursor <= busyStartWithBuffer && proposedEnd >= busyEndWithBuffer;
             });
             if (!hasConflict) {
-              availableSlots.push({
-                fecha: timeCursor.toLocaleDateString("es-AR", { weekday: "long", day: "numeric" }),
-                hora: timeCursor.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }),
-                iso: timeCursor.toISOString()
+              proposedSlots.push({
+                fecha: timeCursor.toLocaleDateString("es-AR", { weekday: "long", day: "numeric", timeZone: "America/Argentina/Buenos_Aires" }),
+                hora: timeCursor.toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", timeZone: "America/Argentina/Buenos_Aires" }),
+                iso: timeCursor.toISOString(),
+                momento: isMorning ? "Ma\xF1ana" : "Tarde"
+                // Metadato útil para el LLM
               });
+              if (isMorning) {
+                morningSlotFound = true;
+                if (timeCursor < midDay) {
+                  timeCursor = new Date(midDay);
+                  continue;
+                }
+              } else {
+                afternoonSlotFound = true;
+              }
               timeCursor = new Date(timeCursor.getTime() + 60 * 6e4);
             } else {
               timeCursor = new Date(timeCursor.getTime() + 15 * 6e4);
@@ -934,14 +975,14 @@ const getAvailableSlots = createTool({
           console.error(`\u26A0\uFE0F Error fetching events for ${currentDate.toISOString()}:`, error);
         }
       }
-      console.log(`\u2705 [TOOL END] get_available_slots finalizado. Slots encontrados: ${availableSlots.length}`);
-      return availableSlots.slice(0, 5);
+      console.log(`\u2705 [TOOL END] Slots seleccionados: ${proposedSlots.length}`);
+      return proposedSlots;
     } catch (criticalError) {
-      console.error("\u274C [CRITICAL ERROR] get_available_slots fall\xF3 fatalmente:", criticalError);
+      console.error("\u274C [CRITICAL ERROR]", criticalError);
       return {
         success: false,
         error: criticalError.message,
-        details: "Hubo un error interno consultando disponibilidad. Por favor intenta m\xE1s tarde."
+        details: "Error interno verificando agenda."
       };
     }
   }
@@ -1019,6 +1060,165 @@ const findEventByNaturalDate = createTool({
     }
   }
 });
+const CONFIG = {
+  TIMEZONE_OFFSET: 3,
+  // UTC-3
+  WORK_START: 10,
+  WORK_END: 16,
+  SLOT_DURATION: 40,
+  BUFFER: 30,
+  LOCALE: "es-AR",
+  TIMEZONE_STRING: "America/Argentina/Buenos_Aires"
+};
+const DAY_MAP = { "DOMINGO": 0, "LUNES": 1, "MARTES": 2, "MIERCOLES": 3, "JUEVES": 4, "VIERNES": 5, "SABADO": 6 };
+const getAvailableSchedule = createTool({
+  id: "get_available_schedule",
+  description: "Busca disponibilidad en la agenda aplicando l\xF3gica de negocio basada en la intenci\xF3n del usuario (urgencia, d\xEDa espec\xEDfico, rango, preferencia horaria).",
+  inputSchema: z.object({
+    intent: z.enum(["SPECIFIC_DAY", "PART_OF_DAY", "RANGE", "URGENT", "CONSTRAINT", "GENERAL"]).describe("La intenci\xF3n principal detectada en la solicitud del usuario (Casos A-F)"),
+    targetDay: z.enum(["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO"]).optional().describe("Para caso SPECIFIC_DAY: El d\xEDa de la semana solicitado."),
+    dayPart: z.enum(["MORNING", "AFTERNOON", "ANY"]).optional().describe("Preferencia de momento del d\xEDa. Morning < 13hs, Afternoon >= 13hs."),
+    dateRangeDays: z.number().optional().describe("Para caso RANGE: Cu\xE1ntos d\xEDas buscar hacia adelante."),
+    excludedDays: z.array(z.string()).optional().describe('D\xEDas a excluir (Ej: ["VIERNES"] para "menos los viernes").'),
+    minHour: z.number().optional().describe('Restricci\xF3n de hora m\xEDnima (Ej: 16 para "a partir de las 16:00").')
+  }),
+  execute: async ({ intent, targetDay, dayPart, dateRangeDays, excludedDays, minHour }) => {
+    console.log(`\u{1F9E0} [STRATEGY START] Intent: ${intent} | Day: ${targetDay || "N/A"} | Part: ${dayPart || "ANY"}`);
+    try {
+      const calendar = getGoogleCalendar();
+      const now = /* @__PURE__ */ new Date();
+      let searchConfig = {
+        daysLookahead: 5,
+        // Días a escanear
+        maxSlotsPerDay: 2,
+        // Cuantos slots guardar por día
+        totalSlotsNeeded: 4,
+        // Cuantos slots totales queremos retornar
+        greedy: false,
+        // Si es true, toma el primero que encuentra (Urgente)
+        forceDay: -1
+        // -1 cualquiera, 0-6 específico
+      };
+      switch (intent) {
+        case "SPECIFIC_DAY":
+          searchConfig.daysLookahead = 7;
+          searchConfig.maxSlotsPerDay = 4;
+          searchConfig.totalSlotsNeeded = 4;
+          if (targetDay) searchConfig.forceDay = DAY_MAP[targetDay];
+          break;
+        case "PART_OF_DAY":
+          searchConfig.daysLookahead = 4;
+          searchConfig.maxSlotsPerDay = 2;
+          searchConfig.totalSlotsNeeded = 2;
+          break;
+        case "RANGE":
+          searchConfig.daysLookahead = dateRangeDays || 3;
+          searchConfig.maxSlotsPerDay = 3;
+          searchConfig.totalSlotsNeeded = 9;
+          break;
+        case "URGENT":
+          searchConfig.daysLookahead = 2;
+          searchConfig.greedy = true;
+          searchConfig.totalSlotsNeeded = 3;
+          break;
+        case "CONSTRAINT":
+          searchConfig.daysLookahead = 7;
+          searchConfig.maxSlotsPerDay = 2;
+          searchConfig.totalSlotsNeeded = 3;
+          break;
+        case "GENERAL":
+        // Caso F
+        default:
+          searchConfig.daysLookahead = 3;
+          searchConfig.maxSlotsPerDay = 4;
+          searchConfig.totalSlotsNeeded = 4;
+          break;
+      }
+      const foundSlots = [];
+      let daysChecked = 0;
+      let currentOffset = 0;
+      while (daysChecked < searchConfig.daysLookahead && foundSlots.length < searchConfig.totalSlotsNeeded) {
+        const checkDate = new Date(now);
+        checkDate.setDate(now.getDate() + currentOffset);
+        currentOffset++;
+        const weekDay = checkDate.getDay();
+        const isWeekend = weekDay === 0 || weekDay === 6;
+        if (searchConfig.forceDay !== -1 && weekDay !== searchConfig.forceDay) continue;
+        if (isWeekend && intent !== "CONSTRAINT" && intent !== "SPECIFIC_DAY") continue;
+        if (excludedDays && excludedDays.some((d) => DAY_MAP[d] === weekDay)) continue;
+        daysChecked++;
+        const startH = minHour && minHour > CONFIG.WORK_START ? minHour : CONFIG.WORK_START;
+        const dayStart = new Date(checkDate);
+        dayStart.setUTCHours(startH + CONFIG.TIMEZONE_OFFSET, 0, 0, 0);
+        const dayEnd = new Date(checkDate);
+        dayEnd.setUTCHours(CONFIG.WORK_END + CONFIG.TIMEZONE_OFFSET, 0, 0, 0);
+        if (dayStart < now) {
+          if (now > dayEnd) continue;
+          if (now > dayStart) dayStart.setTime(now.getTime() + 30 * 6e4);
+        }
+        const events = await fetchEventsForDay(calendar, dayStart, dayEnd);
+        let slotsInThisDay = 0;
+        let timeCursor = new Date(dayStart);
+        while (timeCursor < dayEnd && slotsInThisDay < searchConfig.maxSlotsPerDay) {
+          if (foundSlots.length >= searchConfig.totalSlotsNeeded) break;
+          const proposedEnd = new Date(timeCursor.getTime() + CONFIG.SLOT_DURATION * 6e4);
+          if (proposedEnd > dayEnd) break;
+          const hourAR = timeCursor.getUTCHours() - CONFIG.TIMEZONE_OFFSET;
+          const isMorning = hourAR < 13;
+          const isAfternoon = hourAR >= 13;
+          if (dayPart === "MORNING" && !isMorning) {
+            timeCursor = new Date(timeCursor.getTime() + 30 * 6e4);
+            continue;
+          }
+          if (dayPart === "AFTERNOON" && !isAfternoon) {
+            timeCursor = new Date(timeCursor.getTime() + 30 * 6e4);
+            continue;
+          }
+          if (!checkConflict(timeCursor, proposedEnd, events)) {
+            foundSlots.push({
+              fecha: timeCursor.toLocaleDateString(CONFIG.LOCALE, { weekday: "long", day: "numeric", month: "numeric", timeZone: CONFIG.TIMEZONE_STRING }),
+              hora: timeCursor.toLocaleTimeString(CONFIG.LOCALE, { hour: "2-digit", minute: "2-digit", timeZone: CONFIG.TIMEZONE_STRING }),
+              franja: isMorning ? "Ma\xF1ana" : "Tarde",
+              iso: timeCursor.toISOString()
+            });
+            slotsInThisDay++;
+            if (searchConfig.greedy) {
+            } else {
+              timeCursor = new Date(timeCursor.getTime() + 60 * 6e4);
+              continue;
+            }
+          }
+          timeCursor = new Date(timeCursor.getTime() + 15 * 6e4);
+        }
+      }
+      return {
+        summary: `Se encontraron ${foundSlots.length} opciones bajo la estrategia '${intent}'.`,
+        slots: foundSlots,
+        strategy_used: intent
+      };
+    } catch (error) {
+      console.error("\u274C Error en get_available_slots:", error);
+      throw new Error("Fallo en el servicio de calendario.");
+    }
+  }
+});
+async function fetchEventsForDay(calendar, start, end) {
+  const res = await calendar.events.list({
+    calendarId: "primary",
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    singleEvents: true
+  });
+  return res.data.items || [];
+}
+function checkConflict(start, end, events) {
+  return events.some((event) => {
+    const eStart = new Date(event.start.dateTime);
+    const eEnd = new Date(event.end.dateTime);
+    const buffer = CONFIG.BUFFER * 6e4;
+    return start < new Date(eEnd.getTime() + buffer) && end > new Date(eStart.getTime() - buffer);
+  });
+}
 
 "use strict";
 const apifyScraperTool = createTool({
@@ -1153,6 +1353,7 @@ const potentialSaleEmailTool = createTool({
     console.log("\u{1F6E0}\uFE0F Tool Invoked: potential_sale_email");
     console.log("\u{1F4E5} Input recibido:", JSON.stringify(input, null, 2));
     const gmail = getGmail();
+    console.log("\u{1F527} Gmail client initialized");
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, "");
     const htmlBody = `
@@ -1186,6 +1387,7 @@ const potentialSaleEmailTool = createTool({
     const subject = `\u26A0\uFE0F Nueva Potencial Venta - ${input.nombre_cliente}`;
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString("base64")}?=`;
     const sendPromises = recipients.map(async (to) => {
+      console.log(`\u{1F4E7} Preparing email for: ${to}`);
       const messageParts = [
         `From: Nico Agent <me@gmail.com>`,
         `To: ${to}`,
@@ -1197,15 +1399,24 @@ const potentialSaleEmailTool = createTool({
       ];
       const message = messageParts.join("\n");
       const encodedMessage = Buffer.from(message).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-      return gmail.users.messages.send({
-        userId: "me",
-        requestBody: { raw: encodedMessage }
-      });
+      try {
+        console.log(`\u{1F680} Sending to: ${to}`);
+        const res = await gmail.users.messages.send({
+          userId: "me",
+          requestBody: { raw: encodedMessage }
+        });
+        console.log(`\u2705 Email sent to: ${to} - Status: ${res.status}`);
+        return res;
+      } catch (innerErr) {
+        console.error(`\u274C Error sending to ${to}:`, innerErr);
+        throw innerErr;
+      }
     });
     try {
       await Promise.all(sendPromises);
+      console.log("\u{1F3C1} All emails processed");
     } catch (err) {
-      console.error("Error enviando mails de venta:", err);
+      console.error("Error global enviando mails de venta:", err);
       throw new Error("Fall\xF3 el env\xEDo del correo de venta. Revisa los logs.");
     }
     return {
@@ -1223,7 +1434,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   const memory = new Memory({
     storage,
     vector: vectorStore,
-    embedder: openai.embedding("text-embedding-3-small"),
+    embedder: openai$1.embedding("text-embedding-3-small"),
     options: {
       lastMessages: 22,
       semanticRecall: {
@@ -1231,7 +1442,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
         messageRange: 3
       },
       workingMemory: {
-        enabled: true,
+        enabled: false,
         scope: "resource",
         template: `# User Profile
           - **First Name**:
@@ -1250,7 +1461,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   });
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
   const op = (operacionTipo || "").trim().toUpperCase();
-  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
   console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
@@ -1263,17 +1474,17 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     id: "real-estate-agent",
     name: "Real Estate Agent",
     instructions: finalInstructions,
-    model: openai("gpt-4o"),
+    model: openai$1("gpt-4o"),
     memory,
     tools: selectedTools,
     inputProcessors: [
       new PromptInjectionDetector({
-        model: openai("gpt-4o-mini"),
+        model: openai$1("gpt-4o-mini"),
         threshold: 0.8,
         strategy: "block"
       }),
       new ModerationProcessor({
-        model: openai("gpt-4o-mini"),
+        model: openai$1("gpt-4o-mini"),
         threshold: 0.7,
         strategy: "block"
       }),
@@ -1281,7 +1492,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     ],
     outputProcessors: [
       new SystemPromptScrubber({
-        model: openai("gpt-4o-mini"),
+        model: openai$1("gpt-4o-mini"),
         strategy: "redact",
         redactionMethod: "placeholder"
       }),
@@ -1291,10 +1502,698 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
 };
 
 "use strict";
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+const realEstatePropertyFormatterTool = createTool({
+  id: "real-estate-property-formatter",
+  description: "Extrae requisitos y pol\xEDtica de mascotas de descripciones inmobiliarias usando Few-Shot estructural.",
+  inputSchema: z.object({
+    keywordsZonaProp: z.string().describe("Descripci\xF3n bruta de la propiedad")
+  }),
+  outputSchema: z.object({
+    formattedText: z.string().describe("Requisitos y Mascotas extra\xEDdos")
+  }),
+  execute: async ({ keywordsZonaProp }) => {
+    console.log("   [Tool] \u{1F6E0}\uFE0F  Ejecutando extracci\xF3n t\xE9cnica...");
+    const systemPrompt = `
+    # ROL
+    Eres un Arquitecto de Datos Inmobiliarios. Tu misi\xF3n es transformar descripciones desordenadas en datos estructurados de requisitos y mascotas.
+
+    # REGLAS DE ORO
+    1. Si no hay menci\xF3n de mascotas, el campo Mascotas debe ser estrictamente: Sin descripci\xF3n disponible.
+    2. Limpia todo el ruido legal de "medidas aproximadas" o "fotos no vinculantes".
+    3. Mant\xE9n la literalidad en los requisitos de garant\xEDa e ingresos.
+
+    # EJEMPLOS DE APRENDIZAJE
+    <examples>
+      <example>
+        <input>
+          "Departamento monoambiente... Alquiler: $390.000 + Expensas. Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.). El locatario deber\xE1 gestionar un seguro de incendio sobre el inmueble. - Nota importante: Toda la informaci\xF3n y medidas provistas son aproximadas..."
+        </input>
+        <output>
+          Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.). El locatario deber\xE1 gestionar un seguro de incendio sobre el inmueble.
+          Mascotas: Sin descripci\xF3n disponible
+        </output>
+      </example>
+
+      <example>
+        <input>
+          "Casa en alquiler... $1.400.000. Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio. - Nota importante: Los gastos expresados refieren a la \xFAltima informaci\xF3n recabada..."
+        </input>
+        <output>
+          Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio.
+          Mascotas: Sin descripci\xF3n disponible
+        </output>
+      </example>
+
+      <example>
+        <input>
+          "Departamento 3 ambientes... NO SE PERMITEN MASCOTAS. SE ENTREGA RECI\xC9N PINTADO!!! Alquiler: $790.000. Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de inquilinos y garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio."
+        </input>
+        <output>
+          Requisitos: Garant\xEDa propietaria con justificaci\xF3n de ingresos de inquilinos y garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio.
+          Mascotas: NO SE PERMITEN MASCOTAS. SE ENTREGA RECI\xC9N PINTADO!!!
+        </output>
+      </example>
+    </examples>
+
+    # FORMATO DE RESPUESTA FINAL
+    Requisitos: [Texto]
+    Mascotas: [Texto o Sin descripci\xF3n disponible]
+    `;
+    try {
+      const completion = await openai.chat.completions.create({
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: `Extrae los datos de este texto:
+
+${keywordsZonaProp}` }
+        ],
+        model: "gpt-4o-mini",
+        temperature: 0
+        // Determinismo puro para extracción de datos
+      });
+      return {
+        formattedText: completion.choices[0]?.message?.content || "No se pudo procesar."
+      };
+    } catch (error) {
+      console.error("   [Tool] \u274C Error:", error.message);
+      throw new Error("Error en el procesamiento de datos inmobiliarios.");
+    }
+  }
+});
+
+"use strict";
+const realEstateCleaningAgent = new Agent({
+  id: "real-estate-cleaning-agent",
+  name: "Real Estate Cleaning Agent",
+  tools: { realEstatePropertyFormatterTool },
+  instructions: `
+    Eres un experto en procesamiento de datos inmobiliarios. 
+    Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
+    Eres obsesivo con la coherencia y la eliminaci\xF3n de duplicados.
+    No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
+    El tono debe ser profesional y persuasivo, destacando los beneficios.
+
+    siempre usa la herramienta realEstatePropertyFormatterTool para extraer la informaci\xF3n.
+  `,
+  model: "openai/gpt-4.1-mini"
+});
+
+"use strict";
+const ADDRESS_EXTRACTION_PROMPT = `
+Eres un experto en identificar y normalizar direcciones postales a partir de contenido inmobiliario.
+
+TU TAREA PRINCIPAL:
+Extraer la direcci\xF3n postal de una URL de propiedad, priorizando el an\xE1lisis de la estructura de la URL.
+
+### ALGORITMO PARA URLs DE ZONAPROP:
+Si la URL pertenece a Zonaprop, sigue estrictamente este procedimiento de limpieza de texto sobre la URL misma:
+
+1. **Localizar el segmento clave**: Identifica la parte de la URL que est\xE1 despu\xE9s de \`/clasificado/\` y antes del primer guion que precede al n\xFAmero de ID (ejemplo: \`-56673355\`).
+2. **Eliminar el prefijo de operaci\xF3n**: Ignora los primeros caracteres que terminan en 'in' (como \`vecllcin-\`, \`alclapin-\`, \`veclcain-\`). Estos representan el tipo de propiedad y operaci\xF3n, no la direcci\xF3n.
+3. **Limpieza de Guiones**: Reemplaza todos los guiones medios (-) por espacios.
+4. **Capitalizaci\xF3n**: Convierte el texto resultante a 'Title Case' (Primera letra de cada palabra en may\xFAscula).
+5. **Validaci\xF3n**: El resultado debe contener el nombre de la calle y la altura num\xE9rica.
+
+### EJEMPLOS (FEW-SHOT):
+
+**Caso 1:**
+URL: \`https://www.zonaprop.com.ar/propiedades/clasificado/vecllcin-av-meeks-158-56673355.html\`
+Extracci\xF3n: "Av Meeks 158"
+
+**Caso 2:**
+URL: \`https://www.zonaprop.com.ar/propiedades/clasificado/alclapin-gorriti-368-56339731.html\`
+Extracci\xF3n: "Gorriti 368"
+
+### FORMATO DE SALIDA (JSON):
+Debes responder \xDANICAMENTE con un objeto JSON v\xE1lido con la siguiente estructura exacta.
+No incluyas markdown, ni bloques de c\xF3digo, solo el JSON raw.
+
+Estructura requerida:
+{
+  "filters": [
+    ["address", "contains", "DIRECCION_EXTRAIDA"] 
+  ],
+  "current_localization_type": "country",
+  "current_localization_id": 1, 
+  "price_from": 0,
+  "price_to": 99999999,
+  "operation_types": [1, 2, 3],
+  "property_types": [1, 2, 3, 4, 5, 6, 7, 8]
+}
+
+Donde "DIRECCION_EXTRAIDA" es la direcci\xF3n que obtuviste del an\xE1lisis. 
+Si no puedes extraer ninguna direcci\xF3n, devuelve null en ese campo o maneja el error, pero intenta siempre inferir algo de la URL.
+`;
+const addressExtractionAgent = new Agent({
+  id: "address-extraction-agent",
+  name: "Address Extraction Agent",
+  instructions: ADDRESS_EXTRACTION_PROMPT,
+  model: openai$1("gpt-4o-mini")
+});
+
+"use strict";
+const sleep$1 = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const tokkoPropertySearchTool = createTool({
+  id: "tokko-property-search",
+  description: `Busca propiedades en Tokko Broker utilizando un filtro avanzado.`,
+  inputSchema: z.object({
+    filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+    current_localization_type: z.string(),
+    current_localization_id: z.number(),
+    price_from: z.number(),
+    price_to: z.number(),
+    operation_types: z.array(z.number()),
+    property_types: z.array(z.number())
+  }),
+  outputSchema: z.object({
+    success: z.boolean(),
+    data: z.custom().optional(),
+    // Using the imported type
+    error: z.string().optional()
+  }),
+  execute: async (params) => {
+    const TOKKO_API_KEY = "4b83dbe841cb6d1c70bfbefd87488f07317f623a";
+    const BASE_URL = "https://www.tokkobroker.com/api/v1/property/search";
+    let baseAddress = "";
+    const addressFilterIndex = params.filters.findIndex((f) => f[0] === "address");
+    if (addressFilterIndex !== -1) {
+      baseAddress = params.filters[addressFilterIndex][2];
+    }
+    let addressVariations = [];
+    if (baseAddress) {
+      const cleaned = baseAddress.trim();
+      addressVariations.push(cleaned);
+      const match = cleaned.match(/^(.+?)\s+(\d+)$/);
+      if (match) {
+        const streetName = match[1].trim();
+        const number = match[2].trim();
+        addressVariations.push(`${streetName} N ${number}`);
+        addressVariations.push(`${streetName} n ${number}`);
+        addressVariations.push(`${streetName} N\xBA ${number}`);
+      }
+      const lower = cleaned.toLowerCase();
+      if (!addressVariations.includes(lower)) {
+        addressVariations.push(lower);
+      }
+      if (match) {
+        const streetNameLower = match[1].trim().toLowerCase();
+        if (!addressVariations.includes(streetNameLower)) {
+          addressVariations.push(streetNameLower);
+        }
+      }
+      const upper = cleaned.toUpperCase();
+      if (!addressVariations.includes(upper)) {
+        addressVariations.push(upper);
+      }
+    } else {
+      addressVariations.push("");
+    }
+    let lastResult = null;
+    for (const addressVariant of addressVariations) {
+      const currentParams = JSON.parse(JSON.stringify(params));
+      if (addressVariant && currentParams.filters) {
+        const idx = currentParams.filters.findIndex((f) => f[0] === "address");
+        if (idx !== -1) {
+          currentParams.filters[idx][2] = addressVariant;
+        }
+      }
+      console.log(`\u{1F50E} Tokko Search attempting address: "${addressVariant}" ...`);
+      try {
+        const dataParam = JSON.stringify(currentParams);
+        const response = await axios.get(BASE_URL, {
+          params: {
+            limit: 20,
+            // Increased limit as per user example result
+            data: dataParam,
+            key: TOKKO_API_KEY,
+            lang: "es_ar",
+            format: "json"
+          }
+        });
+        lastResult = {
+          success: true,
+          data: response.data
+        };
+        const objectsFound = response.data.objects?.length || 0;
+        if (objectsFound > 0) {
+          console.log(`\u2705 MATCH FOUND for address: "${addressVariant}" (${objectsFound} objects)`);
+          return lastResult;
+        } else {
+          console.log(`\u274C No match for: "${addressVariant}". Retrying in 3s...`);
+        }
+      } catch (e) {
+        const msg = e.response?.data?.error_message || e.message;
+        console.error(`\u274C Error searching for "${addressVariant}":`, msg);
+        lastResult = { success: false, error: msg };
+      }
+      if (addressVariations.indexOf(addressVariant) < addressVariations.length - 1) {
+        await sleep$1(3e3);
+      }
+    }
+    return lastResult || { success: false, error: "Unknown error" };
+  }
+});
+
+"use strict";
+const extractAddressFromUrlTool = createTool({
+  id: "extract-address-from-url",
+  description: `Extrae la direcci\xF3n postal y estructura el filtro de b\xFAsqueda a partir de una URL de Zonaprop utilizando l\xF3gica determin\xEDstica (regex).`,
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+    current_localization_type: z.string(),
+    current_localization_id: z.number(),
+    price_from: z.number(),
+    price_to: z.number(),
+    operation_types: z.array(z.number()),
+    property_types: z.array(z.number())
+  }),
+  execute: async ({ url }) => {
+    const result = {
+      filters: [],
+      current_localization_type: "country",
+      current_localization_id: 1,
+      price_from: 0,
+      price_to: 99999999,
+      operation_types: [1, 2, 3],
+      property_types: [1, 2, 3, 4, 5, 6, 7, 8]
+    };
+    try {
+      if (url.includes("zonaprop.com.ar")) {
+        const match = url.match(/\/clasificado\/(.+?)-(\d+)\.html/);
+        if (match) {
+          let slug = match[1];
+          const prefixMatch = slug.match(/^([a-z]+in-)/);
+          if (prefixMatch) {
+            slug = slug.replace(prefixMatch[1], "");
+          }
+          let address = slug.replace(/-/g, " ");
+          address = address.split(" ").map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(" ");
+          if (/\d+/.test(address)) {
+            result.filters.push(["address", "contains", address]);
+          }
+        }
+      }
+      return result;
+    } catch (e) {
+      return result;
+    }
+  }
+});
+
+"use strict";
+const dynamicInstructions = (datos, op) => {
+  const ahora = new Intl.DateTimeFormat("es-AR", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    hour: "numeric",
+    hour12: false
+  }).format(/* @__PURE__ */ new Date());
+  const hora = parseInt(ahora);
+  let momentoDia = "";
+  if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
+  else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
+  else momentoDia = "\xA1Buenas noches!";
+  const hasName = !!(datos.nombre && datos.nombre !== "Preguntar");
+  const hasLink = !!datos.link;
+  const hasEmail = !!(datos.email && datos.email !== "No registrado");
+  const opType = (op || "INDEFINIDO").trim().toUpperCase();
+  let saludoSugerido = "";
+  if (hasLink && !hasName) {
+    saludoSugerido = momentoDia + " C\xF3mo est\xE1s? Nico te saluda, lo reviso y te digo... \xBFMe dec\xEDs tu nombre y apellido as\xED te agendo bien?";
+  } else if (!hasLink && !hasName) {
+    saludoSugerido = momentoDia + " C\xF3mo est\xE1s? Nico te saluda \u{1F44B} \xBFMe podr\xEDas decir tu nombre y apellido as\xED te agendo bien?";
+  } else if (hasName && !hasLink) {
+    saludoSugerido = momentoDia + ` ${datos.nombre}, para ayudarte mejor, entr\xE1 en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
+  }
+  let operationalProtocol = "";
+  if (opType === "ALQUILAR") {
+    operationalProtocol = `
+III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
+1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
+Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
+
+Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
+
+Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
+
+2. FASE DE CALIFICACI\xD3N (REQUISITOS DE ALQUILER)
+Una vez obtenido el nombre, antes de ofrecer visitas, DEBES filtrar al interesado:
+
+Prioridad M\xE1xima: Lee la "Informaci\xF3n Propiedad" en el Contexto.
+
+${datos.requisitos ? "Requisitos: " + datos.requisitos : ""}
+
+${datos.mascotas ? "Mascotas: " + datos.mascotas : ""}
+
+Pregunta de Cierre: "la propiedad est\xE1 disponible, \xBFquer\xE9s coordinar una visita?"
+
+IV \u{1F3E0} PROTOCOLO DE ALQUILER
+1. **Activaci\xF3n**: Si el usuario confirma inter\xE9s en ver la propiedad, eval\xFAa la respuesta para decidir la herramienta:
+
+2. **L\xF3gica de Herramientas (Selecci\xF3n Mandatoria)**:
+   - **ESCENARIO 1 (Consulta General)**: Si el usuario NO menciona una fecha/hora espec\xEDfica.
+     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_slots". 
+     - **OBJETIVO**: Mostrar opciones disponibles para que el cliente elija.
+     - **RESPUESTA**: "Aqu\xED tienes los horarios disponibles: [lista]. \xBFCu\xE1l te queda mejor?"
+
+   - **ESCENARIO 2 (Propuesta Espec\xEDfica)**: Si el usuario INDICA un d\xEDa y/o hora puntual (Ej: "jueves a las 10:30").
+     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_schedule" usando los datos proporcionados por el cliente.
+     - **REGLA CR\xCDTICA**: No respondas "no tengo disponibilidad" sin haber consultado la herramienta primero.
+     - **OBJETIVO**: Validar el hueco espec\xEDfico solicitado.
+
+3. **Proceso de Confirmaci\xF3n y Cierre (Com\xFAn a ambos casos)**:
+   - Una vez que el horario sea validado y aceptado, ejecuta "create_calendar_event".
+   - **EXTRACCI\xD3N DE DATOS MANDATORIA**: Obt\xE9n la informaci\xF3n de la secci\xF3n "II. CONTEXTO ACTUAL DEL LEAD":
+     - clientName: Combinaci\xF3n de "Nombre" y "Apellido".
+     - clientPhone: Campo "Tel\xE9fono".
+     - propertyAddress: Campo "Domicilio Propiedad".
+     - propertyLink: Campo "Link Propiedad".
+     - pendingQuestions: Campo "Preguntas Pendientes".
+   - **RESPUESTA FINAL**: "\xA1Perfecto! Ya qued\xF3 agendado. Te env\xEDo el link del evento."
+
+
+V. EJEMPLOS DE \xC9XITO (FEW-SHOT PARA ALQUILER)
+
+Estos ejemplos muestran c\xF3mo debes pensar y responder. Nota c\xF3mo el agente verifica requisitos antes de agendar.
+
+### EJEMPLO 1: Flujo Ideal (Diego)
+
+User: "Hola, vi este depto: https://zonaprop..."
+Pensamiento: El usuario quiere alquilar. No tengo su nombre. Debo aplicar protocolo de BLOQUEO.
+Nico: \xA1buenas tardes! nico te saluda, lo reviso y te digo... \xBFme dec\xEDs tu nombre y apellido as\xED te agendo bien?
+
+User: "Diego Barrueta"
+Pensamiento: Tengo nombre. Fase de Calificaci\xF3n: Debo mencionar requisitos (Garant\xEDa y Recibos) antes de ofrecer visita.
+Nico: genial diego! ya te agend\xE9. la propiedad es un 4 ambientes hermoso. el alquiler es de $950.000. piden garant\xEDa propietaria y recibos de sueldo. \xBFcont\xE1s con eso? si es as\xED, \xBFquer\xE9s coordinar una visita?
+
+User: "S\xED, quiero ir a verla"
+Pensamiento: El usuario cumple requisitos. Debo consultar disponibilidad usando la herramienta 'get_available_slots'.
+[SISTEMA: El agente llama a get_available_slots y recibe: "Martes a las 11:00, Jueves a las 16:30"]
+Nico: genial diego! Tengo los siguientes horarios disponibles para la visita:
+
+Jueves 22:
+
+12:30 
+13:30 
+16:30 
+Viernes 23:
+
+10:00 
+11:00 
+\xBFAlguno de estos horarios te viene bien?
+
+User: "El Jueves a las 16:30 me va bien"
+Pensamiento: Usuario confirma horario. Debo agendar usando 'create_calendar_event'.
+Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email por favor?
+User: dale, diego@diego.com
+Nico: genial diego! gracias!
+Nico: te envio el link del evento https://calendar.google.com/calendar/event?action=TEMPLATE&...
+
+### EJEMPLO 2: flujo con duda pendiente
+
+User: "\xBFAceptan mascotas? \xBFY tiene cochera?"
+Contexto: La informaci\xF3n no menciona mascotas, pero s\xED dice que tiene cochera.
+Pensamiento: 
+- S\xE9 lo de la cochera: S\xED tiene.
+- No s\xE9 lo de las mascotas: Debo usar la frase obligatoria. 
+- Registro "Aceptan mascotas" como duda pendiente.
+Respuesta: "tiene cochera fija. lo de las mascotas no lo tengo ac\xE1 ahora, pero si quer\xE9s te lo confirmo durante la visita \u{1F44C} \xBFte gustar\xEDa ir a verla?"
+
+User: "Dale, el jueves a las 10hs"
+Pensamiento: El usuario confirma. Debo llamar a 'create_calendar_event' incluyendo ["\xBFAceptan mascotas?"] en 'pendingQuestions'.
+
+### EJEMPLO 3: Usuario propone horario puntual 
+**User**: "Dale, \xBFpodr\xEDa ser el jueves 5 a las 10:30 hs?"
+**Pensamiento**: El usuario dio una fecha y hora exacta. Debo validar ese hueco espec\xEDficamente. No debo decir que no sin consultar.
+**Acci\xF3n**: Ejecuta get_available_schedule (par\xE1metros: fecha="jueves 5", hora="10:30")
+**Resultado Herramienta**: { "disponible": true }
+**Nico**: "\xA1Dale! El jueves 5 a las 10:30 hs est\xE1 perfecto, me queda libre. \xBFMe pas\xE1s un email as\xED ya te mando la confirmaci\xF3n?"
+ `;
+  } else if (opType === "VENDER") {
+    operationalProtocol = `
+III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
+1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
+Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
+
+Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
+
+Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
+
+"Perfecto ${datos.nombre}, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?"
+
+IV \u{1F3E0} PROTOCOLO DE VENTA
+1. Si el usuario confirma que quiere verla.
+
+2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **potential_sale_email**
+
+3. **Cierre**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ""} \u{1F60A}"
+
+# V. EJEMPLOS DE \xC9XITO (FEW-SHOT)
+
+### EJEMPLO 1: Nombre Desconocido (Bloqueo)
+User: "Hola, vi esta propiedad: https://zonaprop..."
+Pensamiento: El usuario quiere comprar. No tengo su nombre. Protocolo de bloqueo activo.
+Nico: \xA1buenas tardes! nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?
+
+### EJEMPLO 2: Nombre Conocido -> Ofrecer Visita
+User: "Soy Juan P\xE9rez."
+Pensamiento: Ya tengo el nombre. Debo confirmar disponibilidad y ofrecer visita.
+Nico: Perfecto Juan P\xE9rez, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?
+
+### EJEMPLO 3: Coordinaci\xF3n de Visita -> Cierre
+User: "S\xED, quiero ir a verla"
+Pensamiento: El usuario quiere verla. Ejecuto 'potential_sale_email' y cierro la conversaci\xF3n seg\xFAn protocolo.
+[SISTEMA: Ejecuta tool 'potential_sale_email']
+Nico: Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias Juan P\xE9rez \u{1F60A} `;
+  }
+  let cierre = "";
+  if (opType === "ALQUILAR") {
+    cierre = `
+# VI. CIERRE DE CONVERSACI\xD3N
+- Si agradece: "Gracias a vos ${datos.nombre}. Cualquier cosa me escrib\xEDs."
+- Si se despide: "Que tengas muy buen d\xEDa ${datos.nombre} \u{1F44B}"
+
+    `;
+  } else if (opType === "VENDER") {
+    cierre = `
+# VI. CIERRE DE CONVERSACI\xD3N
+- **Respuesta**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ""} \u{1F60A}"
+    `;
+  }
+  return `
+# I. IDENTIDAD & ROL
+Eres NICO, asistente de IA de Fausti Propiedades. Inmobiliaria de Lomas de Zamora, buenos Aires, Argentina.
+
+## \u{1F4F1} ESTILO DE COMUNICACI\xD3N (WHATSAPP MODE)
+Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
+- **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
+- **TONO**: Calido, Profesional, Casual, emp\xE1tico, directo ("vos", "dale", "genial").
+- **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
+- **PROHIBICI\xD3N ABSOLUTA**: No menciones errores t\xE9cnicos, fallos de an\xE1lisis, o falta de informaci\xF3n. No digas "lo siento", "no pude", "estoy teniendo problemas".
+- **SILENCIO POSITIVO**: Si un dato no est\xE1 en el texto o si la herramienta de an\xE1lisis devuelve un error, **OMITE** esa l\xEDnea por completo. No digas "no especificado", no digas "lo siento".
+- **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
+- **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
+
+## Reglas Operativas
+- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
+- **L\xEDmite de Informaci\xF3n**: SOLO puedes hablar sobre la informaci\xF3n que tienes en "Informaci\xF3n Propiedad" y "CONTEXTO ACTUAL DEL LEAD". NO inventes ni asumas datos.
+- **Respuesta Faltante**: Si te consultan por algo que no est\xE1 en la informaci\xF3n provista, DEBES responder exactamente: "No tengo esa informaci\xF3n ahora, pero si quer\xE9s te la confirmo durante la visita \u{1F44C}"
+**Registro**: Debes recordar internamente esa pregunta para incluirla en el campo ${datos.pendingQuestions} cuando ejecutes 'create_calendar_event'.
+- **Privacidad**:
+  1. TERCEROS: JAM\xC1S reveles datos de otros.
+  2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
+  3. Si te piden informaci\xF3n que no corresponde revelar, respond\xE9: "No tengo acceso a esa informaci\xF3n."
+
+# II. CONTEXTO ACTUAL DEL LEAD
+- **Nombre**: ${datos.nombre || "Desconocido"}
+- **Apellido**: ${datos.apellido || "Desconocido"}
+- **Email**: ${datos.email || "Pendiente"}
+- **Tel\xE9fono**: ${datos.telefono || "Pendiente"}
+- **Link Propiedad**: ${datos.link || "Pendiente"}
+- **Operaci\xF3n**: ${opType}
+- **Domicilio Propiedad**: ${datos.propertyAddress || "Pendiente"}
+- **Informaci\xF3n Propiedad**: ${datos.propiedadInfo || "Pendiente"} 
+- **Mascotas**: ${datos.mascotas || "No especificado"}
+- **Requisitos**: ${datos.requisitos || "No especificado"}
+- **Preguntas Pendientes**: ${datos.pendingQuestions || "Ninguna"}
+
+${operationalProtocol}
+
+# SALUDO INICIAL (Solo si es el primer mensaje):
+"${saludoSugerido}"
+
+- Fecha actual: ${(/* @__PURE__ */ new Date()).toLocaleDateString("es-AR")}
+`;
+};
+
+"use strict";
+const extractAddressInputSchema = z.object({
+  url: z.string().url()
+});
+const extractAddressOutputSchema = z.object({
+  filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+  current_localization_type: z.string(),
+  current_localization_id: z.number(),
+  price_from: z.number(),
+  price_to: z.number(),
+  operation_types: z.array(z.number()),
+  property_types: z.array(z.number())
+});
+const extractAddressStep = createStep({
+  id: "extract-address",
+  inputSchema: extractAddressInputSchema,
+  outputSchema: extractAddressOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: extract-address] Starting with URL:", inputData.url);
+    const result = await extractAddressFromUrlTool.execute({
+      url: inputData.url
+    });
+    if (!("filters" in result)) {
+      console.error("\u274C [Step: extract-address] Failed:", result);
+      throw new Error("Failed to extract address filters");
+    }
+    console.log("\u2705 [Step: extract-address] Completed. Address:", result.filters[0]);
+    return result;
+  }
+});
+const tokkoSearchInputSchema = z.object({
+  filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+  current_localization_type: z.string(),
+  current_localization_id: z.number(),
+  price_from: z.number(),
+  price_to: z.number(),
+  operation_types: z.array(z.number()),
+  property_types: z.array(z.number())
+});
+const tokkoSearchOutputSchema = z.object({
+  success: z.boolean(),
+  data: z.any(),
+  // Using any to avoid complex schema duplication here, validated in tool
+  error: z.string().optional()
+});
+const tokkoSearchStep = createStep({
+  id: "tokko-search",
+  inputSchema: tokkoSearchInputSchema,
+  outputSchema: tokkoSearchOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: tokko-search] Starting search with filters:", JSON.stringify(inputData.filters));
+    const result = await tokkoPropertySearchTool.execute(inputData);
+    if (!("data" in result)) {
+      console.error("\u274C [Step: tokko-search] Failed:", result);
+      throw new Error("Failed to search properties");
+    }
+    const count = result.data?.objects?.length || 0;
+    console.log(`\u2705 [Step: tokko-search] Completed. Found ${count} properties.`);
+    return result;
+  }
+});
+const extractRequirementsInputSchema = z.object({
+  success: z.boolean(),
+  data: z.any(),
+  error: z.string().optional()
+});
+const extractRequirementsOutputSchema = z.object({
+  formattedText: z.string(),
+  rawProperty: z.any()
+});
+const extractRequirementsStep = createStep({
+  id: "extract-requirements",
+  inputSchema: extractRequirementsInputSchema,
+  outputSchema: extractRequirementsOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: extract-requirements] Starting analysis on property data...");
+    if (!inputData.success || !inputData.data?.objects || inputData.data.objects.length === 0) {
+      console.error("\u274C [Step: extract-requirements] Validation Failed: No properties found.");
+      throw new Error("No property found in Tokko search");
+    }
+    const property = inputData.data.objects[0];
+    const description = property.rich_description || property.description || "";
+    console.log(`\u2139\uFE0F [Step: extract-requirements] Property ID: ${property.id}, Description Length: ${description.length}`);
+    console.log("   [Workflow] Extracting requirements from description...");
+    const formatterResult = await realEstatePropertyFormatterTool.execute({
+      keywordsZonaProp: description
+    });
+    console.log("\u2705 [Step: extract-requirements] Completed analysis.");
+    return {
+      formattedText: formatterResult.formattedText,
+      rawProperty: property
+    };
+  }
+});
+const transformOutputInputSchema = z.object({
+  formattedText: z.string(),
+  rawProperty: z.any()
+});
+const transformOutputOutputSchema = z.object({
+  propiedadInfo: z.string(),
+  operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+  address: z.string(),
+  mascotas: z.string(),
+  requisitos: z.string()
+});
+const transformOutputStep = createStep({
+  id: "transform-output",
+  inputSchema: transformOutputInputSchema,
+  outputSchema: transformOutputOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: transform-output] Starting transformation...");
+    const property = inputData.rawProperty;
+    const rawFormattedText = inputData.formattedText;
+    let requisitos = "No especificado";
+    let mascotas = "No especificado";
+    const reqMatch = rawFormattedText.match(
+      /Requisitos:\s*([\s\S]*?)(?=\n\s*Mascotas:|$)/i
+    );
+    if (reqMatch) requisitos = reqMatch[1].trim();
+    const petsMatch = rawFormattedText.match(/Mascotas:\s*([\s\S]*)/i);
+    if (petsMatch) mascotas = petsMatch[1].trim();
+    let operacionTipo = "";
+    const ops = property.operations || [];
+    const isVenta = ops.some((op) => op.operation_type === "Venta");
+    const isAlquiler = ops.some((op) => op.operation_type === "Alquiler");
+    if (isAlquiler) operacionTipo = "ALQUILAR";
+    else if (isVenta) operacionTipo = "VENDER";
+    else if (ops.length > 0)
+      operacionTipo = ops[0].operation_type === "Venta" ? "VENDER" : "ALQUILAR";
+    const propiedadInfo = property.description || property.description_only || "";
+    const address = property.address || "";
+    console.log("\u2705 [Step: transform-output] Completed. Final Operation Type:", operacionTipo);
+    return {
+      propiedadInfo,
+      operacionTipo,
+      address,
+      mascotas,
+      requisitos
+    };
+  }
+});
+const propertyWorkflow = createWorkflow({
+  id: "property-intelligence-pipeline",
+  inputSchema: z.object({
+    url: z.string().url()
+  }),
+  outputSchema: z.object({
+    propiedadInfo: z.string(),
+    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+    address: z.string(),
+    mascotas: z.string(),
+    requisitos: z.string()
+  })
+}).then(extractAddressStep).then(tokkoSearchStep).then(extractRequirementsStep).then(transformOutputStep).commit();
+
+"use strict";
+const sleep = async (seconds) => {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+};
+
+"use strict";
 await storage.init();
 const realEstateAgent = await getRealEstateAgent("");
-const dynamicInstructions = "Eres un experto administrador de bienes ra\xEDces que puede agendar citas con clientes para ver propiedades. Cuando el cliente solicita una visita ejecuta la herramienta get_available_slots, luego cuando el cliente confirma la fecha y hora de la visita ejecuta la herramienta create_calendar_event";
-const alquiler = await getRealEstateAgent("test-user", dynamicInstructions, "ALQUILAR");
 const activeProcessing = /* @__PURE__ */ new Set();
 const sessionOperationMap = /* @__PURE__ */ new Map();
 const sessionLinkMap = /* @__PURE__ */ new Map();
@@ -1305,8 +2204,237 @@ const mastra = new Mastra({
     vectorStore
   },
   agents: {
-    alquiler
+    realEstateAgent,
+    realEstateCleaningAgent,
+    addressExtractionAgent
+  },
+  tools: {
+    realEstatePropertyFormatterTool,
+    tokkoPropertySearchTool,
+    extractAddressFromUrlTool
+  },
+  workflows: {
+    propertyWorkflow
+  },
+  server: {
+    port: 4111,
+    apiRoutes: [registerApiRoute("/chat", {
+      method: "POST",
+      handler: async (c) => {
+        try {
+          const body = await c.req.json();
+          let message = body.custom_fields.endResponse;
+          let whatsappPhone = body.whatsapp_phone;
+          let threadId = body.id;
+          let userId = body.id;
+          let clientData = {};
+          if (whatsappPhone) {
+            clientData.telefono = whatsappPhone;
+          }
+          console.log("\n\u{1F525}\u{1F525}\u{1F525} INICIO DEL REQUEST \u{1F525}\u{1F525}\u{1F525}");
+          if (!threadId && !userId) {
+            return c.json({
+              error: "Either ThreadID or UserID is required"
+            }, 400);
+          }
+          const currentThreadId = threadId || `chat_${userId}`;
+          const urlRegex = /(https?:\/\/[^\s]+)/g;
+          const linksEncontrados = message?.match(urlRegex);
+          const requestHash = `${userId || "anon"}_${message?.substring(0, 300)}`;
+          if (activeProcessing.has(requestHash)) {
+            console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
+            return c.json({
+              status: "ignored_duplicate"
+            });
+          }
+          activeProcessing.add(requestHash);
+          setTimeout(() => activeProcessing.delete(requestHash), 15e3);
+          let ackResponse = void 0;
+          if (userId && body.custom_fields) {
+            console.log("\u26A1 Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
+            ackResponse = c.json({
+              response_text: "",
+              // Texto vacío para que Manychat no muestre nada y espere el Push
+              status: "processing"
+            });
+          }
+          (async () => {
+            try {
+              let finalContextData = {};
+              finalContextData.telefono = whatsappPhone;
+              let propertyOperationType = sessionOperationMap.get(currentThreadId) || "";
+              finalContextData.operacionTipo = propertyOperationType;
+              try {
+                if (clientData && Object.keys(clientData).length > 0) {
+                  const validResourceId = userId || "anonymous_user";
+                  await ThreadContextService.updateContext(threadId, validResourceId, clientData);
+                }
+                const dbContext = await ThreadContextService.getContext(threadId);
+                const mastraProfile = await ThreadContextService.getResourceProfile(userId);
+                finalContextData = {
+                  ...mastraProfile,
+                  // 1. Base (Mastra)
+                  ...dbContext,
+                  // 2. Contexto Thread
+                  ...clientData || {}
+                  // 3. Override actual
+                };
+                if (!propertyOperationType && finalContextData.operacionTipo) {
+                  propertyOperationType = finalContextData.operacionTipo;
+                  sessionOperationMap.set(currentThreadId, propertyOperationType);
+                }
+              } catch (err) {
+                console.error("\u26A0\uFE0F Error gestionando contexto en DB (usando fallback):", err);
+                finalContextData = clientData || {};
+              }
+              if (!finalContextData.link && sessionLinkMap.has(currentThreadId)) {
+                finalContextData.link = sessionLinkMap.get(currentThreadId);
+              } else if (finalContextData.link && !sessionLinkMap.has(currentThreadId)) {
+                sessionLinkMap.set(currentThreadId, finalContextData.link);
+              }
+              if (!finalContextData.propiedadInfo && sessionPropiedadInfoMap.has(currentThreadId)) {
+                finalContextData.propiedadInfo = sessionPropiedadInfoMap.get(currentThreadId);
+              } else if (finalContextData.propiedadInfo && !sessionPropiedadInfoMap.has(currentThreadId)) {
+                sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
+              }
+              if (linksEncontrados && linksEncontrados.length > 0) {
+                const url = linksEncontrados[0].trim();
+                finalContextData.link = url;
+                sessionLinkMap.set(currentThreadId, url);
+                if (currentThreadId) {
+                  await ThreadContextService.clearThreadMessages(currentThreadId);
+                  sessionOperationMap.delete(currentThreadId);
+                  sessionPropiedadInfoMap.delete(currentThreadId);
+                  finalContextData.operacionTipo = "";
+                  finalContextData.propiedadInfo = "";
+                  await ThreadContextService.updateContext(threadId, userId || "anon", {
+                    operacionTipo: "",
+                    propiedadInfo: "",
+                    link: url
+                  });
+                }
+                try {
+                  const workflow = mastra.getWorkflow("propertyWorkflow");
+                  const run = await workflow.createRun();
+                  const result = await run.start({
+                    inputData: {
+                      url
+                    }
+                  });
+                  if (result.status !== "success") {
+                    console.error(`\u274C Workflow failed: ${result.status}`);
+                  } else if (result.result) {
+                    const outputLogica = result.result;
+                    console.log("\u{1F4E6} Output Workflow recibido", outputLogica);
+                    if (outputLogica.operacionTipo) {
+                      propertyOperationType = outputLogica.operacionTipo;
+                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      finalContextData.propertyAddress = outputLogica.address;
+                      finalContextData.propiedadInfo = outputLogica.propiedadInfo || "Sin descripci\xF3n disponible";
+                      finalContextData.mascotas = outputLogica.mascotas;
+                      finalContextData.requisitos = outputLogica.requisitos;
+                      sessionOperationMap.set(currentThreadId, propertyOperationType);
+                      sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
+                      const validResourceId = userId || "anonymous_user";
+                      await ThreadContextService.updateContext(threadId, validResourceId, {
+                        operacionTipo: propertyOperationType,
+                        propiedadInfo: finalContextData.propiedadInfo,
+                        link: url
+                      });
+                    }
+                  }
+                } catch (workflowErr) {
+                  console.error("\u274C Workflow error:", workflowErr);
+                }
+              }
+              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
+              const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
+              const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
+              const response = await agent.generate(message, {
+                threadId: currentThreadId,
+                resourceId: userId
+              });
+              if (response.toolResults && response.toolResults.length > 0) {
+                response.toolResults.forEach((toolRes) => {
+                  if (toolRes.status === "error" || toolRes.error) {
+                    console.error(`\u274C [ERROR CR\xCDTICO POST-EXEC] Tool '${toolRes.toolName}' fall\xF3:`);
+                    console.error(`   Motivo:`, JSON.stringify(toolRes.error || toolRes.result, null, 2));
+                  }
+                });
+              }
+              if (userId && body.custom_fields) {
+                const parts = response.text.split(/\n\s*\n/).filter((p) => p.trim().length > 0);
+                for (const part of parts) {
+                  await sendToManychat(userId, part);
+                  if (parts.length > 1) {
+                    const randomDelay = Math.floor(Math.random() * (10 - 2 + 1)) + 2;
+                    await sleep(randomDelay);
+                  }
+                }
+              } else {
+                console.log("\u2139\uFE0F Respuesta generada (modo background), pero cliente no es Manychat/Async.");
+              }
+            } catch (bgError) {
+              console.error("\u{1F4A5} Error en proceso background:", bgError);
+              if (userId && body.custom_fields) {
+                await sendToManychat(userId, "Lo siento, tuve un error t\xE9cnico analizando esa informaci\xF3n.");
+              }
+            } finally {
+            }
+          })();
+          if (ackResponse) {
+            return ackResponse;
+          }
+          return c.json({
+            status: "started_background_job"
+          });
+          if (ackResponse) {
+            return ackResponse;
+          }
+          return c.json({
+            status: "started_background_job"
+          });
+        } catch (error) {
+          console.error("\u{1F4A5} Error general en el handler:", error);
+          return c.json({
+            error: "Internal Server Error"
+          }, 500);
+        }
+      }
+    })]
   }
 });
+async function sendToManychat(subscriberId, text) {
+  const apiKey = "3448431:145f772cd4441c32e7a20cfc6d4868f6";
+  const headers = {
+    "Authorization": `Bearer ${apiKey}`,
+    "Content-Type": "application/json"
+  };
+  try {
+    console.log(`1\uFE0F\u20E3 [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
+    const setFieldRes = await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
+      subscriber_id: Number(subscriberId),
+      // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
+      fields: [{
+        field_name: "response1",
+        field_value: text
+      }]
+    }, {
+      headers
+    });
+    console.log("\u2705 Custom Field Set:", setFieldRes.data);
+    console.log(`2\uFE0F\u20E3 [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
+    await sleep(2);
+    const sendFlowRes = await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
+      subscriber_id: Number(subscriberId),
+      flow_ns: "content20250919131239_298410"
+    }, {
+      headers
+    });
+    console.log("\u2705 Flow Sent:", sendFlowRes.data);
+  } catch (err) {
+    console.error("\u274C Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
+  }
+}
 
 export { mastra };

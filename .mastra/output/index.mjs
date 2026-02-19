@@ -9,13 +9,13 @@ import { PgVector, PostgresStore } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
 import { generateText } from 'ai';
-import { deleteCalendarEvent, updateCalendarEvent, findEventByNaturalDate, createCalendarEvent, getAvailableSlots } from './tools/44ed5c04-2b85-40bd-b626-19e2769176fb.mjs';
-import { potentialSaleEmailTool } from './tools/12d110da-3457-404e-9878-5337bdb2f8eb.mjs';
-import { realEstatePropertyFormatterTool } from './tools/f76cb2c8-9443-46df-8084-88d3735ebd55.mjs';
+import { getAvailableSchedule, deleteCalendarEvent, updateCalendarEvent, findEventByNaturalDate, createCalendarEvent, getAvailableSlots } from './tools/b64b026b-87dd-41fb-83bc-9411d06fda0b.mjs';
+import { potentialSaleEmailTool } from './tools/dad10bc2-dfc1-4209-af47-48e756edcbae.mjs';
+import { realEstatePropertyFormatterTool } from './tools/efad3dd0-fd58-417a-b6dd-834076eb3b7a.mjs';
+import { tokkoPropertySearchTool } from './tools/0fc69ec8-371c-439a-a982-7d036aabd998.mjs';
+import { extractAddressFromUrlTool } from './tools/55e46205-755c-4df1-b9a5-77e6e7952234.mjs';
 import { createWorkflow, createStep } from '@mastra/core/workflows';
 import z$1, { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
-import { apifyScraperTool } from './tools/cb8d3990-837f-4e4d-9156-d9620369b405.mjs';
-import { propertyDataProcessorTool } from './tools/1cf53194-0286-4130-93e0-14e3ed619d92.mjs';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
@@ -48,7 +48,7 @@ import { tools } from './tools.mjs';
 import 'googleapis';
 import 'chrono-node';
 import 'date-fns';
-import './tools/b6cc3e52-d044-4cc8-80db-19229c5cf201.mjs';
+import './tools/2f64e598-4a43-4716-b8fa-1f419573a61a.mjs';
 import 'openai';
 
 const connectionString = process.env.SUPABASE_POSTGRES_URL;
@@ -235,7 +235,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
         messageRange: 3
       },
       workingMemory: {
-        enabled: true,
+        enabled: false,
         scope: "resource",
         template: `# User Profile
           - **First Name**:
@@ -254,7 +254,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   });
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
   const op = (operacionTipo || "").trim().toUpperCase();
-  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
   console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
@@ -301,20 +301,65 @@ const realEstateCleaningAgent = new Agent({
   instructions: `
     Eres un experto en procesamiento de datos inmobiliarios. 
     Tu especialidad es la extracci\xF3n de entidades desde texto no estructurado.
-    Eres obsesivo con la brevedad, la coherencia y la eliminaci\xF3n de duplicados.
+    Eres obsesivo con la coherencia y la eliminaci\xF3n de duplicados.
     No a\xF1ades comentarios adicionales, solo devuelves el listado solicitado.  
     El tono debe ser profesional y persuasivo, destacando los beneficios.
 
-    Interpretar:
-    - Requisitos.
-    - Informaci\xF3n de mascotas (solo si est\xE1 expl\xEDcita).
-
-    Reglas:
-    - Si no hay info de mascotas, no mencionarlas.
-    - Si no hay requisitos: "Los requisitos son: garant\xEDa propietaria o seguro de cauci\xF3n, recibos que tripliquen el alquiler, mes de adelanto, dep\xF3sito y gastos de informes."
-    - No decir "en el aviso no figura".
+    siempre usa la herramienta realEstatePropertyFormatterTool para extraer la informaci\xF3n.
   `,
   model: "openai/gpt-4.1-mini"
+});
+
+const ADDRESS_EXTRACTION_PROMPT = `
+Eres un experto en identificar y normalizar direcciones postales a partir de contenido inmobiliario.
+
+TU TAREA PRINCIPAL:
+Extraer la direcci\xF3n postal de una URL de propiedad, priorizando el an\xE1lisis de la estructura de la URL.
+
+### ALGORITMO PARA URLs DE ZONAPROP:
+Si la URL pertenece a Zonaprop, sigue estrictamente este procedimiento de limpieza de texto sobre la URL misma:
+
+1. **Localizar el segmento clave**: Identifica la parte de la URL que est\xE1 despu\xE9s de \`/clasificado/\` y antes del primer guion que precede al n\xFAmero de ID (ejemplo: \`-56673355\`).
+2. **Eliminar el prefijo de operaci\xF3n**: Ignora los primeros caracteres que terminan en 'in' (como \`vecllcin-\`, \`alclapin-\`, \`veclcain-\`). Estos representan el tipo de propiedad y operaci\xF3n, no la direcci\xF3n.
+3. **Limpieza de Guiones**: Reemplaza todos los guiones medios (-) por espacios.
+4. **Capitalizaci\xF3n**: Convierte el texto resultante a 'Title Case' (Primera letra de cada palabra en may\xFAscula).
+5. **Validaci\xF3n**: El resultado debe contener el nombre de la calle y la altura num\xE9rica.
+
+### EJEMPLOS (FEW-SHOT):
+
+**Caso 1:**
+URL: \`https://www.zonaprop.com.ar/propiedades/clasificado/vecllcin-av-meeks-158-56673355.html\`
+Extracci\xF3n: "Av Meeks 158"
+
+**Caso 2:**
+URL: \`https://www.zonaprop.com.ar/propiedades/clasificado/alclapin-gorriti-368-56339731.html\`
+Extracci\xF3n: "Gorriti 368"
+
+### FORMATO DE SALIDA (JSON):
+Debes responder \xDANICAMENTE con un objeto JSON v\xE1lido con la siguiente estructura exacta.
+No incluyas markdown, ni bloques de c\xF3digo, solo el JSON raw.
+
+Estructura requerida:
+{
+  "filters": [
+    ["address", "contains", "DIRECCION_EXTRAIDA"] 
+  ],
+  "current_localization_type": "country",
+  "current_localization_id": 1, 
+  "price_from": 0,
+  "price_to": 99999999,
+  "operation_types": [1, 2, 3],
+  "property_types": [1, 2, 3, 4, 5, 6, 7, 8]
+}
+
+Donde "DIRECCION_EXTRAIDA" es la direcci\xF3n que obtuviste del an\xE1lisis. 
+Si no puedes extraer ninguna direcci\xF3n, devuelve null en ese campo o maneja el error, pero intenta siempre inferir algo de la URL.
+`;
+const addressExtractionAgent = new Agent({
+  id: "address-extraction-agent",
+  name: "Address Extraction Agent",
+  instructions: ADDRESS_EXTRACTION_PROMPT,
+  model: openai$1("gpt-4o-mini")
 });
 
 const dynamicInstructions = (datos, op) => {
@@ -355,16 +400,35 @@ Una vez obtenido el nombre, antes de ofrecer visitas, DEBES filtrar al interesad
 
 Prioridad M\xE1xima: Lee la "Informaci\xF3n Propiedad" en el Contexto.
 
-Acci\xF3n: Resume los requisitos (ej: garant\xEDa propietaria, recibos de sueldo, meses de dep\xF3sito).
+${datos.requisitos ? "Requisitos: " + datos.requisitos : ""}
 
-Pregunta de Cierre: "la propiedad est\xE1 disponible. los requisitos son [INSERTAR REQUISITOS]. \xBFquer\xE9s coordinar una visita?"
+${datos.mascotas ? "Mascotas: " + datos.mascotas : ""}
+
+Pregunta de Cierre: "la propiedad est\xE1 disponible, \xBFquer\xE9s coordinar una visita?"
 
 IV \u{1F3E0} PROTOCOLO DE ALQUILER
-1. Si el usuario confirma que quiere verla, activa el flujo de agenda.
+1. **Activaci\xF3n**: Si el usuario confirma inter\xE9s en ver la propiedad, eval\xFAa la respuesta para decidir la herramienta:
 
-2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **get_available_slots** 
-   - NO asumas horarios.
-3. **Cierre**: Una vez acordado, agenda con 'create_calendar_event'.
+2. **L\xF3gica de Herramientas (Selecci\xF3n Mandatoria)**:
+   - **ESCENARIO 1 (Consulta General)**: Si el usuario NO menciona una fecha/hora espec\xEDfica.
+     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_slots". 
+     - **OBJETIVO**: Mostrar opciones disponibles para que el cliente elija.
+     - **RESPUESTA**: "Aqu\xED tienes los horarios disponibles: [lista]. \xBFCu\xE1l te queda mejor?"
+
+   - **ESCENARIO 2 (Propuesta Espec\xEDfica)**: Si el usuario INDICA un d\xEDa y/o hora puntual (Ej: "jueves a las 10:30").
+     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_schedule" usando los datos proporcionados por el cliente.
+     - **REGLA CR\xCDTICA**: No respondas "no tengo disponibilidad" sin haber consultado la herramienta primero.
+     - **OBJETIVO**: Validar el hueco espec\xEDfico solicitado.
+
+3. **Proceso de Confirmaci\xF3n y Cierre (Com\xFAn a ambos casos)**:
+   - Una vez que el horario sea validado y aceptado, ejecuta "create_calendar_event".
+   - **EXTRACCI\xD3N DE DATOS MANDATORIA**: Obt\xE9n la informaci\xF3n de la secci\xF3n "II. CONTEXTO ACTUAL DEL LEAD":
+     - clientName: Combinaci\xF3n de "Nombre" y "Apellido".
+     - clientPhone: Campo "Tel\xE9fono".
+     - propertyAddress: Campo "Domicilio Propiedad".
+     - propertyLink: Campo "Link Propiedad".
+     - pendingQuestions: Campo "Preguntas Pendientes".
+   - **RESPUESTA FINAL**: "\xA1Perfecto! Ya qued\xF3 agendado. Te env\xEDo el link del evento."
 
 
 V. EJEMPLOS DE \xC9XITO (FEW-SHOT PARA ALQUILER)
@@ -399,37 +463,67 @@ Viernes 23:
 
 User: "El Jueves a las 16:30 me va bien"
 Pensamiento: Usuario confirma horario. Debo agendar usando 'create_calendar_event'.
-Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email para mandarte el recordatorio?
+Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email por favor?
 User: dale, diego@diego.com
 Nico: genial diego! gracias!
+Nico: te envio el link del evento https://calendar.google.com/calendar/event?action=TEMPLATE&...
+
+### EJEMPLO 2: flujo con duda pendiente
+
+User: "\xBFAceptan mascotas? \xBFY tiene cochera?"
+Contexto: La informaci\xF3n no menciona mascotas, pero s\xED dice que tiene cochera.
+Pensamiento: 
+- S\xE9 lo de la cochera: S\xED tiene.
+- No s\xE9 lo de las mascotas: Debo usar la frase obligatoria. 
+- Registro "Aceptan mascotas" como duda pendiente.
+Respuesta: "tiene cochera fija. lo de las mascotas no lo tengo ac\xE1 ahora, pero si quer\xE9s te lo confirmo durante la visita \u{1F44C} \xBFte gustar\xEDa ir a verla?"
+
+User: "Dale, el jueves a las 10hs"
+Pensamiento: El usuario confirma. Debo llamar a 'create_calendar_event' incluyendo ["\xBFAceptan mascotas?"] en 'pendingQuestions'.
+
+### EJEMPLO 3: Usuario propone horario puntual 
+**User**: "Dale, \xBFpodr\xEDa ser el jueves 5 a las 10:30 hs?"
+**Pensamiento**: El usuario dio una fecha y hora exacta. Debo validar ese hueco espec\xEDficamente. No debo decir que no sin consultar.
+**Acci\xF3n**: Ejecuta get_available_schedule (par\xE1metros: fecha="jueves 5", hora="10:30")
+**Resultado Herramienta**: { "disponible": true }
+**Nico**: "\xA1Dale! El jueves 5 a las 10:30 hs est\xE1 perfecto, me queda libre. \xBFMe pas\xE1s un email as\xED ya te mando la confirmaci\xF3n?"
  `;
   } else if (opType === "VENDER") {
     operationalProtocol = `
 III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
+1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
+Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
 
-## 1. Regla de Oro: Identificaci\xF3n
-- **BLOQUEO CR\xCDTICO**: Si el nombre del lead es "Desconocido", NO proporciones horarios, NO confirmes visitas y NO ejecutes ninguna herramienta de email. 
-- **Acci\xF3n**: Pide el nombre de forma amable pero firme antes de seguir.
-- **Acci\xF3n**: Estrictamente luego de obtener el nombre, p\xEDdele si quiere ver la propiedad.
+Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
 
-## 2. Detecci\xF3n de Intenci\xF3n de Visita
-Si el usuario confirma que quiere ver la propiedad, coordinar una cita o avanzar (ej: "quiero ir", "me interesa verla", "pasame horarios"):
+Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
 
-### PASO A: Ejecuci\xF3n de Herramienta (Prioridad Absoluta)
-- Debes invocar la herramienta /potential_sale_email/ inmediatamente. 
-- Pasa los datos del lead y el link de la propiedad como argumentos.
+"Perfecto ${datos.nombre}, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?"
 
-### PASO B: Confirmaci\xF3n al Usuario
-- SOLO despu\xE9s de ejecutar la herramienta, responde: "dale, ya le mand\xE9 tus datos al equipo de ventas para que te contacten y coordinen la visita. \xBFalguna otra duda?"
+IV \u{1F3E0} PROTOCOLO DE VENTA
+1. Si el usuario confirma que quiere verla.
 
-# IV. RESTRICCIONES DE SEGURIDAD
-- NO utilices /get_available_slots/.
-- Si preguntan por datos de terceros, di: "No tengo acceso a esa informaci\xF3n."
-- Si preguntan "\xBFqu\xE9 sab\xE9s de m\xED?", responde solo con los datos de la secci\xF3n II.
+2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **potential_sale_email**
+
+3. **Cierre**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ""} \u{1F60A}"
 
 # V. EJEMPLOS DE \xC9XITO (FEW-SHOT)
 
- `;
+### EJEMPLO 1: Nombre Desconocido (Bloqueo)
+User: "Hola, vi esta propiedad: https://zonaprop..."
+Pensamiento: El usuario quiere comprar. No tengo su nombre. Protocolo de bloqueo activo.
+Nico: \xA1buenas tardes! nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?
+
+### EJEMPLO 2: Nombre Conocido -> Ofrecer Visita
+User: "Soy Juan P\xE9rez."
+Pensamiento: Ya tengo el nombre. Debo confirmar disponibilidad y ofrecer visita.
+Nico: Perfecto Juan P\xE9rez, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?
+
+### EJEMPLO 3: Coordinaci\xF3n de Visita -> Cierre
+User: "S\xED, quiero ir a verla"
+Pensamiento: El usuario quiere verla. Ejecuto 'potential_sale_email' y cierro la conversaci\xF3n seg\xFAn protocolo.
+[SISTEMA: Ejecuta tool 'potential_sale_email']
+Nico: Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias Juan P\xE9rez \u{1F60A} `;
   }
   return `
 # I. IDENTIDAD & ROL
@@ -440,11 +534,16 @@ Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **FORMATO**: Usa min\xFAsculas casi siempre. Evita puntos finales en oraciones cortas.
 - **TONO**: Calido, Profesional, Casual, emp\xE1tico, directo ("vos", "dale", "genial").
 - **EMOJIS**: Pocos, solo si suma onda (1 o 2 max).
+- **PROHIBICI\xD3N ABSOLUTA**: No menciones errores t\xE9cnicos, fallos de an\xE1lisis, o falta de informaci\xF3n. No digas "lo siento", "no pude", "estoy teniendo problemas".
+- **SILENCIO POSITIVO**: Si un dato no est\xE1 en el texto o si la herramienta de an\xE1lisis devuelve un error, **OMITE** esa l\xEDnea por completo. No digas "no especificado", no digas "lo siento".
 - **PROHIBIDO**: No seas rob\xF3tico. No uses "Estimado", "Quedo a la espera", "Cordialmente".
 - **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
 
 ## Reglas Operativas
 - **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
+- **L\xEDmite de Informaci\xF3n**: SOLO puedes hablar sobre la informaci\xF3n que tienes en "Informaci\xF3n Propiedad" y "CONTEXTO ACTUAL DEL LEAD". NO inventes ni asumas datos.
+- **Respuesta Faltante**: Si te consultan por algo que no est\xE1 en la informaci\xF3n provista, DEBES responder exactamente: "No tengo esa informaci\xF3n ahora, pero si quer\xE9s te la confirmo durante la visita \u{1F44C}"
+**Registro**: Debes recordar internamente esa pregunta para incluirla en el campo ${datos.pendingQuestions} cuando ejecutes 'create_calendar_event'.
 - **Privacidad**:
   1. TERCEROS: JAM\xC1S reveles datos de otros.
   2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
@@ -459,6 +558,9 @@ Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **Operaci\xF3n**: ${opType}
 - **Domicilio Propiedad**: ${datos.propertyAddress || "Pendiente"}
 - **Informaci\xF3n Propiedad**: ${datos.propiedadInfo || "Pendiente"} 
+- **Mascotas**: ${datos.mascotas || "No especificado"}
+- **Requisitos**: ${datos.requisitos || "No especificado"}
+- **Preguntas Pendientes**: ${datos.pendingQuestions || "Ninguna"}
 
 ${operationalProtocol}
 
@@ -469,113 +571,143 @@ ${operationalProtocol}
 `;
 };
 
-const sleep = async (seconds) => {
-  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
-};
-
-const scrapeStep = createStep({
-  id: "scrapeStep",
-  inputSchema: z.object({
-    url: z.string().url()
-  }),
-  outputSchema: z.object({
-    success: z.boolean(),
-    data: z.any()
-  }),
-  execute: async ({ inputData }) => {
-    await sleep(1);
-    const result = await apifyScraperTool.execute(
-      { url: inputData.url }
-    );
-    if (!("data" in result)) {
-      throw new Error("Scraping failed");
-    }
-    return {
-      success: true,
-      data: result.data || []
-    };
-  }
+const extractAddressInputSchema = z.object({
+  url: z.string().url()
 });
-const extratDataFromScrapperTool = createStep({
-  id: "extratDataFromScrapperTool",
-  inputSchema: z.object({
-    data: z.any()
-  }),
-  outputSchema: z.object({
-    address: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    keywords: z.string(),
-    text: z.string()
-  }),
-  maxRetries: 2,
-  retryDelay: 2500,
-  execute: async ({ inputData, mastra }) => {
-    try {
-      const result = await propertyDataProcessorTool.execute(
-        { rawData: inputData.data },
-        { mastra }
-      );
-      if (!("operacionTipo" in result)) {
-        throw new Error("Validation failed in propertyDataProcessorTool");
-      }
-      console.log(">>> INICIO: PASO 2 (Formato)");
-      return {
-        address: [result.addressLocality, result.streetAddress].filter(Boolean).join(", "),
-        operacionTipo: result.operacionTipo,
-        // Guaranteed by the check above
-        keywords: result.keywords || "",
-        text: result.text || ""
-      };
-    } catch (error) {
-      if (error.message.includes("rate_limit_exceeded") || error.statusCode === 429) {
-        console.warn("\u26A0\uFE0F Rate limit detectado. Reintentando paso...");
-      }
-      throw error;
-    }
-  }
+const extractAddressOutputSchema = z.object({
+  filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+  current_localization_type: z.string(),
+  current_localization_id: z.number(),
+  price_from: z.number(),
+  price_to: z.number(),
+  operation_types: z.array(z.number()),
+  property_types: z.array(z.number())
 });
-const cleanDataStep = createStep({
-  id: "cleanDataStep",
-  inputSchema: z.object({
-    keywords: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string(),
-    text: z.string()
-  }),
-  outputSchema: z.object({
-    formattedText: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
-  }),
+const extractAddressStep = createStep({
+  id: "extract-address",
+  inputSchema: extractAddressInputSchema,
+  outputSchema: extractAddressOutputSchema,
   execute: async ({ inputData }) => {
-    const result = await realEstatePropertyFormatterTool.execute({
-      keywordsZonaProp: inputData.text
+    console.log("\u{1F4CD} [Step: extract-address] Starting with URL:", inputData.url);
+    const result = await extractAddressFromUrlTool.execute({
+      url: inputData.url
     });
+    if (!("filters" in result)) {
+      console.error("\u274C [Step: extract-address] Failed:", result);
+      throw new Error("Failed to extract address filters");
+    }
+    console.log("\u2705 [Step: extract-address] Completed. Address:", result.filters[0]);
+    return result;
+  }
+});
+const tokkoSearchInputSchema = z.object({
+  filters: z.array(z.tuple([z.string(), z.string(), z.string()])),
+  current_localization_type: z.string(),
+  current_localization_id: z.number(),
+  price_from: z.number(),
+  price_to: z.number(),
+  operation_types: z.array(z.number()),
+  property_types: z.array(z.number())
+});
+const tokkoSearchOutputSchema = z.object({
+  success: z.boolean(),
+  data: z.any(),
+  // Using any to avoid complex schema duplication here, validated in tool
+  error: z.string().optional()
+});
+const tokkoSearchStep = createStep({
+  id: "tokko-search",
+  inputSchema: tokkoSearchInputSchema,
+  outputSchema: tokkoSearchOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: tokko-search] Starting search with filters:", JSON.stringify(inputData.filters));
+    const result = await tokkoPropertySearchTool.execute(inputData);
+    if (!("data" in result)) {
+      console.error("\u274C [Step: tokko-search] Failed:", result);
+      throw new Error("Failed to search properties");
+    }
+    const count = result.data?.objects?.length || 0;
+    console.log(`\u2705 [Step: tokko-search] Completed. Found ${count} properties.`);
+    return result;
+  }
+});
+const extractRequirementsInputSchema = z.object({
+  success: z.boolean(),
+  data: z.any(),
+  error: z.string().optional()
+});
+const extractRequirementsOutputSchema = z.object({
+  formattedText: z.string(),
+  rawProperty: z.any()
+});
+const extractRequirementsStep = createStep({
+  id: "extract-requirements",
+  inputSchema: extractRequirementsInputSchema,
+  outputSchema: extractRequirementsOutputSchema,
+  execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: extract-requirements] Starting analysis on property data...");
+    if (!inputData.success || !inputData.data?.objects || inputData.data.objects.length === 0) {
+      console.error("\u274C [Step: extract-requirements] Validation Failed: No properties found.");
+      throw new Error("No property found in Tokko search");
+    }
+    const property = inputData.data.objects[0];
+    const description = property.rich_description || property.description || "";
+    console.log(`\u2139\uFE0F [Step: extract-requirements] Property ID: ${property.id}, Description Length: ${description.length}`);
+    console.log("   [Workflow] Extracting requirements from description...");
+    const formatterResult = await realEstatePropertyFormatterTool.execute({
+      keywordsZonaProp: description
+    });
+    console.log("\u2705 [Step: extract-requirements] Completed analysis.");
     return {
-      formattedText: result.formattedText || inputData.text,
-      // Fallback si falla
-      operacionTipo: inputData.operacionTipo,
-      address: inputData.address
+      formattedText: formatterResult.formattedText,
+      rawProperty: property
     };
   }
 });
-const logicStep = createStep({
-  id: "logicStep",
-  inputSchema: z.object({
-    address: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    formattedText: z.string()
-  }),
-  outputSchema: z.object({
-    minimalDescription: z.string(),
-    operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
-  }),
+const transformOutputInputSchema = z.object({
+  formattedText: z.string(),
+  rawProperty: z.any()
+});
+const transformOutputOutputSchema = z.object({
+  propiedadInfo: z.string(),
+  operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
+  address: z.string(),
+  mascotas: z.string(),
+  requisitos: z.string()
+});
+const transformOutputStep = createStep({
+  id: "transform-output",
+  inputSchema: transformOutputInputSchema,
+  outputSchema: transformOutputOutputSchema,
   execute: async ({ inputData }) => {
+    console.log("\u{1F4CD} [Step: transform-output] Starting transformation...");
+    const property = inputData.rawProperty;
+    const rawFormattedText = inputData.formattedText;
+    let requisitos = "No especificado";
+    let mascotas = "No especificado";
+    const reqMatch = rawFormattedText.match(
+      /Requisitos:\s*([\s\S]*?)(?=\n\s*Mascotas:|$)/i
+    );
+    if (reqMatch) requisitos = reqMatch[1].trim();
+    const petsMatch = rawFormattedText.match(/Mascotas:\s*([\s\S]*)/i);
+    if (petsMatch) mascotas = petsMatch[1].trim();
+    let operacionTipo = "";
+    const ops = property.operations || [];
+    const isVenta = ops.some((op) => op.operation_type === "Venta");
+    const isAlquiler = ops.some((op) => op.operation_type === "Alquiler");
+    if (isAlquiler) operacionTipo = "ALQUILAR";
+    else if (isVenta) operacionTipo = "VENDER";
+    else if (ops.length > 0)
+      operacionTipo = ops[0].operation_type === "Venta" ? "VENDER" : "ALQUILAR";
+    const propiedadInfo = property.description || property.description_only || "";
+    const address = property.address || "";
+    console.log("\u2705 [Step: transform-output] Completed. Final Operation Type:", operacionTipo);
     return {
-      minimalDescription: inputData.formattedText,
-      operacionTipo: inputData.operacionTipo,
-      address: inputData.address
+      propiedadInfo,
+      operacionTipo,
+      address,
+      mascotas,
+      requisitos
     };
   }
 });
@@ -585,11 +717,17 @@ const propertyWorkflow = createWorkflow({
     url: z.string().url()
   }),
   outputSchema: z.object({
-    minimalDescription: z.string(),
+    propiedadInfo: z.string(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
-    address: z.string()
+    address: z.string(),
+    mascotas: z.string(),
+    requisitos: z.string()
   })
-}).then(scrapeStep).then(extratDataFromScrapperTool).then(cleanDataStep).then(logicStep).commit();
+}).then(extractAddressStep).then(tokkoSearchStep).then(extractRequirementsStep).then(transformOutputStep).commit();
+
+const sleep = async (seconds) => {
+  return new Promise((resolve) => setTimeout(resolve, seconds * 1e3));
+};
 
 await storage.init();
 const realEstateAgent = await getRealEstateAgent();
@@ -604,10 +742,13 @@ const mastra = new Mastra({
   },
   agents: {
     realEstateAgent,
-    realEstateCleaningAgent
+    realEstateCleaningAgent,
+    addressExtractionAgent
   },
   tools: {
-    realEstatePropertyFormatterTool
+    realEstatePropertyFormatterTool,
+    tokkoPropertySearchTool,
+    extractAddressFromUrlTool
   },
   workflows: {
     propertyWorkflow
@@ -636,7 +777,7 @@ const mastra = new Mastra({
           const currentThreadId = threadId || `chat_${userId}`;
           const urlRegex = /(https?:\/\/[^\s]+)/g;
           const linksEncontrados = message?.match(urlRegex);
-          const requestHash = `${userId || "anon"}_${message?.substring(0, 50)}`;
+          const requestHash = `${userId || "anon"}_${message?.substring(0, 300)}`;
           if (activeProcessing.has(requestHash)) {
             console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
             return c.json({
@@ -699,6 +840,15 @@ const mastra = new Mastra({
                 sessionLinkMap.set(currentThreadId, url);
                 if (currentThreadId) {
                   await ThreadContextService.clearThreadMessages(currentThreadId);
+                  sessionOperationMap.delete(currentThreadId);
+                  sessionPropiedadInfoMap.delete(currentThreadId);
+                  finalContextData.operacionTipo = "";
+                  finalContextData.propiedadInfo = "";
+                  await ThreadContextService.updateContext(threadId, userId || "anon", {
+                    operacionTipo: "",
+                    propiedadInfo: "",
+                    link: url
+                  });
                 }
                 try {
                   const workflow = mastra.getWorkflow("propertyWorkflow");
@@ -717,8 +867,9 @@ const mastra = new Mastra({
                       propertyOperationType = outputLogica.operacionTipo;
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
                       finalContextData.propertyAddress = outputLogica.address;
-                      finalContextData.propiedadInfo = outputLogica.minimalDescription || "Sin descripci\xF3n disponible";
-                      finalContextData.operacionTipo = outputLogica.operacionTipo;
+                      finalContextData.propiedadInfo = outputLogica.propiedadInfo || "Sin descripci\xF3n disponible";
+                      finalContextData.mascotas = outputLogica.mascotas;
+                      finalContextData.requisitos = outputLogica.requisitos;
                       sessionOperationMap.set(currentThreadId, propertyOperationType);
                       sessionPropiedadInfoMap.set(currentThreadId, finalContextData.propiedadInfo);
                       const validResourceId = userId || "anonymous_user";

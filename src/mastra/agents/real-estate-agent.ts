@@ -33,7 +33,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
         messageRange: 3,
       },
       workingMemory: {
-        enabled: true,
+        enabled: false,
         scope: "resource",
         template: `# User Profile
           - **First Name**:
