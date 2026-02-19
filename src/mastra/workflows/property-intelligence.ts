@@ -116,6 +116,11 @@ const extractRequirementsStep = createStep({
       keywordsZonaProp: description,
     });
 
+    if (!('formattedText' in formatterResult)) {
+      console.error("❌ [Step: extract-requirements] Validation Failed:", formatterResult);
+      throw new Error("Failed to extract requirements");
+    }
+
     console.log("✅ [Step: extract-requirements] Completed analysis.");
     return {
       formattedText: formatterResult.formattedText,

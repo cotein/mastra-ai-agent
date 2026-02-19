@@ -77,7 +77,6 @@ export const mastra = new Mastra({
             const requestHash = `${userId || 'anon'}_${message?.substring(0, 300)}`; 
             
             if (activeProcessing.has(requestHash)) {
-                 console.log(`⚠️ Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
                  return c.json({ status: "ignored_duplicate" }); 
             }
             
@@ -91,7 +90,6 @@ export const mastra = new Mastra({
             // Enviamos el ACK *antes* de cualquier operación de base de datos o lógica pesada.
             let ackResponse = undefined;
             if (userId && body.custom_fields) {
-               console.log("⚡ Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
                ackResponse = c.json({
                    response_text: "", // Texto vacío para que Manychat no muestre nada y espere el Push
                    status: "processing"
@@ -189,7 +187,9 @@ export const mastra = new Mastra({
                           console.error(`❌ Workflow failed: ${result.status}`);
                         } else if (result.result) {
                             const outputLogica = result.result;
-                            console.log("📦 Output Workflow recibido",   outputLogica);
+                            console.log("📝 [Output Workflow recibido] ".repeat(20));
+                            console.log("📝 [Output Workflow recibido] Generando instrucciones con:", outputLogica);
+                            console.log("📝 [Output Workflow recibido] ".repeat(20));
                             // Validar que el output tenga la estructura esperada
                             if (outputLogica.operacionTipo) {
                                 propertyOperationType = outputLogica.operacionTipo;
@@ -218,12 +218,17 @@ export const mastra = new Mastra({
                         console.error("❌ Workflow error:", workflowErr);
                       }
                     }
-
+                    
                     // C. GENERACIÓN DEL PROMPT FINAL
+                    console.log("📝 [PROMPT] ".repeat(20));
                     console.log("📝 [PROMPT] Generando instrucciones con:", finalContextData);
+                    console.log("📝 [PROMPT] ".repeat(20));
                     const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase() as OperacionTipo);
                     
                     // D. CREACIÓN DINÁMICA DEL AGENTE
+                    console.log("🛠️ [AGENTE] ".repeat(20));
+                    console.log("🛠️ [AGENTE] Generando agente con:", contextoAdicional);
+                    console.log("🛠️ [AGENTE] ".repeat(20));
                     const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
                     
                     const response = await agent.generate(message, {
@@ -254,9 +259,7 @@ export const mastra = new Mastra({
                                 await sleep(randomDelay); 
                             }
                         }
-                    } else {
-                        console.log("ℹ️ Respuesta generada (modo background), pero cliente no es Manychat/Async.");
-                    }
+                    } 
 
                 } catch (bgError: any) {
                     console.error("💥 Error en proceso background:", bgError);
@@ -318,7 +321,6 @@ async function sendToManychat(subscriberId: string, text: string) {
     };
 
     try {
-        console.log(`1️⃣ [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
         
         // 1. Set Custom Fields
         const setFieldRes = await axios.post('https://api.manychat.com/fb/subscriber/setCustomFields', {
@@ -330,20 +332,13 @@ async function sendToManychat(subscriberId: string, text: string) {
                 }
             ]
         }, { headers });
-        
-        console.log("✅ Custom Field Set:", setFieldRes.data);
 
-
-        console.log(`2️⃣ [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
-        
         await sleep(2)
         // 2. Send Flow
         const sendFlowRes = await axios.post('https://api.manychat.com/fb/sending/sendFlow', {
             subscriber_id: Number(subscriberId),
             flow_ns: "content20250919131239_298410"
         }, { headers });
-
-        console.log("✅ Flow Sent:", sendFlowRes.data);
 
     } catch (err: any) {
         // Loguear TODO el error para ver qué dice Manychat

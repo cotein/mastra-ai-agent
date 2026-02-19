@@ -504,7 +504,6 @@ Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
 
 ## Reglas Operativas
-- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
 - **L\xEDmite de Informaci\xF3n**: SOLO puedes hablar sobre la informaci\xF3n que tienes en "Informaci\xF3n Propiedad" y "CONTEXTO ACTUAL DEL LEAD". NO inventes ni asumas datos.
 - **Respuesta Faltante**: Si te consultan por algo que no est\xE1 en la informaci\xF3n provista, DEBES responder exactamente: "No tengo esa informaci\xF3n ahora, pero si quer\xE9s te la confirmo durante la visita \u{1F44C}"
 **Registro**: Debes recordar internamente esa pregunta para incluirla en el campo ${datos2.pendingQuestions} cuando ejecutes 'create_calendar_event'.
@@ -621,6 +620,10 @@ const extractRequirementsStep = createStep({
     const formatterResult = await realEstatePropertyFormatterTool.execute({
       keywordsZonaProp: description
     });
+    if (!("formattedText" in formatterResult)) {
+      console.error("\u274C [Step: extract-requirements] Validation Failed:", formatterResult);
+      throw new Error("Failed to extract requirements");
+    }
     console.log("\u2705 [Step: extract-requirements] Completed analysis.");
     return {
       formattedText: formatterResult.formattedText,
@@ -743,7 +746,6 @@ const mastra = new Mastra({
           const linksEncontrados = message?.match(urlRegex);
           const requestHash = `${userId || "anon"}_${message?.substring(0, 300)}`;
           if (activeProcessing.has(requestHash)) {
-            console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
             return c.json({
               status: "ignored_duplicate"
             });
@@ -752,7 +754,6 @@ const mastra = new Mastra({
           setTimeout(() => activeProcessing.delete(requestHash), 15e3);
           let ackResponse = void 0;
           if (userId && body.custom_fields) {
-            console.log("\u26A1 Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
             ackResponse = c.json({
               response_text: "",
               // Texto vacío para que Manychat no muestre nada y espere el Push
@@ -826,7 +827,9 @@ const mastra = new Mastra({
                     console.error(`\u274C Workflow failed: ${result.status}`);
                   } else if (result.result) {
                     const outputLogica = result.result;
-                    console.log("\u{1F4E6} Output Workflow recibido", outputLogica);
+                    console.log("\u{1F4DD} [Output Workflow recibido] ".repeat(20));
+                    console.log("\u{1F4DD} [Output Workflow recibido] Generando instrucciones con:", outputLogica);
+                    console.log("\u{1F4DD} [Output Workflow recibido] ".repeat(20));
                     if (outputLogica.operacionTipo) {
                       propertyOperationType = outputLogica.operacionTipo;
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
@@ -848,8 +851,13 @@ const mastra = new Mastra({
                   console.error("\u274C Workflow error:", workflowErr);
                 }
               }
+              console.log("\u{1F4DD} [PROMPT] ".repeat(20));
               console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
+              console.log("\u{1F4DD} [PROMPT] ".repeat(20));
               const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
+              console.log("\u{1F6E0}\uFE0F [AGENTE] ".repeat(20));
+              console.log("\u{1F6E0}\uFE0F [AGENTE] Generando agente con:", contextoAdicional);
+              console.log("\u{1F6E0}\uFE0F [AGENTE] ".repeat(20));
               const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
               const response = await agent.generate(message, {
                 threadId: currentThreadId,
@@ -872,8 +880,6 @@ const mastra = new Mastra({
                     await sleep(randomDelay);
                   }
                 }
-              } else {
-                console.log("\u2139\uFE0F Respuesta generada (modo background), pero cliente no es Manychat/Async.");
               }
             } catch (bgError) {
               console.error("\u{1F4A5} Error en proceso background:", bgError);
@@ -906,8 +912,7 @@ async function sendToManychat(subscriberId, text) {
     "Content-Type": "application/json"
   };
   try {
-    console.log(`1\uFE0F\u20E3 [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
-    const setFieldRes = await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
+    await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
       subscriber_id: Number(subscriberId),
       // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
       fields: [{
@@ -917,16 +922,13 @@ async function sendToManychat(subscriberId, text) {
     }, {
       headers
     });
-    console.log("\u2705 Custom Field Set:", setFieldRes.data);
-    console.log(`2\uFE0F\u20E3 [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
     await sleep(2);
-    const sendFlowRes = await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
+    await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
       subscriber_id: Number(subscriberId),
       flow_ns: "content20250919131239_298410"
     }, {
       headers
     });
-    console.log("\u2705 Flow Sent:", sendFlowRes.data);
   } catch (err) {
     console.error("\u274C Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
   }
