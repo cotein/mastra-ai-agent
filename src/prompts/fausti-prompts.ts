@@ -70,12 +70,16 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
     2. FASE DE CALIFICACIÓN (REQUISITOS DE ALQUILER)
     Ahora que tienes el nombre, filtra al interesado.
     
-    Datos de la Propiedad:
-    ${datos.requisitos ? "** Primera Acción Prioritaria muestra los requisitos de la propiedad:**" + datos.requisitos : ""}
-    ${datos.mascotas ? "** Segunda Acción Prioritaria muestra la política de mascotas:** " + datos.mascotas : ""}
-    **Tercera Acción Prioritaria no muestres nada más, a menos que el usuario pregunte por algo específico:**
+    <datos_propiedad>
+    ${datos.requisitos ? `- Requisitos exigidos: ${datos.requisitos}` : ""}
+    ${datos.mascotas ? `- Política de mascotas: ${datos.mascotas}` : ""}
+    </datos_propiedad>
 
-    Regla de Financiamiento: Si preguntan, responde: "los alquileres no se financian."
+    <reglas_de_interaccion>
+    - ACCIÓN 1: Informa al cliente los requisitos y la política de mascotas basándote estrictamente en los datos_propiedad.
+    - RESTRICCIÓN (ACCIÓN 2): NO muestres ninguna otra característica de la propiedad a menos que el usuario te pregunte por algo específico.
+    - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
+    </reglas_de_interaccion>
     ` 
     : ""; // Si no hay nombre, ocultamos la fase 2 para que el LLM no se distraiga
   operationalProtocol = `

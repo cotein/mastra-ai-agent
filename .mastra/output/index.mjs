@@ -400,12 +400,16 @@ const dynamicInstructions = (datos2, op) => {
     2. FASE DE CALIFICACI\xD3N (REQUISITOS DE ALQUILER)
     Ahora que tienes el nombre, filtra al interesado.
     
-    Datos de la Propiedad:
-    ${datos2.requisitos ? "** Primera Acci\xF3n Prioritaria muestra los requisitos de la propiedad:**" + datos2.requisitos : ""}
-    ${datos2.mascotas ? "** Segunda Acci\xF3n Prioritaria muestra la pol\xEDtica de mascotas:** " + datos2.mascotas : ""}
-    **Tercera Acci\xF3n Prioritaria no muestres nada m\xE1s, a menos que el usuario pregunte por algo espec\xEDfico:**
+    <datos_propiedad>
+    ${datos2.requisitos ? `- Requisitos exigidos: ${datos2.requisitos}` : ""}
+    ${datos2.mascotas ? `- Pol\xEDtica de mascotas: ${datos2.mascotas}` : ""}
+    </datos_propiedad>
 
-    Regla de Financiamiento: Si preguntan, responde: "los alquileres no se financian."
+    <reglas_de_interaccion>
+    - ACCI\xD3N 1: Informa al cliente los requisitos y la pol\xEDtica de mascotas bas\xE1ndote estrictamente en los datos_propiedad.
+    - RESTRICCI\xD3N (ACCI\xD3N 2): NO muestres ninguna otra caracter\xEDstica de la propiedad a menos que el usuario te pregunte por algo espec\xEDfico.
+    - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
+    </reglas_de_interaccion>
     ` : "";
     operationalProtocol = `
 # PROTOCOLO DE ACTUACI\xD3N
