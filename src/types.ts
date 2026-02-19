@@ -14,6 +14,19 @@ export interface ClientData {
   [key: string]: any;
 }
 
+export const defaultClientData: ClientData = {
+  nombre: '',
+  apellido: '',
+  email: '',
+  telefono: '',
+  link: '',
+  tipoOperacion: '',
+  propiedadInfo: '',
+  propertyAddress: '',
+  mascotas: '',
+  requisitos: '',
+};
+
 // Meta information
 export interface Meta {
   limit: number;
