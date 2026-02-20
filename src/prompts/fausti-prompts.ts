@@ -48,6 +48,7 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
 
   // --- 3. LÓGICA DE OPERACIÓN (FASE 3 Y 4) ---
   let operationalProtocol = "";
+  let ejemplosFewShot = "";
 
   if (opType === 'ALQUILAR') {
     // Construimos las secciones dinámicamente
@@ -145,7 +146,7 @@ PASO 2: CONFIRMACIÓN Y RESERVA (CRÍTICO)
   </manejo_de_dudas>
  `
  
- const ejemplosFewShot = `
+  ejemplosFewShot = `
 V. EJEMPLOS DE ÉXITO (FEW-SHOT PARA ALQUILER)
 
 Estos ejemplos muestran cómo debes pensar y responder. Presta especial atención a la validación de requisitos y al formato de las herramientas.
@@ -291,6 +292,8 @@ User: "Sí, quiero ir a verla"
 Pensamiento: El usuario quiere verla. Ejecuto 'potential_sale_email' y cierro la conversación según protocolo.
 [SISTEMA: Ejecuta tool 'potential_sale_email']
 Nico: Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias Juan Pérez 😊 `;
+
+  ejemplosFewShot = ""
   }
 //5 CIERRE
   let cierre = "";
@@ -346,6 +349,8 @@ Actúa como una persona real escribiendo rápido por WhatsApp:
 - **Preguntas Pendientes**: ${datos.pendingQuestions || 'Ninguna'}
 
 ${operationalProtocol}
+
+${ejemplosFewShot}
 
 # SALUDO INICIAL (Solo si es el primer mensaje):
 "${saludoSugerido}"
