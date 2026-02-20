@@ -694,7 +694,7 @@ const DAY_MAP: Record<string, number> = { 'DOMINGO': 0, 'LUNES': 1, 'MARTES': 2,
 
 export const getAvailableSchedule = createTool({
     id: 'get_available_schedule',
-    description: 'Busca disponibilidad en la agenda aplicando lógica de negocio basada en la intención del usuario (urgencia, día específico, rango, preferencia horaria).',
+    description: 'Úsala SIEMPRE que el usuario pregunte si hay disponibilidad en un día, fecha u horario específico para una visita (ejemplo: "¿tenes disponibilidad el jueves 26?", "¿podemos ir el viernes a la tarde?"). Nunca digas que no tienes esta información; usa siempre esta herramienta para verificarlo.',
     inputSchema: z.object({
         intent: z.enum(['SPECIFIC_DAY', 'PART_OF_DAY', 'RANGE', 'URGENT', 'CONSTRAINT', 'GENERAL'])
             .describe('La intención principal detectada en la solicitud del usuario (Casos A-F)'),

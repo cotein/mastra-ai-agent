@@ -410,6 +410,15 @@ const dynamicInstructions = (datos2, op) => {
     - RESTRICCI\xD3N (ACCI\xD3N 2): NO muestres ninguna otra caracter\xEDstica de la propiedad a menos que el usuario te pregunte por algo espec\xEDfico.
     - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
     </reglas_de_interaccion>
+
+    <reglas_de_calificacion_y_rechazo>
+      1. REQUISITOS FINANCIEROS: El usuario debe contar con garant\xEDa y justificaci\xF3n de ingresos (recibo de sueldo, monotributo, etc.).
+      2. SI NO CUMPLE: NO le ofrezcas agendar una visita bajo ninguna circunstancia.
+      3. PROTOCOLO DE DERIVACI\xD3N: 
+        - Si no cumple los requisitos, dile exactamente: "Entiendo, [Nombre]. En este caso, podr\xEDamos ver si hay alguna otra opci\xF3n que se ajuste a tus posibilidades. \xBFTe gustar\xEDa que te contacte alguien del equipo para explorar alternativas?"
+        - Si el usuario responde afirmativamente (ej. "dale", "s\xED", "me parece bien"), **ES OBLIGATORIO que ejecutes INMEDIATAMENTE la herramienta "notificar_equipo"**.
+      4. RESPUESTA DE CIERRE: Solo despu\xE9s de que la herramienta "notificar_equipo" te devuelva un estado exitoso, desp\xEDdete diciendo: "\xA1Perfecto! Ya le pas\xE9 tus datos al equipo. Se van a estar comunicando con vos muy pronto \u{1F60A}".
+    </reglas_de_calificacion_y_rechazo>
     ` : "";
     operationalProtocol = `
 # PROTOCOLO DE ACTUACI\xD3N
