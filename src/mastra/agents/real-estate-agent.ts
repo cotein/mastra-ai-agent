@@ -16,6 +16,8 @@ import {
 } from '../tools/google-calendar';
 import { potentialSaleEmailTool } from '../tools/index';
 
+import { notificarEquipoTool } from '../tools/notificar_equipo';
+
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
 
@@ -55,7 +57,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
 
   const op = (operacionTipo || '').trim().toUpperCase();
   const selectedTools: any = op === 'ALQUILAR' 
-    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule }
+    ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule, notificar_equipo: notificarEquipoTool }
     : op === 'VENDER'
     ? { potential_sale_email: potentialSaleEmailTool }
     : { };
