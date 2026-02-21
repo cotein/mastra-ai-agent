@@ -29,7 +29,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
     vector: vectorStore,
     embedder: openai.embedding("text-embedding-3-small"),
     options: {
-      lastMessages: 15,
+      lastMessages: 31,
       semanticRecall: { 
         topK: 3, 
         messageRange: 3,
