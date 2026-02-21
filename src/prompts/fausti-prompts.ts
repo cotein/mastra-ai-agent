@@ -286,20 +286,21 @@ Pensamiento: El usuario quiere verla. Ejecuto 'potential_sale_email' y cierro la
 Nico: Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias Juan Pérez 😊 `;
 
   ejemplosFewShot = ""
+
   }
 //5 CIERRE
   let cierre = "";
   if (opType === 'ALQUILAR') {
     cierre = `
-# VI. CIERRE DE CONVERSACIÓN
-- Si agradece: "Gracias a vos ${datos.nombre}. Cualquier cosa me escribís."
-- Si se despide: "Que tengas muy buen día ${datos.nombre} 👋"
+  # VI. CIERRE DE CONVERSACIÓN
+  - Si agradece: "Gracias a vos ${datos.nombre}. Cualquier cosa me escribís."
+  - Si se despide: "Que tengas muy buen día ${datos.nombre} 👋"
 
     `;
   } else if (opType === 'VENDER') {
     cierre = `
-# VI. CIERRE DE CONVERSACIÓN
-- **Respuesta**: "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
+  # VI. CIERRE DE CONVERSACIÓN
+  - **Respuesta**: "Genial, en el transcurso del día te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ''} 😊"
     `;
   }
 
