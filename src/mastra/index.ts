@@ -10,6 +10,23 @@ import { getRealEstateAgent } from "./agents/real-estate-agent";
 import { realEstateCleaningAgent } from "./agents/real-estate-cleaning-agent";
 import { addressExtractionAgent } from "./agents/address-extraction-agent";
 import { realEstatePropertyFormatterTool } from "./tools/real-estate-property-formatter";
+import { 
+  createCalendarEvent, 
+  listCalendarEvents, 
+  getCalendarEvent, 
+  updateCalendarEvent, 
+  deleteCalendarEvent, 
+  getAvailableSlots,
+  findEventByNaturalDate,
+  getAvailableSchedule 
+} from "./tools/google-calendar";
+import { sendEmail, listEmails } from "./tools/google-gmail";
+import { potentialSaleEmailTool } from "./tools/potential_sale_email";
+import { notificarEquipoTool } from "./tools/notificar_equipo";
+import { llmDateParser } from "./tools/llm-date-parser";
+import { propertyDataProcessorTool } from "./tools/property-data-processor";
+import { formatPropertyDataTool } from "./tools/format-property-data";
+import { apifyScraperTool } from "./tools/extraer_datos_propiedad_url";
 
 // Storage y Servicios
 import { storage, vectorStore, ThreadContextService } from './storage'; 
@@ -55,7 +72,27 @@ export const mastra = new Mastra({
     storage,
     vectors: { vectorStore },
     agents: { realEstateAgent, realEstateCleaningAgent, addressExtractionAgent },
-    tools: { realEstatePropertyFormatterTool, tokkoPropertySearchTool, extractAddressFromUrlTool },
+    tools: { 
+      realEstatePropertyFormatterTool, 
+      tokkoPropertySearchTool, 
+      extractAddressFromUrlTool,
+      createCalendarEvent,
+      listCalendarEvents,
+      getCalendarEvent,
+      updateCalendarEvent,
+      deleteCalendarEvent,
+      getAvailableSlots,
+      findEventByNaturalDate,
+      getAvailableSchedule,
+      sendEmail,
+      listEmails,
+      potentialSaleEmailTool,
+      notificarEquipoTool,
+      llmDateParser,
+      propertyDataProcessorTool,
+      formatPropertyDataTool,
+      apifyScraperTool
+    },
     workflows: { propertyWorkflow },
     server: {
         port: 4111,

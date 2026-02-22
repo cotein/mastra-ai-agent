@@ -13,7 +13,8 @@ export const apifyScraperTool = createTool({
     data: z.array(z.any()).optional(),
     error: z.string().optional(),
   }),
-  execute: async ({ url }) => {
+  execute: async (inputData) => {
+    const { url } = inputData;
     const APIFY_TOKEN = process.env.APIFY_TOKEN; 
     // CORRECCIÓN: La API de Apify usa ~ para separar usuario y actor en la URL del endpoint
     const ACTOR_NAME = "apify~website-content-crawler"; 

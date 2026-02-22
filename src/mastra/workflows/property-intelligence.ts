@@ -27,10 +27,10 @@ const extractAddressStep = createStep({
   outputSchema: extractAddressOutputSchema,
   execute: async ({ inputData }) => {
     console.log("📍 [Step: extract-address] Starting with URL:", inputData.url);
-    const result = await extractAddressFromUrlTool.execute({
+    const result = await extractAddressFromUrlTool.execute!({
       url: inputData.url,
-    });
-    if (!('filters' in result)) {
+    }, {});
+    if ('error' in result) {
         console.error("❌ [Step: extract-address] Failed:", result);
         throw new Error("Failed to extract address filters");
     }
@@ -63,9 +63,9 @@ const tokkoSearchStep = createStep({
   outputSchema: tokkoSearchOutputSchema,
   execute: async ({ inputData }) => {
     console.log("📍 [Step: tokko-search] Starting search with filters:", JSON.stringify(inputData.filters));
-    const result = await tokkoPropertySearchTool.execute(inputData);
+    const result = await tokkoPropertySearchTool.execute!(inputData, {});
     
-    if (!('data' in result)) {
+    if ('error' in result) {
          console.error("❌ [Step: tokko-search] Failed:", result);
          throw new Error("Failed to search properties");
     }
@@ -112,11 +112,11 @@ const extractRequirementsStep = createStep({
     console.log(`ℹ️ [Step: extract-requirements] Property ID: ${property.id}, Description Length: ${description.length}`);
 
     console.log("   [Workflow] Extracting requirements from description...");
-    const formatterResult = await realEstatePropertyFormatterTool.execute({
+    const formatterResult = await realEstatePropertyFormatterTool.execute!({
       keywordsZonaProp: description,
-    });
+    }, {});
 
-    if (!('formattedText' in formatterResult)) {
+    if ('error' in formatterResult) {
       console.error("❌ [Step: extract-requirements] Validation Failed:", formatterResult);
       throw new Error("Failed to extract requirements");
     }

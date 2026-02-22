@@ -10,7 +10,8 @@ export const llmDateParser = createTool({
   inputSchema: z.object({
     dateDescription: z.string().describe('The natural language text describing the date and time (e.g., "martes 20 a las 10hs").'),
   }),
-  execute: async ({ dateDescription }) => {
+  execute: async (inputData) => {
+    const { dateDescription } = inputData;
     console.log(`🤖 LLM Parser Invoked with: "${dateDescription}"`);
 
     const now = new Date();

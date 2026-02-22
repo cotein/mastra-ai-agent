@@ -14,7 +14,8 @@ export const propertyDataProcessorTool = createTool({
     streetAddress: z.string().optional(),
     operacionTipo: z.enum(["ALQUILAR", "VENDER", ""]),
   }),
-  execute: async ({ rawData }) => {
+  execute: async (inputData) => {
+    const { rawData } = inputData;
     // Tomamos el primer elemento del array, similar a lo que hacía el usuario en su ejemplo
     const dataItem = rawData[0];
 

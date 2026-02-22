@@ -21,16 +21,16 @@ export const notificarEquipoTool = createTool({
     telefono_cliente: z.string().optional().describe("Número de teléfono de contacto"),
     url_propiedad: z.string().optional().describe("Link de la publicación"),
   }),
-  execute: async (input) => {
+  execute: async (inputData) => {
     console.log("🛠️ Tool Invoked: notificar_equipo");
-    console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+    console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
 
     const gmail = getGmail();
     console.log("🔧 Gmail client initialized");
 
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     
-    const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, '');
+    const telLimpio = inputData.telefono_cliente?.replace(/[^0-9]/g, '');
 
     const htmlBody = `
       <!DOCTYPE html> <html> <head> <style> 
@@ -48,21 +48,21 @@ export const notificarEquipoTool = createTool({
           <div class="header"> <h2>⚠️ Notificación de Asesoramiento</h2> <span class="tag">REQUISITOS NO CUMPLIDOS</span> </div> 
           <div class="content"> 
             <p>Hola, <strong>Nico</strong> ha notificado que un cliente no cumple con los requisitos de alquiler y ha solicitado ser contactado por un asesor humano para buscar alternativas:</p> 
-            <div class="field-label">Cliente</div> <div class="field-value">${input.nombre_cliente || 'No especificado'}</div> 
+            <div class="field-label">Cliente</div> <div class="field-value">${inputData.nombre_cliente || 'No especificado'}</div> 
             <div class="field-label">Teléfono de contacto</div> 
             <div class="field-value">
-              ${input.telefono_cliente ? `<a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${input.telefono_cliente} (WhatsApp) </a>` : 'No especificado'}
+              ${inputData.telefono_cliente ? `<a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${inputData.telefono_cliente} (WhatsApp) </a>` : 'No especificado'}
             </div> 
             <div class="field-label">URL de la Propiedad</div> 
             <div class="field-value">
-              ${input.url_propiedad ? `<a href="${input.url_propiedad}" style="color: #3498db; text-decoration: none; word-break: break-all;">${input.url_propiedad}</a>` : 'No especificada'}
+              ${inputData.url_propiedad ? `<a href="${inputData.url_propiedad}" style="color: #3498db; text-decoration: none; word-break: break-all;">${inputData.url_propiedad}</a>` : 'No especificada'}
             </div> 
           </div> 
           <div class="footer"> Este es un aviso automático generado por el Agente IA de Fausti Propiedades. </div> 
         </div> 
       </body> </html>`;
 
-    const subject = `⚠️ Solicita Asesoramiento - ${input.nombre_cliente} - ${input.motivo}`;
+    const subject = `⚠️ Solicita Asesoramiento - ${inputData.nombre_cliente} - ${inputData.motivo}`;
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
     // Ejecutamos los envíos

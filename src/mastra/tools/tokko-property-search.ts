@@ -23,7 +23,8 @@ export const tokkoPropertySearchTool = createTool({
     data: z.custom<PropertyResponse>().optional(), // Using the imported type
     error: z.string().optional(),
   }),
-  execute: async (params) => {
+  execute: async (inputData) => {
+    const params = inputData;
     const TOKKO_API_KEY = "4b83dbe841cb6d1c70bfbefd87488f07317f623a"; // Hardcoded as requested
     const BASE_URL = "https://www.tokkobroker.com/api/v1/property/search";
 

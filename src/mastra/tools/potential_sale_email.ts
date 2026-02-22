@@ -22,16 +22,16 @@ export const potentialSaleEmailTool = createTool({
     direccion_propiedad: z.string().optional().describe("Dirección o título de la propiedad de interés"),
     url_propiedad: z.string().optional().describe("Link de la publicación (Zonaprop, etc)"),
   }),
-  execute: async (input) => {
+  execute: async (inputData) => {
     console.log("🛠️ Tool Invoked: potential_sale_email");
-    console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+    console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
 
     const gmail = getGmail();
     console.log("🔧 Gmail client initialized");
 
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     
-    const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, '');
+    const telLimpio = inputData.telefono_cliente?.replace(/[^0-9]/g, '');
 
     const htmlBody = `
       <!DOCTYPE html> <html> <head> <style> 
@@ -49,20 +49,20 @@ export const potentialSaleEmailTool = createTool({
           <div class="header"> <h2>⚠️ Nueva Potencial Venta</h2> <span class="tag">AVISO DE INTERÉS</span> </div> 
           <div class="content"> 
             <p>Hola, <strong>Nico</strong> ha detectado un cliente interesado en una propiedad de venta:</p> 
-            <div class="field-label">Cliente</div> <div class="field-value">${input.nombre_cliente}</div> 
+            <div class="field-label">Cliente</div> <div class="field-value">${inputData.nombre_cliente}</div> 
             <div class="field-label">Teléfono de contacto</div> 
-            <div class="field-value"> <a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${input.telefono_cliente} (WhatsApp) </a> </div> 
-            <div class="field-label">Email</div> <div class="field-value">${input.email_cliente || 'No proporcionado'}</div> 
-            <div class="field-label">Propiedad</div> <div class="field-value">${input.direccion_propiedad || "No especificada / URL"}</div> 
+            <div class="field-value"> <a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${inputData.telefono_cliente} (WhatsApp) </a> </div> 
+            <div class="field-label">Email</div> <div class="field-value">${inputData.email_cliente || 'No proporcionado'}</div> 
+            <div class="field-label">Propiedad</div> <div class="field-value">${inputData.direccion_propiedad || "No especificada / URL"}</div> 
             <div style="margin-top: 25px; text-align: center;"> 
-              <a href="${input.url_propiedad}" style="background-color: #3498db; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;"> Ver Ficha de Propiedad </a> 
+              <a href="${inputData.url_propiedad}" style="background-color: #3498db; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;"> Ver Ficha de Propiedad </a> 
             </div> 
           </div> 
           <div class="footer"> Este es un aviso automático generado por el Agente IA de Fausti Propiedades. </div> 
         </div> 
       </body> </html>`;
 
-    const subject = `⚠️ Nueva Potencial Venta - ${input.nombre_cliente}`;
+    const subject = `⚠️ Nueva Potencial Venta - ${inputData.nombre_cliente}`;
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
 
     // Ejecutamos los envíos

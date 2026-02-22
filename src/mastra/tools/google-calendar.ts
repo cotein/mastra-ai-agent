@@ -122,7 +122,7 @@ export const createCalendarEvent = createTool({
       propertyLink: z.string().optional().describe("Link de la propiedad"),
       pendingQuestions: z.array(z.string()).optional().describe("Lista de preguntas que el cliente hizo y no pudiste responder según la base de datos"),
     }),
-    execute: async (input) => {
+    execute: async (inputData) => {
       console.log("🛠️ [TOOL START] create_calendar_event con preguntas pendientes");
       
       const calendar = getGoogleCalendar();
@@ -133,39 +133,42 @@ export const createCalendarEvent = createTool({
         let smartEnd: string;
 
         // Lógica de parsing de fechas (se mantiene igual a tu implementación)
-        const isIsoStart = !isNaN(Date.parse(input.start)) && input.start.includes('T');
+        const isIsoStart = !isNaN(Date.parse(inputData.start)) && inputData.start.includes('T');
         if (isIsoStart) {
-            smartStart = input.start;
-            if (input.end && !isNaN(Date.parse(input.end)) && input.end.includes('T')) {
-                smartEnd = input.end;
+            smartStart = inputData.start;
+            if (inputData.end && !isNaN(Date.parse(inputData.end)) && inputData.end.includes('T')) {
+                smartEnd = inputData.end;
             } else {
                  const startDate = new Date(smartStart);
                  startDate.setHours(startDate.getHours() + 1);
                  smartEnd = startDate.toISOString();
             }
         } else {
-            const dateDescription = input.end ? `Inicio: ${input.start}. Fin: ${input.end}` : input.start;
-            const parseResult = await llmDateParser.execute!({ dateDescription });
+            const dateDescription = inputData.end ? `Inicio: ${inputData.start}. Fin: ${inputData.end}` : inputData.start;
+            const parseResult = await llmDateParser.execute!({ dateDescription }, {});
+            if ('error' in parseResult) {
+                throw new Error("Failed to parse dates: " + (parseResult as any).error?.message || "Unknown error");
+            }
             smartStart = parseResult.start;
             smartEnd = parseResult.end!; 
         } 
 
         const { start, end } = getSanitizedDates(smartStart, smartEnd);
-        const eventSummary = input.title || `Visita: ${input.clientName} - ${input.propertyAddress}`;
+        const eventSummary = inputData.title || `Visita: ${inputData.clientName} - ${inputData.propertyAddress}`;
         
         let hasPendingQuestions = false;
         // --- CONSTRUCCIÓN DE LA DESCRIPCIÓN ---
         let description = `🏠 VISITA INMOBILIARIA\n\n`;
-        description += `👤 Cliente: ${input.clientName}\n`;
-        description += `📞 Tel: ${input.clientPhone || 'No provisto'}\n`;
-        description += `📍 Propiedad: ${input.propertyAddress}\n`;
-        description += `🔗 Link: ${input.propertyLink || 'Sin link'}\n\n`;
+        description += `👤 Cliente: ${inputData.clientName}\n`;
+        description += `📞 Tel: ${inputData.clientPhone || 'No provisto'}\n`;
+        description += `📍 Propiedad: ${inputData.propertyAddress}\n`;
+        description += `🔗 Link: ${inputData.propertyLink || 'Sin link'}\n\n`;
 
 
-        if (input.pendingQuestions && input.pendingQuestions.length > 0) {
+        if (inputData.pendingQuestions && inputData.pendingQuestions.length > 0) {
             hasPendingQuestions = true;
             description += `⚠️ PREGUNTAS PENDIENTES POR RESPONDER EN LA VISITA:\n`;
-            input.pendingQuestions.forEach((q, i) => {
+            inputData.pendingQuestions.forEach((q, i) => {
                 description += `${i + 1}. ${q}\n`;
             });
         }
@@ -175,7 +178,7 @@ export const createCalendarEvent = createTool({
           calendarId: calendarId,
           requestBody: {
             summary: eventSummary,
-            location: input.propertyAddress,
+            location: inputData.propertyAddress,
             description: description,
             start: { 
               dateTime: start, 
@@ -215,11 +218,11 @@ export const createCalendarEvent = createTool({
 
       daysAhead: z.number().default(15).describe('Número de días a futuro para consultar'),
     }),
-    execute: async (input) => {
+    execute: async (inputData) => {
       console.log("🛠️ Tool Invoked: list_calendar_events");
-      console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+      console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
       
-      const { daysAhead } = input;
+      const { daysAhead } = inputData;
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
       
@@ -254,11 +257,11 @@ export const createCalendarEvent = createTool({
       eventId: z.string().describe('ID del evento a obtener'),
 
     }),
-    execute: async (input) => {
+    execute: async (inputData) => {
       console.log("🛠️ Tool Invoked: get_calendar_event");
-      console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+      console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
 
-      const { eventId } = input;
+      const { eventId } = inputData;
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
       try {
@@ -297,11 +300,11 @@ export const createCalendarEvent = createTool({
       propertyAddress: z.string().optional().describe("Dirección de la propiedad"),
       propertyLink: z.string().optional().describe("Link de la propiedad"),
     }),
-    execute: async (input) => {
+    execute: async (inputData) => {
       console.log("🛠️ Tool Invoked: update_calendar_event");
-      console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+      console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
 
-      const { eventId, summary, description, location, start, end, userEmail, clientName, clientPhone, clientEmail, propertyAddress, propertyLink } = input;
+      const { eventId, summary, description, location, start, end, userEmail, clientName, clientPhone, clientEmail, propertyAddress, propertyLink } = inputData;
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
 
@@ -393,11 +396,11 @@ export const createCalendarEvent = createTool({
 
       notifyStart: z.boolean().optional().describe('No utilizado, pero mantenido por compatibilidad'),
     }),
-    execute: async (input) => {
+    execute: async (inputData) => {
       console.log("🛠️ Tool Invoked: delete_calendar_event");
-      console.log("📥 Input recibido:", JSON.stringify(input, null, 2));
+      console.log("📥 Input recibido:", JSON.stringify(inputData, null, 2));
 
-      const { eventId } = input;
+      const { eventId } = inputData;
       const calendar = getGoogleCalendar();
       const calendarId = CALENDAR_ID;
       try {
@@ -580,7 +583,8 @@ export const getAvailableSlots = createTool({
     inputSchema: z.object({
         query: z.string().describe('La fecha y hora en lenguaje natural. Ej: "Lunes 12 de enero a las 12", "12/01 a las 12:00"'),
     }),
-    execute: async ({ query }) => {
+    execute: async (inputData) => {
+      const { query } = inputData;
       console.log("🛠️ Tool Invoked: find_event_by_natural_date");
       console.log("📥 Query recibido:", query);
         // Using static import 'es' from top of file
@@ -714,7 +718,8 @@ export const getAvailableSchedule = createTool({
         minHour: z.number().optional()
             .describe('Restricción de hora mínima (Ej: 16 para "a partir de las 16:00").')
     }),
-    execute: async ({ intent, targetDay, dayPart, dateRangeDays, excludedDays, minHour }) => {
+    execute: async (inputData) => {
+        const { intent, targetDay, dayPart, dateRangeDays, excludedDays, minHour } = inputData;
         // En Mastra, los argumentos vienen directos o dentro de context dependiendo de la versión/config
         // Sin embargo, si context no existe en el tipo, debemos intentar leer directo.
         // Si el usuario reportó error "Property 'context' does not exist", es porque el input

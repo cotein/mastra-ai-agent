@@ -16,7 +16,8 @@ export const extractAddressFromUrlTool = createTool({
     operation_types: z.array(z.number()),
     property_types: z.array(z.number()),
   }),
-  execute: async ({ url }: { url: string }) => {
+  execute: async (inputData) => {
+    const { url } = inputData;
     // Valores por defecto
     const result = {
       filters: [] as [string, string, string][],

@@ -26,9 +26,9 @@ const getGmail = () => {
       subject: z.string(),
       body: z.string(),
     }),
-    execute: async (context) => {
+    execute: async (inputData) => {
       const gmail = getGmail();
-      const { to, subject, body } = context;
+      const { to, subject, body } = inputData;
       const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
       const messageParts = [
         `From: Me <me@gmail.com>`,
@@ -62,9 +62,9 @@ const getGmail = () => {
     inputSchema: z.object({
       maxResults: z.number().default(5),
     }),
-    execute: async (context) => {
+    execute: async (inputData) => {
       const gmail = getGmail();
-      const { maxResults } = context;
+      const { maxResults } = inputData;
       const list = await gmail.users.messages.list({ userId: 'me', maxResults });
       const messages = await Promise.all(
         (list.data.messages || []).map(async (msg) => {
