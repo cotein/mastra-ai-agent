@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { Mastra } from '@mastra/core';
 import { registerApiRoute } from '@mastra/core/server';
+import { Observability, DefaultExporter } from '@mastra/observability';
 import axios from 'axios';
 import { Agent } from '@mastra/core/agent';
 import { Memory } from '@mastra/memory';
@@ -9,6 +10,7 @@ import { PostgresStore, PgVector } from '@mastra/pg';
 import { Pool } from 'pg';
 import { SystemPromptScrubber, PromptInjectionDetector, ModerationProcessor, TokenLimiter } from '@mastra/core/processors';
 import { generateText, generateObject } from 'ai';
+import { createFaithfulnessScorer } from '@mastra/evals/scorers/prebuilt';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { google } from 'googleapis';
@@ -1526,13 +1528,27 @@ const notificarEquipoTool = createTool({
 
 "use strict";
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
+const faithfulnessScorer = createFaithfulnessScorer({
+  model: openai$1("gpt-4o-mini")
+  // Modelo utilizado como "juez"
+});
 const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
   const memory = new Memory({
     storage,
     vector: vectorStore,
     embedder: openai$1.embedding("text-embedding-3-small"),
     options: {
-      lastMessages: 31,
+      lastMessages: 10,
+      // Lo reducimos porque la memoria observacional se encarga del resto
+      observationalMemory: {
+        model: openai$1("gpt-4o-mini"),
+        observation: {
+          messageTokens: 3e4
+        },
+        reflection: {
+          observationTokens: 4e4
+        }
+      },
       semanticRecall: {
         topK: 3,
         messageRange: 3
@@ -1571,6 +1587,13 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     name: "Real Estate Agent",
     instructions: finalInstructions,
     model: openai$1("gpt-4o"),
+    scorers: {
+      fidelidad: {
+        scorer: faithfulnessScorer,
+        // sampling rate: 1 = evalúa el 100% de las respuestas
+        sampling: { type: "ratio", rate: 1 }
+      }
+    },
     memory,
     tools: selectedTools,
     inputProcessors: [
@@ -1964,8 +1987,8 @@ const dynamicInstructions = (datos2, op) => {
     </datos_propiedad>
 
     <reglas_de_interaccion>
-    - ACCI\xD3N 1: Informa al cliente los requisitos y la pol\xEDtica de mascotas bas\xE1ndote estrictamente en los datos_propiedad.
-    - RESTRICCI\xD3N (ACCI\xD3N 2): NO muestres ninguna otra caracter\xEDstica de la propiedad a menos que el usuario te pregunte por algo espec\xEDfico.
+    - ACCI\xD3N 1 (PRIORIDAD M\xC1XIMA): Informa al cliente los requisitos y la pol\xEDtica de mascotas bas\xE1ndote estrictamente en los datos_propiedad.
+    - RESTRICCI\xD3N (ACCI\xD3N 2): NO muestres ninguna otra caracter\xEDstica de la propied|ad a menos que el usuario te pregunte por algo espec\xEDfico.
     - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
     </reglas_de_interaccion>
 
@@ -2413,6 +2436,17 @@ const sessionOperationMap = /* @__PURE__ */ new Map();
 const sessionLinkMap = /* @__PURE__ */ new Map();
 const sessionPropiedadInfoMap = /* @__PURE__ */ new Map();
 const mastra = new Mastra({
+  observability: new Observability({
+    configs: {
+      default: {
+        serviceName: "mi-agente-inmobiliario",
+        exporters: [
+          new DefaultExporter()
+          // Persiste los datos en tu base local
+        ]
+      }
+    }
+  }),
   storage,
   vectors: {
     vectorStore
@@ -2641,64 +2675,4 @@ async function sendToManychat(subscriberId, text) {
   }
 }
 
-async function runMigration() {
-      const storage = mastra.getStorage();
-
-      if (!storage) {
-        console.log(JSON.stringify({
-          success: false,
-          alreadyMigrated: false,
-          duplicatesRemoved: 0,
-          message: 'Storage not configured. Please configure storage in your Mastra instance.',
-        }));
-        process.exit(1);
-      }
-
-      // Access the observability store directly from storage.stores
-      const observabilityStore = storage.stores?.observability;
-
-      if (!observabilityStore) {
-        console.log(JSON.stringify({
-          success: false,
-          alreadyMigrated: false,
-          duplicatesRemoved: 0,
-          message: 'Observability storage not configured. Migration not required.',
-        }));
-        process.exit(0);
-      }
-
-      // Check if the store has a migrateSpans method
-      if (typeof observabilityStore.migrateSpans !== 'function') {
-        console.log(JSON.stringify({
-          success: false,
-          alreadyMigrated: false,
-          duplicatesRemoved: 0,
-          message: 'Migration not supported for this storage backend.',
-        }));
-        process.exit(1);
-      }
-
-      try {
-        // Run the migration - migrateSpans handles everything internally
-        const result = await observabilityStore.migrateSpans();
-
-        console.log(JSON.stringify({
-          success: result.success,
-          alreadyMigrated: result.alreadyMigrated,
-          duplicatesRemoved: result.duplicatesRemoved,
-          message: result.message,
-        }));
-
-        process.exit(result.success ? 0 : 1);
-      } catch (error) {
-        console.log(JSON.stringify({
-          success: false,
-          alreadyMigrated: false,
-          duplicatesRemoved: 0,
-          message: error instanceof Error ? error.message : 'Unknown error during migration',
-        }));
-        process.exit(1);
-      }
-    }
-
-    runMigration();
+export { mastra };
