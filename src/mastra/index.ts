@@ -273,9 +273,11 @@ export const mastra = new Mastra({
                         const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
                         
                         const response = await agent.generate(message, {
-                            threadId: currentThreadId,
-                            resourceId: userId
-                        });
+                            memory: {
+                                thread: currentThreadId,
+                                resource: userId
+                            }
+                        }); 
 
                         // Inspeccionar resultados AQUÍ, después del await
                         if (response.toolResults && response.toolResults.length > 0) {

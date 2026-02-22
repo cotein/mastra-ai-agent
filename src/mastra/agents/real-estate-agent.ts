@@ -7,6 +7,7 @@ import { WhatsAppStyleProcessor } from "../processors/whatsapp-style-processor";
 import { OperacionTipo } from "./../../types";
 // Para la versión estándar basada en LLM
 import { createFaithfulnessScorer } from "@mastra/evals/scorers/prebuilt";
+import { z } from "zod";
 
 // Herramientas
 import { 
@@ -52,17 +53,19 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
       workingMemory: {
         enabled: true,
         scope: "resource",
-        template: `# User Profile
-          - **First Name**:
-          - **Last Name**:
-          - **Email**:
-          - **Phone**:
-          - **Location**:
-          - **Budget Max**:
-          - **Preferred Zone**:
-          - **Property Type Interest**: (Casa/Depto/PH)
-          - **Consulted Properties History**: (List of URLs or addresses recently discussed or scraped)
-          `,
+        schema: z.object({
+          firstName: z.string().optional(),
+          lastName: z.string().optional(),
+          email: z.string().optional(),
+          phone: z.string().optional(),
+          location: z.string().optional(),
+          budgetMax: z.string().optional(),
+          preferredZone: z.string().optional(),
+          propertyTypeInterest: z.string().describe("Casa/Depto/PH").optional(),
+          operacionTipo: z.string().describe("Venta o Alquiler").optional(), // <-- Tu antiguo Map
+          propiedadInfo: z.string().optional(), // <-- Tu antiguo Map
+          consultedPropertiesHistory: z.array(z.string()).describe("URLs or addresses").optional()
+        })
       },
       generateTitle: true,
     },
