@@ -3,6 +3,7 @@ import { Mastra } from "@mastra/core";
 import { registerApiRoute } from "@mastra/core/server";
 import { Observability, DefaultExporter } from "@mastra/observability";
 import axios from "axios";
+import { PinoLogger } from "@mastra/loggers";
 
 
 // Agentes y Herramientas
@@ -69,6 +70,7 @@ export const mastra = new Mastra({
             },
         },
     }),
+    logger: new PinoLogger({ name: "Mastra", level: "debug" }), // 'debug' mostrará todos los detalles
     storage,
     vectors: { vectorStore },
     agents: { realEstateAgent, realEstateCleaningAgent, addressExtractionAgent },
