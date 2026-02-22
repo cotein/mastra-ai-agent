@@ -28,7 +28,7 @@ import { sleep } from '../helpers/sleep';
 /**
  * INICIALIZACIÓN DE STORAGE
  */
-await storage.init();
+//await storage.init();
 
 // Instancia base del agente para el sistema Mastra (registro interno)
 const realEstateAgent = await getRealEstateAgent('');
