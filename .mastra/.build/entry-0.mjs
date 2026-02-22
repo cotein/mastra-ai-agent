@@ -1073,7 +1073,7 @@ const CONFIG = {
 const DAY_MAP = { "DOMINGO": 0, "LUNES": 1, "MARTES": 2, "MIERCOLES": 3, "JUEVES": 4, "VIERNES": 5, "SABADO": 6 };
 const getAvailableSchedule = createTool({
   id: "get_available_schedule",
-  description: "Busca disponibilidad en la agenda aplicando l\xF3gica de negocio basada en la intenci\xF3n del usuario (urgencia, d\xEDa espec\xEDfico, rango, preferencia horaria).",
+  description: '\xDAsala SIEMPRE que el usuario pregunte si hay disponibilidad en un d\xEDa, fecha u horario espec\xEDfico para una visita (ejemplo: "\xBFtenes disponibilidad el jueves 26?", "\xBFpodemos ir el viernes a la tarde?"). Nunca digas que no tienes esta informaci\xF3n; usa siempre esta herramienta para verificarlo.',
   inputSchema: z.object({
     intent: z.enum(["SPECIFIC_DAY", "PART_OF_DAY", "RANGE", "URGENT", "CONSTRAINT", "GENERAL"]).describe("La intenci\xF3n principal detectada en la solicitud del usuario (Casos A-F)"),
     targetDay: z.enum(["LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO"]).optional().describe("Para caso SPECIFIC_DAY: El d\xEDa de la semana solicitado."),
@@ -1264,7 +1264,7 @@ const apifyScraperTool = createTool({
 });
 
 "use strict";
-const getGmail$1 = () => {
+const getGmail$2 = () => {
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
@@ -1285,7 +1285,7 @@ const sendEmail = createTool({
     body: z.string()
   }),
   execute: async (context) => {
-    const gmail = getGmail$1();
+    const gmail = getGmail$2();
     const { to, subject, body } = context;
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString("base64")}?=`;
     const messageParts = [
@@ -1313,7 +1313,7 @@ const listEmails = createTool({
     maxResults: z.number().default(5)
   }),
   execute: async (context) => {
-    const gmail = getGmail$1();
+    const gmail = getGmail$2();
     const { maxResults } = context;
     const list = await gmail.users.messages.list({ userId: "me", maxResults });
     const messages = await Promise.all(
@@ -1331,7 +1331,7 @@ const listEmails = createTool({
 });
 
 "use strict";
-const getGmail = () => {
+const getGmail$1 = () => {
   const auth = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
@@ -1352,7 +1352,7 @@ const potentialSaleEmailTool = createTool({
   execute: async (input) => {
     console.log("\u{1F6E0}\uFE0F Tool Invoked: potential_sale_email");
     console.log("\u{1F4E5} Input recibido:", JSON.stringify(input, null, 2));
-    const gmail = getGmail();
+    const gmail = getGmail$1();
     console.log("\u{1F527} Gmail client initialized");
     const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, "");
@@ -1429,6 +1429,102 @@ const potentialSaleEmailTool = createTool({
 "use strict";
 
 "use strict";
+const getGmail = () => {
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+  return google.gmail({ version: "v1", auth });
+};
+const notificarEquipoTool = createTool({
+  id: "notificar_equipo",
+  description: "\xDAsala EXCLUSIVAMENTE cuando el usuario no cumpla los requisitos de alquiler y acepte que un asesor humano lo contacte para buscar alternativas.",
+  inputSchema: z.object({
+    motivo: z.string().describe("Raz\xF3n exacta por la que se deriva (ej: No tiene recibo de sueldo ni garant\xEDa)"),
+    nombre_cliente: z.string().optional().describe("Nombre completo del interesado"),
+    telefono_cliente: z.string().optional().describe("N\xFAmero de tel\xE9fono de contacto"),
+    url_propiedad: z.string().optional().describe("Link de la publicaci\xF3n")
+  }),
+  execute: async (input) => {
+    console.log("\u{1F6E0}\uFE0F Tool Invoked: notificar_equipo");
+    console.log("\u{1F4E5} Input recibido:", JSON.stringify(input, null, 2));
+    const gmail = getGmail();
+    console.log("\u{1F527} Gmail client initialized");
+    const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
+    const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, "");
+    const htmlBody = `
+      <!DOCTYPE html> <html> <head> <style> 
+      body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; } 
+      .container { width: 100%; max-width: 600px; margin: 20px auto; border: 1px solid #eee; border-radius: 8px; overflow: hidden; } 
+      .header { background-color: #e74c3c; color: #ffffff; padding: 20px; text-align: center; } 
+      .content { padding: 20px; } 
+      .field-label { font-weight: bold; color: #7f8c8d; text-transform: uppercase; font-size: 12px; } 
+      .field-value { margin-bottom: 15px; font-size: 16px; border-bottom: 1px solid #f9f9f9; padding-bottom: 5px; } 
+      .footer { background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 12px; color: #95a5a6; } 
+      .tag { background-color: #f39c12; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; } 
+      </style> </head> 
+      <body> 
+        <div class="container"> 
+          <div class="header"> <h2>\u26A0\uFE0F Notificaci\xF3n de Asesoramiento</h2> <span class="tag">REQUISITOS NO CUMPLIDOS</span> </div> 
+          <div class="content"> 
+            <p>Hola, <strong>Nico</strong> ha notificado que un cliente no cumple con los requisitos de alquiler y ha solicitado ser contactado por un asesor humano para buscar alternativas:</p> 
+            <div class="field-label">Cliente</div> <div class="field-value">${input.nombre_cliente || "No especificado"}</div> 
+            <div class="field-label">Tel\xE9fono de contacto</div> 
+            <div class="field-value">
+              ${input.telefono_cliente ? `<a href="https://wa.me/${telLimpio}" style="color: #27ae60; text-decoration: none; font-weight: bold;"> ${input.telefono_cliente} (WhatsApp) </a>` : "No especificado"}
+            </div> 
+            <div class="field-label">URL de la Propiedad</div> 
+            <div class="field-value">
+              ${input.url_propiedad ? `<a href="${input.url_propiedad}" style="color: #3498db; text-decoration: none; word-break: break-all;">${input.url_propiedad}</a>` : "No especificada"}
+            </div> 
+          </div> 
+          <div class="footer"> Este es un aviso autom\xE1tico generado por el Agente IA de Fausti Propiedades. </div> 
+        </div> 
+      </body> </html>`;
+    const subject = `\u26A0\uFE0F Solicita Asesoramiento - ${input.nombre_cliente} - ${input.motivo}`;
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString("base64")}?=`;
+    const sendPromises = recipients.map(async (to) => {
+      console.log(`\u{1F4E7} Preparing email for: ${to}`);
+      const messageParts = [
+        `From: Nico Agent <me@gmail.com>`,
+        `To: ${to}`,
+        `Content-Type: text/html; charset=utf-8`,
+        `MIME-Version: 1.0`,
+        `Subject: ${utf8Subject}`,
+        "",
+        htmlBody
+      ];
+      const message = messageParts.join("\n");
+      const encodedMessage = Buffer.from(message).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      try {
+        console.log(`\u{1F680} Sending to: ${to}`);
+        const res = await gmail.users.messages.send({
+          userId: "me",
+          requestBody: { raw: encodedMessage }
+        });
+        console.log(`\u2705 Email sent to: ${to} - Status: ${res.status}`);
+        return res;
+      } catch (innerErr) {
+        console.error(`\u274C Error sending to ${to}:`, innerErr);
+        throw innerErr;
+      }
+    });
+    try {
+      await Promise.all(sendPromises);
+      console.log("\u{1F3C1} All emails processed");
+    } catch (err) {
+      console.error("Error global enviando mails de venta:", err);
+      throw new Error("Fall\xF3 el env\xEDo del correo de venta. Revisa los logs.");
+    }
+    return {
+      status: "success",
+      message: "El equipo de ventas ha sido notificado y se pondr\xE1 en contacto pronto."
+    };
+  }
+});
+
+"use strict";
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
 const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) => {
   const memory = new Memory({
@@ -1436,13 +1532,13 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
     vector: vectorStore,
     embedder: openai$1.embedding("text-embedding-3-small"),
     options: {
-      lastMessages: 22,
+      lastMessages: 31,
       semanticRecall: {
         topK: 3,
         messageRange: 3
       },
       workingMemory: {
-        enabled: false,
+        enabled: true,
         scope: "resource",
         template: `# User Profile
           - **First Name**:
@@ -1461,7 +1557,7 @@ const getRealEstateAgent = async (userId, instructionsInjected, operacionTipo) =
   });
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
   const op = (operacionTipo || "").trim().toUpperCase();
-  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
+  const selectedTools = op === "ALQUILAR" ? { get_available_slots: getAvailableSlots, create_calendar_event: createCalendarEvent, find_event_by_natural_date: findEventByNaturalDate, update_calendar_event: updateCalendarEvent, delete_calendar_event: deleteCalendarEvent, get_available_schedule: getAvailableSchedule, notificar_equipo: notificarEquipoTool } : op === "VENDER" ? { potential_sale_email: potentialSaleEmailTool } : {};
   console.log("#".repeat(50) + " REAL ESTATE AGENT " + "#".repeat(50));
   console.log(finalInstructions);
   console.log("#".repeat(50));
@@ -1807,7 +1903,22 @@ const extractAddressFromUrlTool = createTool({
 });
 
 "use strict";
-const dynamicInstructions = (datos, op) => {
+const defaultClientData = {
+  nombre: "",
+  apellido: "",
+  email: "",
+  telefono: "",
+  link: "",
+  tipoOperacion: "",
+  propiedadInfo: "",
+  propertyAddress: "",
+  mascotas: "",
+  requisitos: ""
+};
+
+"use strict";
+let datos = defaultClientData;
+const dynamicInstructions = (datos2, op) => {
   const ahora = new Intl.DateTimeFormat("es-AR", {
     timeZone: "America/Argentina/Buenos_Aires",
     hour: "numeric",
@@ -1818,9 +1929,9 @@ const dynamicInstructions = (datos, op) => {
   if (hora >= 5 && hora < 14) momentoDia = "\xA1Buen d\xEDa!";
   else if (hora >= 14 && hora < 20) momentoDia = "\xA1Buenas tardes!";
   else momentoDia = "\xA1Buenas noches!";
-  const hasName = !!(datos.nombre && datos.nombre !== "Preguntar");
-  const hasLink = !!datos.link;
-  const hasEmail = !!(datos.email && datos.email !== "No registrado");
+  const hasName = !!(datos2.nombre && datos2.nombre !== "");
+  const hasLink = !!(datos2.link && datos2.link !== "");
+  const hasEmail = !!(datos2.email && datos2.email !== "");
   const opType = (op || "INDEFINIDO").trim().toUpperCase();
   let saludoSugerido = "";
   if (hasLink && !hasName) {
@@ -1828,46 +1939,83 @@ const dynamicInstructions = (datos, op) => {
   } else if (!hasLink && !hasName) {
     saludoSugerido = momentoDia + " C\xF3mo est\xE1s? Nico te saluda \u{1F44B} \xBFMe podr\xEDas decir tu nombre y apellido as\xED te agendo bien?";
   } else if (hasName && !hasLink) {
-    saludoSugerido = momentoDia + ` ${datos.nombre}, para ayudarte mejor, entr\xE1 en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
+    saludoSugerido = momentoDia + ` ${datos2.nombre}, para ayudarte mejor, entr\xE1 en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
   }
   let operationalProtocol = "";
+  let ejemplosFewShot = "";
   if (opType === "ALQUILAR") {
+    const faseIdentificacion = !hasName ? `
+    ## Tarea Inmediata (PRIORIDAD ALTA)
+    - EL USUARIO ES AN\xD3NIMO. TU \xDANICA PRIORIDAD ES OBTENER SU NOMBRE.
+    - NO respondas dudas espec\xEDficas ni ofrezcas visitas hasta tener el nombre.
+    
+    ***Script Obligatorio***: "${momentoDia}, nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
+    ` : `
+    ## Tarea Inmediata
+    - Usuario identificado: ${datos2.nombre}. Contin\xFAa con la calificaci\xF3n.
+    `;
+    const faseCalificacion = hasName ? `
+    2. FASE DE CALIFICACI\xD3N (REQUISITOS DE ALQUILER)
+    Ahora que tienes el nombre, filtra al interesado.
+    
+    <datos_propiedad>
+    ${datos2.requisitos ? `- Requisitos exigidos: ${datos2.requisitos}` : ""}
+    ${datos2.mascotas ? `- Pol\xEDtica de mascotas: ${datos2.mascotas}` : ""}
+    </datos_propiedad>
+
+    <reglas_de_interaccion>
+    - ACCI\xD3N 1: Informa al cliente los requisitos y la pol\xEDtica de mascotas bas\xE1ndote estrictamente en los datos_propiedad.
+    - RESTRICCI\xD3N (ACCI\xD3N 2): NO muestres ninguna otra caracter\xEDstica de la propiedad a menos que el usuario te pregunte por algo espec\xEDfico.
+    - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
+    </reglas_de_interaccion>
+
+    <reglas_de_calificacion_y_rechazo>
+      1. REQUISITOS FINANCIEROS: El usuario debe contar con garant\xEDa y justificaci\xF3n de ingresos (recibo de sueldo, monotributo, etc.).
+      2. SI NO CUMPLE: NO le ofrezcas agendar una visita bajo ninguna circunstancia.
+      3. PROTOCOLO DE DERIVACI\xD3N: 
+        - Si no cumple los requisitos, dile exactamente: "Entiendo, [Nombre]. En este caso, podr\xEDamos ver si hay alguna otra opci\xF3n que se ajuste a tus posibilidades. \xBFTe gustar\xEDa que te contacte alguien del equipo para explorar alternativas?"
+        - Si el usuario responde afirmativamente (ej. "dale", "s\xED", "me parece bien"), **ES OBLIGATORIO que ejecutes INMEDIATAMENTE la herramienta "notificar_equipo"**.
+      4. RESPUESTA DE CIERRE: Solo despu\xE9s de que la herramienta "notificar_equipo" te devuelva un estado exitoso, desp\xEDdete diciendo: "\xA1Perfecto! Ya le pas\xE9 tus datos al equipo. Se van a estar comunicando con vos muy pronto \u{1F60A}".
+    </reglas_de_calificacion_y_rechazo>
+    ` : "";
     operationalProtocol = `
-III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
-1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
-Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
+# PROTOCOLO DE ACTUACI\xD3N
+Estado: ${!hasName ? "BLOQUEO DE IDENTIDAD" : "CALIFICACI\xD3N ACTIVA"}
 
-Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
+${faseIdentificacion}
 
-Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
-
-2. FASE DE CALIFICACI\xD3N (REQUISITOS DE ALQUILER)
-Una vez obtenido el nombre, antes de ofrecer visitas, DEBES filtrar al interesado:
-
-Prioridad M\xE1xima: Lee la "Informaci\xF3n Propiedad" en el Contexto.
-
-${datos.requisitos ? "Requisitos: " + datos.requisitos : ""}
-
-${datos.mascotas ? "Mascotas: " + datos.mascotas : ""}
+${faseCalificacion}
 
 Pregunta de Cierre: "la propiedad est\xE1 disponible, \xBFquer\xE9s coordinar una visita?"
 
 IV \u{1F3E0} PROTOCOLO DE ALQUILER
-1. **Activaci\xF3n**: Si el usuario confirma inter\xE9s en ver la propiedad, eval\xFAa la respuesta para decidir la herramienta:
+<trigger>
+Si el usuario confirma inter\xE9s expl\xEDcito (ej: "quiero verla", "\xBFcu\xE1ndo puedo ir?"), inicia este flujo.
+</trigger>
 
-2. **L\xF3gica de Herramientas (Selecci\xF3n Mandatoria)**:
-   - **ESCENARIO 1 (Consulta General)**: Si el usuario NO menciona una fecha/hora espec\xEDfica.
-     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_slots". 
-     - **OBJETIVO**: Mostrar opciones disponibles para que el cliente elija.
-     - **RESPUESTA**: "Aqu\xED tienes los horarios disponibles: [lista]. \xBFCu\xE1l te queda mejor?"
+PASO 1: SELECCI\xD3N DE ESTRATEGIA DE AGENDA
+Eval\xFAa el \xFAltimo mensaje del usuario y elige UN camino:
 
-   - **ESCENARIO 2 (Propuesta Espec\xEDfica)**: Si el usuario INDICA un d\xEDa y/o hora puntual (Ej: "jueves a las 10:30").
-     - **ACCI\xD3N**: Ejecuta INMEDIATAMENTE "get_available_schedule" usando los datos proporcionados por el cliente.
-     - **REGLA CR\xCDTICA**: No respondas "no tengo disponibilidad" sin haber consultado la herramienta primero.
-     - **OBJETIVO**: Validar el hueco espec\xEDfico solicitado.
+OPCI\xD3N A: El usuario NO propone fecha/hora.
+- **Acci\xF3n**: Ejecuta "get_available_slots".
+- **Respuesta**: Presenta la lista devuelta por la herramienta y pregunta: "\xBFCu\xE1l de estos horarios te queda mejor?".
 
-3. **Proceso de Confirmaci\xF3n y Cierre (Com\xFAn a ambos casos)**:
-   - Una vez que el horario sea validado y aceptado, ejecuta "create_calendar_event".
+OPCI\xD3N B: El usuario propone fecha/hora espec\xEDfica (ej: "martes a las 5").
+- **Acci\xF3n**: Ejecuta "get_available_schedule" con los par\xE1metros del usuario.
+- **Manejo de Respuesta**:
+  - Si la herramienta confirma disponibilidad: Procede al PASO 2.
+  - Si la herramienta niega disponibilidad: Comunica las alternativas que la herramienta devuelva.
+
+
+PASO 2: CONFIRMACI\xD3N Y RESERVA (CR\xCDTICO)
+
+<verificacion_datos>
+  1. \xBFTienes el "Nombre" y "Apellido"?
+  2. \xBFTienes el "Tel\xE9fono"?
+</verificacion_datos>
+
+- **Si FALTA alg\xFAn dato**: NO agendes todav\xEDa. Pide el dato faltante amablemente: "Para confirmarte la visita, necesito tu [dato faltante] para el sistema."
+  - Una vez que el horario sea validado y aceptado, ejecuta "create_calendar_event".
    - **EXTRACCI\xD3N DE DATOS MANDATORIA**: Obt\xE9n la informaci\xF3n de la secci\xF3n "II. CONTEXTO ACTUAL DEL LEAD":
      - clientName: Combinaci\xF3n de "Nombre" y "Apellido".
      - clientPhone: Campo "Tel\xE9fono".
@@ -1876,82 +2024,142 @@ IV \u{1F3E0} PROTOCOLO DE ALQUILER
      - pendingQuestions: Campo "Preguntas Pendientes".
    - **RESPUESTA FINAL**: "\xA1Perfecto! Ya qued\xF3 agendado. Te env\xEDo el link del evento."
 
+  <manejo_de_consultas>
+  1. CONSULTAS DE AGENDA (PRIORIDAD ALTA): Si el usuario menciona d\xEDas de la semana (ej: "viernes", "ma\xF1ana") u horarios, NUNCA digas que no tienes la informaci\xF3n. Ejecuta SIEMPRE la herramienta "get_available_schedule".
+  DUDAS DE LA PROPIEDAD: Si el usuario pregunta caracter\xEDsticas de la propiedad que no est\xE1n en el contexto, responde: "No tengo esa informaci\xF3n ahora...".
+\u{1F6D1} RESTRICCI\xD3N ABSOLUTA: NUNCA uses la frase "No tengo esa informaci\xF3n" si el mensaje del usuario incluye d\xEDas de la semana (lunes, viernes, hoy, ma\xF1ana) o referencias a tiempo. Si detectas un d\xEDa, tu \xDANICA opci\xF3n es usar la herramienta 'get_available_schedule'.
 
+  2. DUDAS DE LA PROPIEDAD: Si el usuario pregunta caracter\xEDsticas de la propiedad que no est\xE1n en el contexto (ej: expensas, mascotas), responde: "No tengo esa informaci\xF3n ahora, pero si quer\xE9s te la confirmo durante la visita \u{1F60A}".
+</manejo_de_consultas>
+ `;
+    ejemplosFewShot = `
 V. EJEMPLOS DE \xC9XITO (FEW-SHOT PARA ALQUILER)
 
-Estos ejemplos muestran c\xF3mo debes pensar y responder. Nota c\xF3mo el agente verifica requisitos antes de agendar.
+Estos ejemplos muestran c\xF3mo debes pensar y responder. Presta especial atenci\xF3n a la validaci\xF3n de requisitos y al formato de las herramientas.
 
-### EJEMPLO 1: Flujo Ideal (Diego)
+<examples>
 
-User: "Hola, vi este depto: https://zonaprop..."
-Pensamiento: El usuario quiere alquilar. No tengo su nombre. Debo aplicar protocolo de BLOQUEO.
-Nico: \xA1buenas tardes! nico te saluda, lo reviso y te digo... \xBFme dec\xEDs tu nombre y apellido as\xED te agendo bien?
+  ### EJEMPLO 1: Flujo Ideal (Diego)
+  User: "Hola, vi este depto: https://zonaprop..."
+  <thinking>El usuario quiere alquilar. No tengo su nombre en ${datos2.nombre}. Debo aplicar protocolo de BLOQUEO.</thinking>
+  Nico: \xA1buenas tardes! nico te saluda, lo reviso y te digo... \xBFme dec\xEDs tu nombre y apellido as\xED te agendo bien?
+  User: "Diego Barrueta"
+ <thinking>Tengo nombre. Fase de Calificaci\xF3n: Debo mencionar requisitos antes de ofrecer visita.${datos2.mascotas ? " Tambi\xE9n mencionar\xE9 la pol\xEDtica de mascotas." : ""} Los requisitos son ${datos2.requisitos}.</thinking>
+  Nico: genial diego! ya te agend\xE9. te comento, los requisitos son ${datos2.requisitos}${datos2.mascotas ? `
+Nico: ${datos2.mascotas}` : ""}
+  Nico: \xBFcont\xE1s con eso? si es as\xED, \xBFquer\xE9s coordinar una visita?
+  User: "S\xED, quiero ir a verla"
+  <thinking>El usuario cumple requisitos y no dio fecha exacta. Debo consultar disponibilidad general usando la herramienta 'get_available_slots'.</thinking>
 
-User: "Diego Barrueta"
-Pensamiento: Tengo nombre. Fase de Calificaci\xF3n: Debo mencionar requisitos (Garant\xEDa y Recibos) antes de ofrecer visita.
-Nico: genial diego! ya te agend\xE9. la propiedad es un 4 ambientes hermoso. el alquiler es de $950.000. piden garant\xEDa propietaria y recibos de sueldo. \xBFcont\xE1s con eso? si es as\xED, \xBFquer\xE9s coordinar una visita?
+  [SISTEMA: Tool Output get_available_slots]
+  {
+    "slots": ["2023-10-22T12:30:00Z", "2023-10-22T16:30:00Z", "2023-10-23T10:00:00Z"],
+    "formatted_text": "Jueves 22: 12:30, 16:30. Viernes 23: 10:00"
+  }
+  Nico: Tengo los siguientes horarios disponibles para la visita:
 
-User: "S\xED, quiero ir a verla"
-Pensamiento: El usuario cumple requisitos. Debo consultar disponibilidad usando la herramienta 'get_available_slots'.
-[SISTEMA: El agente llama a get_available_slots y recibe: "Martes a las 11:00, Jueves a las 16:30"]
-Nico: genial diego! Tengo los siguientes horarios disponibles para la visita:
+  Jueves 22:
+  - 12:30 hs
+  - 16:30 hs
 
-Jueves 22:
+  Viernes 23:
+  - 10:00 hs
 
-12:30 
-13:30 
-16:30 
-Viernes 23:
+  \xBFAlguno de estos horarios te viene bien?
+  User: "El Jueves a las 16:30 me va bien"
+  <thinking>Usuario confirma horario. Pido email antes de ejecutar la reserva final para enviar el link del evento.</thinking>
+  Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email por favor?
+  User: dale, diego@diego.com
+  <thinking>Tengo todos los datos. Ejecuto 'create_calendar_event'.</thinking>
+  [SISTEMA: Tool Output create_calendar_event]
+  {
+    "status": "success",
+    "eventId": "evt_98765",
+    "link": "https://calendar.google.com/calendar/event?action=TEMPLATE&..."
+  }
+  Nico: genial diego! gracias!
+  te envio el link del evento https://calendar.google.com/calendar/event?action=TEMPLATE&...
 
-10:00 
-11:00 
-\xBFAlguno de estos horarios te viene bien?
 
-User: "El Jueves a las 16:30 me va bien"
-Pensamiento: Usuario confirma horario. Debo agendar usando 'create_calendar_event'.
-Nico: perfecto, ya te anot\xE9 para el jueves a las 16:30 hs. \xBFme pas\xE1s un email por favor?
-User: dale, diego@diego.com
-Nico: genial diego! gracias!
-Nico: te envio el link del evento https://calendar.google.com/calendar/event?action=TEMPLATE&...
+  ### EJEMPLO 2: Flujo con duda pendiente
+  User: "\xBFAceptan mascotas? \xBFY tiene cochera?"
+  <thinking>
+  - Busco en la informaci\xF3n de la propiedad en ${datos2.propiedadInfo}
+  - Cochera: S\xED, tiene cochera fija.
+  - Mascotas: ${datos2.mascotas ? "El dato dice: " + datos2.mascotas : "No tengo el dato exacto ahora."}
+  - Como me falta confirmar un dato, uso la frase de duda pendiente.
+  </thinking>
+  Nico: tiene cochera fija. ${datos2.mascotas || "lo de las mascotas no lo tengo ac\xE1 ahora, pero si quer\xE9s te lo confirmo durante la visita \u{1F44C}"} \xBFte gustar\xEDa ir a verla?
+  User: "Dale, el jueves a las 10hs"
+  <thinking>El usuario confirma. Debo llamar a 'create_calendar_event' (o a la herramienta de disponibilidad primero) incluyendo ["\xBFAceptan mascotas?"] en 'pendingQuestions'.</thinking>
 
-### EJEMPLO 2: flujo con duda pendiente
+  ### EJEMPLO 3: Usuario consulta disponibilidad sobre un d\xEDa espec\xEDfico
+  Cliente: "tenes disponibilidad el jueves 26?"
+  <thinking>El usuario est\xE1 preguntando por un d\xEDa espec\xEDfico para visitar. ESTO NO ES UNA DUDA DE LA PROPIEDAD. Debo ejecutar la herramienta 'get_available_schedule' con intent="SPECIFIC_DAY" y targetDay="JUEVES".</thinking>
+  [SISTEMA: Tool Output get_available_schedule]
+  {
+    "disponible": true,
+    "horarios": ["10:00 a.m.", "2:00 p.m."]
+  }
+  Nico: \xA1Claro! El jueves 26 tengo disponibilidad en estos horarios:
 
-User: "\xBFAceptan mascotas? \xBFY tiene cochera?"
-Contexto: La informaci\xF3n no menciona mascotas, pero s\xED dice que tiene cochera.
-Pensamiento: 
-- S\xE9 lo de la cochera: S\xED tiene.
-- No s\xE9 lo de las mascotas: Debo usar la frase obligatoria. 
-- Registro "Aceptan mascotas" como duda pendiente.
-Respuesta: "tiene cochera fija. lo de las mascotas no lo tengo ac\xE1 ahora, pero si quer\xE9s te lo confirmo durante la visita \u{1F44C} \xBFte gustar\xEDa ir a verla?"
+  - 10:00 a.m.
+  - 2:00 p.m.
 
-User: "Dale, el jueves a las 10hs"
-Pensamiento: El usuario confirma. Debo llamar a 'create_calendar_event' incluyendo ["\xBFAceptan mascotas?"] en 'pendingQuestions'.
+  \xBFTe gustar\xEDa coordinar una visita?
+  
+  ### EJEMPLO 4: Usuario propone d\xEDa de forma coloquial
+  Cliente: "mepa que me va a quedar mejor, el viernes. tenes alg\xFAn horario disponible para ese d\xEDa?"
+  <thinking>El usuario menciona "el viernes". Esto es una consulta de agenda (PRIORIDAD ALTA), ESTO NO ES UNA DUDA DE LA PROPIEDAD. Debo usar 'get_available_schedule' con targetDay="VIERNES".</thinking>
+  [SISTEMA: Tool Output get_available_schedule]
+  { "disponible": true, "horarios": ["10:00 a.m.", "1:00 p.m."] }
+  Nico: \xA1Dale! Para el viernes tengo a las 10:00 a.m. o a la 1:00 p.m., \xBFcu\xE1l prefer\xEDs? \u{1F60A}
 
-### EJEMPLO 3: Usuario propone horario puntual 
-**User**: "Dale, \xBFpodr\xEDa ser el jueves 5 a las 10:30 hs?"
-**Pensamiento**: El usuario dio una fecha y hora exacta. Debo validar ese hueco espec\xEDficamente. No debo decir que no sin consultar.
-**Acci\xF3n**: Ejecuta get_available_schedule (par\xE1metros: fecha="jueves 5", hora="10:30")
-**Resultado Herramienta**: { "disponible": true }
-**Nico**: "\xA1Dale! El jueves 5 a las 10:30 hs est\xE1 perfecto, me queda libre. \xBFMe pas\xE1s un email as\xED ya te mando la confirmaci\xF3n?"
- `;
+  ### EJEMPLO 5: Usuario no cumple requisitos y es derivado
+  User: "no cumplo con los requisitos"
+  <thinking>
+  El usuario no cumple con los requisitos para alquilar. 
+  Debo aplicar el protocolo de derivaci\xF3n y preguntarle si quiere que un humano lo contacte.
+  </thinking>
+  Nico: Entiendo, ${datos2.nombre}. En este caso, podr\xEDamos ver si hay alguna otra opci\xF3n que se ajuste a tus posibilidades. \xBFTe gustar\xEDa que te contacte alguien del equipo para explorar alternativas?
+  User: "dale"
+  <thinking>
+  El usuario acept\xF3 ser contactado. Debo ejecutar la herramienta 'notificar_equipo' con su nombre y el motivo.  
+  </thinking>
+  [SISTEMA: Tool Output notificar_equipo]
+  {
+    "status": "success"
+  }
+  Nico: \xA1Perfecto ${datos2.nombre}! Ya le pas\xE9 tus datos al equipo. Se van a estar comunicando con vos muy pronto.
+  
+  ### EJEMPLO 6: Usuario pregunta por otro d\xEDa con lenguaje informal
+  Cliente: "para el viernes tenes algo?? , me queda mejor"
+  <thinking>El usuario menciona "viernes" y pregunta si "tengo algo". Esto es una consulta de agenda (PRIORIDAD ALTA), NO una caracter\xEDstica de la propiedad. NUNCA debo decir que no tengo la informaci\xF3n. Debo ejecutar 'get_available_schedule' con targetDay="VIERNES".</thinking>
+  [SISTEMA: Tool Output get_available_schedule]
+  { "disponible": false, "horarios_alternativos": ["lunes a las 10:00 a.m."] }
+  Nico: Para el viernes ya no me quedan lugares, pero \xBFte servir\xEDa el lunes a las 10:00 a.m.? \u{1F60A}
+
+
+</examples>
+`;
   } else if (opType === "VENDER") {
     operationalProtocol = `
 III. PROTOCOLO OPERATIVO (FLUJO OBLIGATORIO)
 1. FASE DE IDENTIFICACI\xD3N (BLOQUEO)
-Estado Actual: ${hasName ? "Nombre conocido: " + datos.nombre : "Nombre desconocido"}
+Estado Actual: ${hasName ? "Nombre conocido: " + datos2.nombre : "Nombre desconocido"}
 
 Regla Estricta: Si el nombre es desconocido, tu \xFAnica misi\xF3n es obtenerlo. No hables de la propiedad, ni de requisitos, ni de horarios.
 
 Acci\xF3n: ${momentoDia} ", nico de fausti propiedades por ac\xE1. dale, te ayudo con esa info, \xBFme podr\xEDas decir tu nombre y apellido para agendarte?"
 
-"Perfecto ${datos.nombre}, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?"
+"Perfecto ${datos2.nombre}, est\xE1 disponible para visitar. Quer\xE9s que coordinemos una visita?"
 
 IV \u{1F3E0} PROTOCOLO DE VENTA
 1. Si el usuario confirma que quiere verla.
 
 2. **Acci\xF3n INMEDIATA**: NO PREGUNTES. EJECUTA: **potential_sale_email**
 
-3. **Cierre**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ""} \u{1F60A}"
+3. **Cierre**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos2.nombre || ""} \u{1F60A}"
 
 # V. EJEMPLOS DE \xC9XITO (FEW-SHOT)
 
@@ -1970,19 +2178,20 @@ User: "S\xED, quiero ir a verla"
 Pensamiento: El usuario quiere verla. Ejecuto 'potential_sale_email' y cierro la conversaci\xF3n seg\xFAn protocolo.
 [SISTEMA: Ejecuta tool 'potential_sale_email']
 Nico: Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias Juan P\xE9rez \u{1F60A} `;
+    ejemplosFewShot = "";
   }
   let cierre = "";
   if (opType === "ALQUILAR") {
     cierre = `
-# VI. CIERRE DE CONVERSACI\xD3N
-- Si agradece: "Gracias a vos ${datos.nombre}. Cualquier cosa me escrib\xEDs."
-- Si se despide: "Que tengas muy buen d\xEDa ${datos.nombre} \u{1F44B}"
+  # VI. CIERRE DE CONVERSACI\xD3N
+  - Si agradece: "Gracias a vos ${datos2.nombre}. Cualquier cosa me escrib\xEDs."
+  - Si se despide: "Que tengas muy buen d\xEDa ${datos2.nombre} \u{1F44B}"
 
     `;
   } else if (opType === "VENDER") {
     cierre = `
-# VI. CIERRE DE CONVERSACI\xD3N
-- **Respuesta**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos.nombre || ""} \u{1F60A}"
+  # VI. CIERRE DE CONVERSACI\xD3N
+  - **Respuesta**: "Genial, en el transcurso del d\xEDa te vamos a estar contactando para coordinar la visita. Muchas gracias ${datos2.nombre || ""} \u{1F60A}"
     `;
   }
   return `
@@ -2000,29 +2209,30 @@ Act\xFAa como una persona real escribiendo r\xE1pido por WhatsApp:
 - **CLIVAJES**: Si tienes que decir varias cosas, usa oraciones breves y directas.
 
 ## Reglas Operativas
-- **Regla Suprema**: Tu comportamiento depende 100% del "TIPO DE OPERACI\xD3N".
 - **L\xEDmite de Informaci\xF3n**: SOLO puedes hablar sobre la informaci\xF3n que tienes en "Informaci\xF3n Propiedad" y "CONTEXTO ACTUAL DEL LEAD". NO inventes ni asumas datos.
 - **Respuesta Faltante**: Si te consultan por algo que no est\xE1 en la informaci\xF3n provista, DEBES responder exactamente: "No tengo esa informaci\xF3n ahora, pero si quer\xE9s te la confirmo durante la visita \u{1F44C}"
-**Registro**: Debes recordar internamente esa pregunta para incluirla en el campo ${datos.pendingQuestions} cuando ejecutes 'create_calendar_event'.
+**Registro**: Debes recordar internamente esa pregunta para incluirla en el campo ${datos2.pendingQuestions} cuando ejecutes 'create_calendar_event'.
 - **Privacidad**:
   1. TERCEROS: JAM\xC1S reveles datos de otros.
   2. USUARIO: Si pregunta "\xBFQu\xE9 sabes de m\xED?", responde SOLO con lo que ves en "DATOS ACTUALES".
   3. Si te piden informaci\xF3n que no corresponde revelar, respond\xE9: "No tengo acceso a esa informaci\xF3n."
 
 # II. CONTEXTO ACTUAL DEL LEAD
-- **Nombre**: ${datos.nombre || "Desconocido"}
-- **Apellido**: ${datos.apellido || "Desconocido"}
-- **Email**: ${datos.email || "Pendiente"}
-- **Tel\xE9fono**: ${datos.telefono || "Pendiente"}
-- **Link Propiedad**: ${datos.link || "Pendiente"}
+- **Nombre**: ${datos2.nombre || "Desconocido"}
+- **Apellido**: ${datos2.apellido || "Desconocido"}
+- **Email**: ${datos2.email || "Pendiente"}
+- **Tel\xE9fono**: ${datos2.telefono || "Pendiente"}
+- **Link Propiedad**: ${datos2.link || "Pendiente"}
 - **Operaci\xF3n**: ${opType}
-- **Domicilio Propiedad**: ${datos.propertyAddress || "Pendiente"}
-- **Informaci\xF3n Propiedad**: ${datos.propiedadInfo || "Pendiente"} 
-- **Mascotas**: ${datos.mascotas || "No especificado"}
-- **Requisitos**: ${datos.requisitos || "No especificado"}
-- **Preguntas Pendientes**: ${datos.pendingQuestions || "Ninguna"}
+- **Domicilio Propiedad**: ${datos2.propertyAddress || "Pendiente"}
+- **Informaci\xF3n Propiedad**: ${datos2.propiedadInfo || "Pendiente"} 
+- **Mascotas**: ${datos2.mascotas || ""}
+- **Requisitos**: ${datos2.requisitos || ""}
+- **Preguntas Pendientes**: ${datos2.pendingQuestions || "Ninguna"}
 
 ${operationalProtocol}
+
+${ejemplosFewShot}
 
 # SALUDO INICIAL (Solo si es el primer mensaje):
 "${saludoSugerido}"
@@ -2118,6 +2328,10 @@ const extractRequirementsStep = createStep({
     const formatterResult = await realEstatePropertyFormatterTool.execute({
       keywordsZonaProp: description
     });
+    if (!("formattedText" in formatterResult)) {
+      console.error("\u274C [Step: extract-requirements] Validation Failed:", formatterResult);
+      throw new Error("Failed to extract requirements");
+    }
     console.log("\u2705 [Step: extract-requirements] Completed analysis.");
     return {
       formattedText: formatterResult.formattedText,
@@ -2242,7 +2456,6 @@ const mastra = new Mastra({
           const linksEncontrados = message?.match(urlRegex);
           const requestHash = `${userId || "anon"}_${message?.substring(0, 300)}`;
           if (activeProcessing.has(requestHash)) {
-            console.log(`\u26A0\uFE0F Request duplicado detectado (Hash: ${requestHash}). Ignorando...`);
             return c.json({
               status: "ignored_duplicate"
             });
@@ -2251,7 +2464,6 @@ const mastra = new Mastra({
           setTimeout(() => activeProcessing.delete(requestHash), 15e3);
           let ackResponse = void 0;
           if (userId && body.custom_fields) {
-            console.log("\u26A1 Enviando ACK inmediato a Manychat (PRE-DB) para evitar timeout/duplicados...");
             ackResponse = c.json({
               response_text: "",
               // Texto vacío para que Manychat no muestre nada y espere el Push
@@ -2325,7 +2537,6 @@ const mastra = new Mastra({
                     console.error(`\u274C Workflow failed: ${result.status}`);
                   } else if (result.result) {
                     const outputLogica = result.result;
-                    console.log("\u{1F4E6} Output Workflow recibido", outputLogica);
                     if (outputLogica.operacionTipo) {
                       propertyOperationType = outputLogica.operacionTipo;
                       finalContextData.operacionTipo = outputLogica.operacionTipo;
@@ -2347,7 +2558,6 @@ const mastra = new Mastra({
                   console.error("\u274C Workflow error:", workflowErr);
                 }
               }
-              console.log("\u{1F4DD} [PROMPT] Generando instrucciones con:", finalContextData);
               const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase());
               const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
               const response = await agent.generate(message, {
@@ -2371,8 +2581,6 @@ const mastra = new Mastra({
                     await sleep(randomDelay);
                   }
                 }
-              } else {
-                console.log("\u2139\uFE0F Respuesta generada (modo background), pero cliente no es Manychat/Async.");
               }
             } catch (bgError) {
               console.error("\u{1F4A5} Error en proceso background:", bgError);
@@ -2411,7 +2619,6 @@ async function sendToManychat(subscriberId, text) {
     "Content-Type": "application/json"
   };
   try {
-    console.log(`1\uFE0F\u20E3 [Manychat] Setting Custom Field 'response1' for ${subscriberId}...`);
     const setFieldRes = await axios.post("https://api.manychat.com/fb/subscriber/setCustomFields", {
       subscriber_id: Number(subscriberId),
       // Ensure number if needed, though string often works. API docs say subscriber_id: 0 (schema), so number usually.
@@ -2422,8 +2629,6 @@ async function sendToManychat(subscriberId, text) {
     }, {
       headers
     });
-    console.log("\u2705 Custom Field Set:", setFieldRes.data);
-    console.log(`2\uFE0F\u20E3 [Manychat] Sending Flow 'content20250919131239_298410' to ${subscriberId}...`);
     await sleep(2);
     const sendFlowRes = await axios.post("https://api.manychat.com/fb/sending/sendFlow", {
       subscriber_id: Number(subscriberId),
@@ -2431,10 +2636,69 @@ async function sendToManychat(subscriberId, text) {
     }, {
       headers
     });
-    console.log("\u2705 Flow Sent:", sendFlowRes.data);
   } catch (err) {
     console.error("\u274C Error interacting with Manychat:", JSON.stringify(err.response?.data || err.message, null, 2));
   }
 }
 
-export { mastra };
+async function runMigration() {
+      const storage = mastra.getStorage();
+
+      if (!storage) {
+        console.log(JSON.stringify({
+          success: false,
+          alreadyMigrated: false,
+          duplicatesRemoved: 0,
+          message: 'Storage not configured. Please configure storage in your Mastra instance.',
+        }));
+        process.exit(1);
+      }
+
+      // Access the observability store directly from storage.stores
+      const observabilityStore = storage.stores?.observability;
+
+      if (!observabilityStore) {
+        console.log(JSON.stringify({
+          success: false,
+          alreadyMigrated: false,
+          duplicatesRemoved: 0,
+          message: 'Observability storage not configured. Migration not required.',
+        }));
+        process.exit(0);
+      }
+
+      // Check if the store has a migrateSpans method
+      if (typeof observabilityStore.migrateSpans !== 'function') {
+        console.log(JSON.stringify({
+          success: false,
+          alreadyMigrated: false,
+          duplicatesRemoved: 0,
+          message: 'Migration not supported for this storage backend.',
+        }));
+        process.exit(1);
+      }
+
+      try {
+        // Run the migration - migrateSpans handles everything internally
+        const result = await observabilityStore.migrateSpans();
+
+        console.log(JSON.stringify({
+          success: result.success,
+          alreadyMigrated: result.alreadyMigrated,
+          duplicatesRemoved: result.duplicatesRemoved,
+          message: result.message,
+        }));
+
+        process.exit(result.success ? 0 : 1);
+      } catch (error) {
+        console.log(JSON.stringify({
+          success: false,
+          alreadyMigrated: false,
+          duplicatesRemoved: 0,
+          message: error instanceof Error ? error.message : 'Unknown error during migration',
+        }));
+        process.exit(1);
+      }
+    }
+
+    runMigration();

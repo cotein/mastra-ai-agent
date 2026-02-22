@@ -1,7 +1,7 @@
 {
   "name": "fausti-agent",
   "version": "1.0.0",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "test": "vitest run",
     "dev": "NODE_OPTIONS=\"--require ${PWD}/src/polyfill.js\" mastra dev",
@@ -10,10 +10,11 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.7",
-    "@mastra/core": "^1.0.0-beta.19",
-    "@mastra/memory": "^1.0.0-beta.10",
-    "@mastra/openai": "^1.0.1-alpha.48",
-    "@mastra/pg": "^1.0.0-beta.11",
+    "@mastra/core": "^1.2.0",
+    "@mastra/evals": "^1.1.0",
+    "@mastra/memory": "^1.2.0",
+    "@mastra/observability": "^1.2.0",
+    "@mastra/pg": "^1.2.0",
     "@supabase/supabase-js": "^2.78.0",
     "ai": "^6.0.24",
     "axios": "^1.13.2",
@@ -23,7 +24,7 @@
     "express": "^5.2.1",
     "googleapis": "^169.0.0",
     "h3": "^1.15.4",
-    "mastra": "^1.0.0-beta.14",
+    "mastra": "^1.2.0",
     "openai": "^6.15.0",
     "zod": "^3.24.1"
   },

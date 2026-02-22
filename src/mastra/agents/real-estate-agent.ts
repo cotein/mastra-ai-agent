@@ -5,6 +5,9 @@ import { storage, vectorStore } from './../storage';
 import { TokenLimiter, PromptInjectionDetector, ModerationProcessor, SystemPromptScrubber } from "@mastra/core/processors";
 import { WhatsAppStyleProcessor } from "../processors/whatsapp-style-processor";
 import { OperacionTipo } from "./../../types";
+// Para la versión estándar basada en LLM
+import { createFaithfulnessScorer } from "@mastra/evals/scorers/prebuilt";
+
 // Herramientas
 import { 
   createCalendarEvent, 
@@ -21,15 +24,27 @@ import { notificarEquipoTool } from '../tools/notificar_equipo';
 // Prompt de respaldo
 const DEFAULT_SYSTEM_PROMPT = `Eres un asistente inmobiliario de Mastra. Esperando instrucciones de contexto...`;
 
+const faithfulnessScorer = createFaithfulnessScorer({
+  model: openai("gpt-4o-mini"), // Modelo utilizado como "juez"
+});
+
 export const getRealEstateAgent = async (userId: string, instructionsInjected?: string, operacionTipo?: OperacionTipo) => {
   
-  // CONFIGURACIÓN DE MEMORIA
   const memory = new Memory({
     storage,
     vector: vectorStore,
     embedder: openai.embedding("text-embedding-3-small"),
     options: {
-      lastMessages: 31,
+      lastMessages: 10, // Lo reducimos porque la memoria observacional se encarga del resto
+      observationalMemory: {
+        model: openai("gpt-4o-mini"), 
+        observation: {
+          messageTokens: 30000, 
+        },
+        reflection: {
+          observationTokens: 40000, 
+        }
+      },
       semanticRecall: { 
         topK: 3, 
         messageRange: 3,
@@ -51,7 +66,7 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
       },
       generateTitle: true,
     },
-  });
+});
 
   const finalInstructions = instructionsInjected || DEFAULT_SYSTEM_PROMPT;
 
@@ -77,6 +92,13 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
     name: "Real Estate Agent",
     instructions: finalInstructions,
     model: openai('gpt-4o'), 
+    scorers: {
+      fidelidad: {
+        scorer: faithfulnessScorer,
+        // sampling rate: 1 = evalúa el 100% de las respuestas
+        sampling: { type: "ratio", rate: 1 },
+      },
+    },
     memory,
     tools: selectedTools,
     inputProcessors: [
