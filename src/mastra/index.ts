@@ -229,9 +229,12 @@ export const mastra = new Mastra({
                                 }
                       
                                 try {
+                                    console.log("🟡 PASO 1: Iniciando Workflow...");
+
                                     const workflow = mastra.getWorkflow('propertyWorkflow');
                                     const run = await workflow.createRun();
                                     const result = await run.start({ inputData: { url } });
+                                    console.log("🟢 PASO 2: Workflow terminado!");
 
                                     if (result.status !== 'success') {
                                         console.error(`❌ Workflow failed: ${result.status}`);
@@ -270,15 +273,19 @@ export const mastra = new Mastra({
                         const contextoAdicional = dynamicInstructions(finalContextData, propertyOperationType.toUpperCase() as OperacionTipo);
                         
                         // D. CREACIÓN DINÁMICA DEL AGENTE
-                        const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo );
+                        console.log("🟡 PASO 3: Creando agente dinámico...");
+                        const agent = await getRealEstateAgent(userId, contextoAdicional, finalContextData.operacionTipo);
+                        console.log("🟢 PASO 4: Agente creado!");
                         
+                        console.log("🟡 PASO 5: Generando respuesta...");
                         const response = await agent.generate(message, {
                             memory: {
                                 thread: currentThreadId,
                                 resource: userId
                             }
                         }); 
-
+                        console.log("🟢 PASO 6: Respuesta generada!");
+                        
                         // Inspeccionar resultados AQUÍ, después del await
                         if (response.toolResults && response.toolResults.length > 0) {
                             response.toolResults.forEach((toolRes: any) => {
