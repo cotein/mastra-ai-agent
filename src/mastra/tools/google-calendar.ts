@@ -145,9 +145,13 @@ export const createCalendarEvent = createTool({
             }
         } else {
             const dateDescription = input.end ? `Inicio: ${input.start}. Fin: ${input.end}` : input.start;
-            const parseResult = await llmDateParser.execute!({ dateDescription });
-            smartStart = parseResult.start;
-            smartEnd = parseResult.end!; 
+            const parseResult = await llmDateParser.execute!({ dateDescription }, {});
+            if ('start' in parseResult && parseResult.start) {
+                smartStart = parseResult.start;
+                smartEnd = parseResult.end!;
+            } else {
+                throw new Error("Date parsing failed");
+            }
         } 
 
         const { start, end } = getSanitizedDates(smartStart, smartEnd);

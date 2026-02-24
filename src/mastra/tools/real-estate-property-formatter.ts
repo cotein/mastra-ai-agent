@@ -14,9 +14,10 @@ export const realEstatePropertyFormatterTool = createTool({
     keywordsZonaProp: z.string().describe("Descripción bruta de la propiedad"),
   }),
   outputSchema: z.object({
-    formattedText: z.string().describe("Requisitos y Mascotas extraídos"),
+    requisitos: z.string().describe("Requisitos de la propiedad"),
+    mascotas: z.string().describe("Política de mascotas"),
   }),
-  execute: async ({ keywordsZonaProp }) => {
+  execute: async ({ keywordsZonaProp }, _context) => {
     console.log("   [Tool] 🛠️  Ejecutando extracción técnica...");
 
     const systemPrompt = `
@@ -24,46 +25,14 @@ export const realEstatePropertyFormatterTool = createTool({
     Eres un Arquitecto de Datos Inmobiliarios. Tu misión es transformar descripciones desordenadas en datos estructurados de requisitos y mascotas.
 
     # REGLAS DE ORO
-    1. Si no hay mención de mascotas, el campo Mascotas debe ser estrictamente: Sin descripción disponible.
+    1. Si no hay mención de mascotas, no hagas mención de mascotas.
     2. Limpia todo el ruido legal de "medidas aproximadas" o "fotos no vinculantes".
     3. Mantén la literalidad en los requisitos de garantía e ingresos.
 
-    # EJEMPLOS DE APRENDIZAJE
-    <examples>
-      <example>
-        <input>
-          "Departamento monoambiente... Alquiler: $390.000 + Expensas. Requisitos: Garantía propietaria con justificación de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.). El locatario deberá gestionar un seguro de incendio sobre el inmueble. - Nota importante: Toda la información y medidas provistas son aproximadas..."
-        </input>
-        <output>
-          Requisitos: Garantía propietaria con justificación de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.). El locatario deberá gestionar un seguro de incendio sobre el inmueble.
-          Mascotas: Sin descripción disponible
-        </output>
-      </example>
-
-      <example>
-        <input>
-          "Casa en alquiler... $1.400.000. Requisitos: Garantía propietaria con justificación de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio. - Nota importante: Los gastos expresados refieren a la última información recabada..."
-        </input>
-        <output>
-          Requisitos: Garantía propietaria con justificación de ingresos de garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio.
-          Mascotas: Sin descripción disponible
-        </output>
-      </example>
-
-      <example>
-        <input>
-          "Departamento 3 ambientes... NO SE PERMITEN MASCOTAS. SE ENTREGA RECIÉN PINTADO!!! Alquiler: $790.000. Requisitos: Garantía propietaria con justificación de ingresos de inquilinos y garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio."
-        </input>
-        <output>
-          Requisitos: Garantía propietaria con justificación de ingresos de inquilinos y garantes (recibo de sueldo, monotributo, ganancias, etc.) y seguro de incendio.
-          Mascotas: NO SE PERMITEN MASCOTAS. SE ENTREGA RECIÉN PINTADO!!!
-        </output>
-      </example>
-    </examples>
-
-    # FORMATO DE RESPUESTA FINAL
-    Requisitos: [Texto]
-    Mascotas: [Texto o Sin descripción disponible]
+    # FORMATO DE SALIDA (JSON)
+    Responde ÚNICAMENTE con un objeto JSON válido con las siguientes claves:
+    - requisitos: Texto con los requisitos de garantía, ingresos, etc.
+    - mascotas: Texto con la política de mascotas o cadena vacía si no se menciona.
     `;
 
     try {
@@ -73,11 +42,16 @@ export const realEstatePropertyFormatterTool = createTool({
           { role: "user", content: `Extrae los datos de este texto:\n\n${keywordsZonaProp}` },
         ],
         model: "gpt-4o-mini",
-        temperature: 0, // Determinismo puro para extracción de datos
+        temperature: 0,
+        response_format: { type: "json_object" },
       });
 
+      const content = completion.choices[0]?.message?.content || "{}";
+      const result = JSON.parse(content);
+
       return {
-        formattedText: completion.choices[0]?.message?.content || "No se pudo procesar.",
+        requisitos: result.requisitos || "No especificado",
+        mascotas: result.mascotas || "",
       };
     } catch (error: any) {
       console.error("   [Tool] ❌ Error:", error.message);

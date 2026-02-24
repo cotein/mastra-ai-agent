@@ -16,8 +16,8 @@ const scrapeStep = createStep({
   }),
   execute: async ({ inputData }) => {
     await sleep(1);
-    const result = await apifyScraperTool.execute(
-      { url: inputData.url },
+    const result = await apifyScraperTool.execute!(
+      { url: inputData.url }, {}
     );
 
     if (!("data" in result)) {
@@ -43,11 +43,9 @@ const extratDataFromScrapperTool = createStep({
     keywords: z.string(),
     text: z.string(),
   }),
-  maxRetries: 2,
-  retryDelay: 2500, 
   execute: async ({ inputData, mastra }) => {
     try {
-      const result = await propertyDataProcessorTool.execute(
+      const result = await propertyDataProcessorTool.execute!(
         {rawData: inputData.data},
         { mastra }
       );
@@ -90,17 +88,8 @@ const cleanDataStep = createStep({
   }),
   execute: async ({ inputData }) => {
     
-    // Llamamos a la herramienta de formateo
-    const result = await realEstatePropertyFormatterTool.execute({
-        keywordsZonaProp: inputData.text
-    });
-
-    if (!("formattedText" in result)) {
-        throw new Error("Validation failed in realEstatePropertyFormatterTool");
-    }
-
+    const finalFormattedText = inputData.text;
     let finalAddress = inputData.address;
-    const finalFormattedText = result.formattedText || inputData.text;
 
     // Fallback: Si no hay address estructurada, intentar sacarla del texto formateado (LLM)
     if (!finalAddress || finalAddress.trim() === "") {

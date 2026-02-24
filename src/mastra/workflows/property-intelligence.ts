@@ -27,9 +27,9 @@ const extractAddressStep = createStep({
   outputSchema: extractAddressOutputSchema,
   execute: async ({ inputData }) => {
     console.log("📍 [Step: extract-address] Starting with URL:", inputData.url);
-    const result = await extractAddressFromUrlTool.execute({
+    const result = await extractAddressFromUrlTool.execute!({
       url: inputData.url,
-    });
+    }, {});
     if (!('filters' in result)) {
         console.error("❌ [Step: extract-address] Failed:", result);
         throw new Error("Failed to extract address filters");
@@ -63,7 +63,7 @@ const tokkoSearchStep = createStep({
   outputSchema: tokkoSearchOutputSchema,
   execute: async ({ inputData }) => {
     console.log("📍 [Step: tokko-search] Starting search with filters:", JSON.stringify(inputData.filters));
-    const result = await tokkoPropertySearchTool.execute(inputData);
+    const result = await tokkoPropertySearchTool.execute!(inputData, {});
     
     if (!('data' in result)) {
          console.error("❌ [Step: tokko-search] Failed:", result);
@@ -86,7 +86,8 @@ const extractRequirementsInputSchema = z.object({
 });
 
 const extractRequirementsOutputSchema = z.object({
-  formattedText: z.string(),
+  requisitos: z.string(),
+  mascotas: z.string(),
   rawProperty: z.any(),
 });
 
@@ -112,18 +113,19 @@ const extractRequirementsStep = createStep({
     console.log(`ℹ️ [Step: extract-requirements] Property ID: ${property.id}, Description Length: ${description.length}`);
 
     console.log("   [Workflow] Extracting requirements from description...");
-    const formatterResult = await realEstatePropertyFormatterTool.execute({
+    const formatterResult = await realEstatePropertyFormatterTool.execute!({
       keywordsZonaProp: description,
-    });
+    }, {});
 
-    if (!('formattedText' in formatterResult)) {
+    if (!('requisitos' in formatterResult)) {
       console.error("❌ [Step: extract-requirements] Validation Failed:", formatterResult);
       throw new Error("Failed to extract requirements");
     }
 
     console.log("✅ [Step: extract-requirements] Completed analysis.");
     return {
-      formattedText: formatterResult.formattedText,
+      requisitos: formatterResult.requisitos,
+      mascotas: formatterResult.mascotas,
       rawProperty: property,
     } as z.infer<typeof extractRequirementsOutputSchema>;
   },
@@ -132,7 +134,8 @@ const extractRequirementsStep = createStep({
 // Step 4: Transform Output
 // Step 4: Transform Output
 const transformOutputInputSchema = z.object({
-  formattedText: z.string(),
+  requisitos: z.string(),
+  mascotas: z.string(),
   rawProperty: z.any(),
 });
 
@@ -151,19 +154,8 @@ const transformOutputStep = createStep({
   execute: async ({ inputData }) => {
     console.log("📍 [Step: transform-output] Starting transformation...");
     const property = inputData.rawProperty;
-    const rawFormattedText = inputData.formattedText;
-
-    // Parse requirements and pets
-    let requisitos = "No especificado";
-    let mascotas = "No especificado";
-
-    const reqMatch = rawFormattedText.match(
-      /Requisitos:\s*([\s\S]*?)(?=\n\s*Mascotas:|$)/i
-    );
-    if (reqMatch) requisitos = reqMatch[1].trim();
-
-    const petsMatch = rawFormattedText.match(/Mascotas:\s*([\s\S]*)/i);
-    if (petsMatch) mascotas = petsMatch[1].trim();
+    const requisitos = inputData.requisitos;
+    const mascotas = inputData.mascotas;
 
     // Determine operation type
     let operacionTipo = "";
