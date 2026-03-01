@@ -108,12 +108,12 @@ export const getRealEstateAgent = async (userId: string, instructionsInjected?: 
         new PromptInjectionDetector({
           model: openai('gpt-4o-mini'),
           threshold: 0.8,
-          strategy: 'block',
+          strategy: 'warn',
         }),
         new ModerationProcessor({
             model: openai('gpt-4o-mini'),
             threshold: 0.7,
-            strategy: 'block', 
+            strategy: 'warn', 
         }),
         new TokenLimiter(3000), 
     ],
