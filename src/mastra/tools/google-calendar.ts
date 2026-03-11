@@ -4,7 +4,7 @@ import { google } from 'googleapis';
 import { naturalDateToISO8601 } from '../../helpers/date-converter';
 import { llmDateParser } from './llm-date-parser';
 
-const CALENDAR_ID = 'c.vogzan@gmail.com';
+const CALENDAR_ID = 'nicolas.fausti@gmail.com';
 
 
 /**

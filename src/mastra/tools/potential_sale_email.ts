@@ -29,7 +29,7 @@ export const potentialSaleEmailTool = createTool({
     const gmail = getGmail();
     console.log("🔧 Gmail client initialized");
 
-    const recipients = ["c.vogzan@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
+    const recipients = ["nicolas.fausti@gmail.com", "faustiprop@gmail.com", "diego.barrueta@gmail.com"];
     
     const telLimpio = input.telefono_cliente?.replace(/[^0-9]/g, '');
 
