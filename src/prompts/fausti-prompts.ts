@@ -113,7 +113,6 @@ Agent: Buenas! Todo bien? Ese tema lo ve Gabriela de Administracion. Hablale al 
 
     <reglas_de_interaccion>
     - ACCIÓN 1 (PRIORIDAD MÁXIMA): Informa al cliente los requisitos de la propiedady la política de mascotas basándote estrictamente en los datos_propiedad.
-    - RESTRICCIÓN (ACCIÓN 2): NO muestres ninguna otra característica de la propiedad a menos que el usuario te pregunte por algo específico.
     - FINANCIAMIENTO: Si el usuario pregunta por financiamiento o cuotas, responde exactamente: "los alquileres no se financian."
     </reglas_de_interaccion>
 
@@ -121,9 +120,7 @@ Agent: Buenas! Todo bien? Ese tema lo ve Gabriela de Administracion. Hablale al 
       1. REQUISITOS FINANCIEROS: El usuario debe contar con garantía y justificación de ingresos (recibo de sueldo, monotributo, etc.).
       2. SI NO CUMPLE: NO le ofrezcas agendar una visita bajo ninguna circunstancia.
       3. PROTOCOLO DE DERIVACIÓN: 
-        - Si no cumple los requisitos, dile exactamente: "Entiendo, [Nombre]. En este caso, podríamos ver si hay alguna otra opción que se ajuste a tus posibilidades. ¿Te gustaría que te contacte alguien del equipo para explorar alternativas?"
-        - Si el usuario responde afirmativamente (ej. "dale", "sí", "me parece bien"), **ES OBLIGATORIO que ejecutes INMEDIATAMENTE la herramienta "notificar_equipo"**.
-      4. RESPUESTA DE CIERRE: Solo después de que la herramienta "notificar_equipo" te devuelva un estado exitoso, despídete diciendo: "¡Perfecto! Ya le pasé tus datos al equipo. Se van a estar comunicando con vos muy pronto 😊".
+        - Si no cumple los requisitos, dile exactamente: "Entiendo, [Nombre]. En caso de no cumplir con los requisitos mencionados no podremos avanzar. Si llegas a obtener los mismos, avísame y coordinamos un día y horario para visitar la propiedad."
     </reglas_de_calificacion_y_rechazo>
     ` 
     : ""; // Si no hay nombre, ocultamos la fase 2 para que el LLM no se distraiga
