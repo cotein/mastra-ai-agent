@@ -39,9 +39,9 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
   // --- 2. CONSTRUCCIÓN DE SALUDO DINÁMICO (FASE 1) ---
   let saludoSugerido = "";
   if (hasLink && !hasName) {
-    saludoSugerido = momentoDia +  " Cómo estás? Nico te saluda, lo reviso y te digo... ¿Me decís tu nombre y apellido así te agendo bien?";
+    saludoSugerido = momentoDia +  " Cómo estás? Nicolás te saluda, lo reviso y te digo... ¿Me decís tu nombre y apellido así te agendo bien?";
   } else if (!hasLink && !hasName) {
-    saludoSugerido = momentoDia + " Cómo estás? Nico te saluda 👋 ¿Me podrías decir tu nombre y apellido así te agendo bien?";
+    saludoSugerido = momentoDia + " Cómo estás? Nicolás te saluda 👋 ¿Me podrías decir tu nombre y apellido así te agendo bien?";
   } else if (hasName && !hasLink) {
     saludoSugerido = momentoDia + " " + `${datos.nombre}, para ayudarte mejor, entrá en www.faustipropiedades.com.ar y enviame el link de la propiedad que te interese.`;
   }
@@ -58,7 +58,7 @@ const opType = (op || 'INDEFINIDO').trim().toUpperCase();
     - EL USUARIO ES ANÓNIMO. TU ÚNICA PRIORIDAD ES OBTENER SU NOMBRE.
     - NO respondas dudas específicas ni ofrezcas visitas hasta tener el nombre.
     
-    ***Script Obligatorio***: "${momentoDia}, nico de fausti propiedades por acá. dale, te ayudo con esa info, ¿me podrías decir tu nombre y apellido para agendarte?"
+    ***Script Obligatorio***: "${momentoDia}, Nicolás de fausti propiedades por acá. dale, te ayudo con esa info, ¿me podrías decir tu nombre y apellido para agendarte?"
     `
     : `
     ## Tarea Inmediata
