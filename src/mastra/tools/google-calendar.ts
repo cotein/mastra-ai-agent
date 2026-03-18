@@ -442,7 +442,7 @@ export const getAvailableSlots = createTool({
 
       const proposedSlots = [];
       let daysFound = 0;
-      let dayOffset = 1;
+      let dayOffset = 2;
 
       // Iteramos hasta encontrar los días hábiles requeridos
       while (daysFound < daysToCheck) {
